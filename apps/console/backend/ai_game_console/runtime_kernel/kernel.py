@@ -1,10 +1,14 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import asdict
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from .action import Action, ActionExecution, ActionStatus, ActionType, ExecutionError
+from .checkpoint import Checkpoint, CheckpointDraft
 from .event import EventActor, RuntimeEvent, RuntimeEventDraft
+from .fact import Fact, FactScope, FactStatus
 from .observation import (
     ArtifactRef,
     ChannelAvailability,
@@ -19,7 +23,8 @@ from .ports import (
     RuntimeStorePort,
 )
 from .stage import Stage, StageStatus
-from .task import Task, TaskSource, TaskStatus
+from .task import FailureState, Task, TaskSource, TaskStatus
+from .verify import Verification, VerificationMethod, VerificationVerdict
 
 
 class RuntimeKernel:
@@ -317,6 +322,455 @@ class RuntimeKernel:
     def latest_observation(self, task_id: str) -> Observation | None:
         return self._store.latest_observation(task_id)
 
+    def propose_action(
+        self,
+        *,
+        task_id: str,
+        stage_id: str,
+        based_on_observation_id: str,
+        action_type: ActionType,
+        params: Mapping[str, object],
+        expected_outcome: str,
+        proposed_by_call_id: str,
+        action_id: str | None = None,
+    ) -> Action:
+        task = self._store.load_task(task_id)
+        stage = self._store.load_stage(task_id, stage_id)
+        observation = self._store.load_observation(based_on_observation_id)
+        if task.status is not TaskStatus.RUNNING or task.current_stage_id != stage_id:
+            raise ValueError("Action requires the Task's active RUNNING Stage")
+        if stage.status is not StageStatus.ACTIVE:
+            raise ValueError("Action requires an ACTIVE Stage")
+        if observation.task_id != task_id or task.last_observation_id != observation.id:
+            raise ValueError("Action must be based on the Task's latest Observation")
+        now = self._clock()
+        action = Action.propose(
+            action_id=action_id or self._id_factory(),
+            task_id=task_id,
+            stage_id=stage_id,
+            based_on_observation_id=based_on_observation_id,
+            action_type=action_type,
+            params=params,
+            expected_outcome=expected_outcome,
+            proposed_by_call_id=proposed_by_call_id,
+            proposed_at=now,
+        )
+        self._store.create_action(
+            action,
+            self._event(
+                "ActionProposed",
+                now,
+                task_id,
+                {
+                    "action_id": action.id,
+                    "stage_id": action.stage_id,
+                    "based_on_observation_id": action.based_on_observation_id,
+                    "type": action.type.value,
+                    "expected_outcome": action.expected_outcome,
+                },
+            ),
+        )
+        return action
+
+    def load_action(self, task_id: str, action_id: str) -> Action:
+        return self._store.load_action(task_id, action_id)
+
+    def list_actions(self, task_id: str) -> tuple[Action, ...]:
+        return self._store.list_actions(task_id)
+
+    def prepare_action_execution(self, *, task_id: str, action_id: str) -> Action:
+        """Return a dispatchable Action only when its decision Observation is current.
+
+        This isolated Kernel has no device executor. A future physical seam must call
+        this check immediately before dispatch and then durably report the outcome.
+        """
+        task = self._store.load_task(task_id)
+        action = self._store.load_action(task_id, action_id)
+        if action.status is not ActionStatus.PROPOSED:
+            raise ValueError("only a PROPOSED Action can be dispatched")
+        if task.status is not TaskStatus.RUNNING or task.current_stage_id != action.stage_id:
+            raise ValueError("Action no longer belongs to the active RUNNING Stage")
+        if task.last_observation_id != action.based_on_observation_id:
+            raise ValueError("Action decision is stale; a fresh decision is required")
+        checkpoint = self._store.latest_checkpoint(task_id)
+        if (
+            checkpoint is not None
+            and checkpoint.required_fresh_observation
+            and checkpoint.unresolved_action_ref == action.id
+        ):
+            raise ValueError("unresolved Action cannot be replayed; observe and decide again")
+        return action
+
+    def record_action_execution(
+        self,
+        *,
+        task_id: str,
+        action_id: str,
+        execution_id: str | None = None,
+        accepted: bool,
+        adapter_code: int | None,
+        error: ExecutionError | None,
+        started_at: str | None = None,
+        finished_at: str | None = None,
+        lease_ref: str | None = None,
+    ) -> ActionExecution:
+        before_task = self._store.load_task(task_id)
+        before_action = self._store.load_action(task_id, action_id)
+        now = self._clock()
+        execution = ActionExecution(
+            id=execution_id or self._id_factory(),
+            action_id=action_id,
+            device_id=before_task.device_id,
+            lease_ref=lease_ref,
+            accepted=accepted,
+            adapter_code=adapter_code,
+            error=error,
+            started_at=started_at or now,
+            finished_at=finished_at or now,
+        )
+        after_action = before_action.record_execution(execution)
+        after_task = before_task
+        if not accepted:
+            after_task = before_task.record_failure(
+                self._failure_state(
+                    before_task,
+                    code=error.code if error else "action_rejected",
+                    summary=error.message if error else "Action transport rejected",
+                    action_id=action_id,
+                    verdict="FAIL",
+                    at=execution.finished_at,
+                ),
+                at=execution.finished_at,
+            )
+        self._store.record_action_execution(
+            before_task=before_task,
+            after_task=after_task,
+            before_action=before_action,
+            after_action=after_action,
+            execution=execution,
+            event=self._event(
+                "ActionExecuted",
+                execution.finished_at,
+                task_id,
+                {
+                    "action_id": action_id,
+                    "execution_id": execution.id,
+                    "accepted": accepted,
+                    "adapter_code": adapter_code,
+                    "error_code": error.code if error else None,
+                },
+                actor=EventActor.DEVICE,
+            ),
+        )
+        return execution
+
+    def verify_action(
+        self,
+        *,
+        task_id: str,
+        action_id: str,
+        before_observation_id: str,
+        after_observation_id: str,
+        verdict: VerificationVerdict,
+        reason: str,
+        evidence_refs: Iterable[str],
+        method: VerificationMethod,
+        verification_call_id: str | None = None,
+        verified_facts: Iterable[Fact] = (),
+        complete_stage: bool = False,
+        progress_summary: str | None = None,
+        checkpoint_id: str | None = None,
+        verification_id: str | None = None,
+    ) -> tuple[Verification, Checkpoint | None]:
+        before_task = self._store.load_task(task_id)
+        before_action = self._store.load_action(task_id, action_id)
+        before_stage = self._store.load_stage(task_id, before_action.stage_id)
+        before_observation = self._store.load_observation(before_observation_id)
+        after_observation = self._store.load_observation(after_observation_id)
+        if before_action.status is not ActionStatus.EXECUTED:
+            raise ValueError("only an accepted Action can be verified")
+        if before_action.based_on_observation_id != before_observation_id:
+            raise ValueError("Verification before Observation must match the Action decision")
+        if (
+            before_observation.task_id != task_id
+            or after_observation.task_id != task_id
+            or before_task.last_observation_id != after_observation_id
+        ):
+            raise ValueError("Verification requires the Task's fresh current Observation")
+        now = self._clock()
+        verification = Verification.create(
+            verification_id=verification_id or self._id_factory(),
+            task_id=task_id,
+            stage_id=before_action.stage_id,
+            action_id=action_id,
+            before_observation_id=before_observation_id,
+            after_observation_id=after_observation_id,
+            verdict=verdict,
+            reason=reason,
+            evidence_refs=evidence_refs,
+            method=method,
+            verification_call_id=verification_call_id,
+            created_at=now,
+        )
+        after_action = before_action.record_verdict(verdict.value, at=now)
+        facts = tuple(verified_facts)
+        if verdict is not VerificationVerdict.SUCCESS:
+            if facts or complete_stage or checkpoint_id is not None:
+                raise ValueError("only SUCCESS Verification can commit Facts or Stage progress")
+            after_task = before_task.record_failure(
+                self._failure_state(
+                    before_task,
+                    code=(
+                        "verification_uncertain"
+                        if verdict is VerificationVerdict.UNCERTAIN
+                        else "verification_failed"
+                    ),
+                    summary=reason,
+                    action_id=action_id,
+                    verdict=verdict.value,
+                    at=now,
+                ),
+                at=now,
+            )
+            self._store.record_verification(
+                before_task=before_task,
+                after_task=after_task,
+                before_action=before_action,
+                after_action=after_action,
+                verification=verification,
+                event=self._event(
+                    "ActionVerified",
+                    now,
+                    task_id,
+                    {
+                        "action_id": action_id,
+                        "verification_id": verification.id,
+                        "verdict": verdict.value,
+                        "reason": reason,
+                    },
+                ),
+            )
+            return verification, None
+
+        if any(fact.task_id != task_id or fact.status is not FactStatus.VERIFIED for fact in facts):
+            raise ValueError("SUCCESS can commit only verified Facts for its Task")
+        after_stage: Stage | None = None
+        after_task = before_task.record_progress(at=now)
+        if complete_stage:
+            after_stage = before_stage.complete(
+                at=now,
+                evidence_refs=verification.evidence_refs,
+                progress_summary=progress_summary,
+            )
+            after_task = after_task.complete_current_stage(before_stage.id, at=now)
+            after_task = after_task.record_progress(at=now)
+
+        checkpoint: CheckpointDraft | None = None
+        if complete_stage or checkpoint_id is not None:
+            checkpoint = self._build_checkpoint_draft(
+                task=after_task,
+                stages=tuple(
+                    after_stage if stage.id == before_stage.id and after_stage else stage
+                    for stage in self._store.list_stages(task_id)
+                ),
+                verified_facts=(
+                    self._store.list_facts(task_id, verified_only=True) + facts
+                ),
+                reason="stage_completed" if complete_stage else "verified_progress",
+                checkpoint_id=checkpoint_id or self._id_factory(),
+                unresolved_action_ref=None,
+            )
+            after_task = after_task.record_checkpoint(checkpoint.id, at=now)
+
+        events: list[RuntimeEventDraft] = [
+            self._event(
+                "ActionVerified",
+                now,
+                task_id,
+                {
+                    "action_id": action_id,
+                    "verification_id": verification.id,
+                    "verdict": verdict.value,
+                    "reason": reason,
+                },
+            )
+        ]
+        events.extend(
+            self._event(
+                "FactAdded",
+                now,
+                task_id,
+                {
+                    "fact_id": fact.id,
+                    "key": fact.key,
+                    "status": fact.status.value,
+                    "source_refs": list(fact.source_refs),
+                },
+            )
+            for fact in facts
+        )
+        if after_stage is not None:
+            events.append(
+                self._event(
+                    "StageCompleted",
+                    now,
+                    task_id,
+                    {
+                        "stage_id": after_stage.id,
+                        "status": after_stage.status.value,
+                        "evidence_refs": list(after_stage.evidence_refs),
+                    },
+                )
+            )
+        if checkpoint is not None:
+            events.append(
+                self._event(
+                    "CheckpointCreated",
+                    now,
+                    task_id,
+                    {
+                        "checkpoint_id": checkpoint.id,
+                        "reason": checkpoint.resume_reason,
+                        "required_fresh_observation": checkpoint.required_fresh_observation,
+                    },
+                )
+            )
+        _, materialized_checkpoint = self._store.commit_successful_verification(
+            before_task=before_task,
+            after_task=after_task,
+            before_stage=before_stage,
+            after_stage=after_stage,
+            before_action=before_action,
+            after_action=after_action,
+            verification=verification,
+            facts=facts,
+            checkpoint=checkpoint,
+            events=tuple(events),
+        )
+        return verification, materialized_checkpoint
+
+    def create_checkpoint(
+        self,
+        *,
+        task_id: str,
+        reason: str,
+        checkpoint_id: str | None = None,
+        unresolved_action_ref: str | None = None,
+    ) -> Checkpoint:
+        before_task = self._store.load_task(task_id)
+        draft = self._build_checkpoint_draft(
+            task=before_task,
+            stages=self._store.list_stages(task_id),
+            verified_facts=self._store.list_facts(task_id, verified_only=True),
+            reason=reason,
+            checkpoint_id=checkpoint_id or self._id_factory(),
+            unresolved_action_ref=unresolved_action_ref,
+        )
+        after_task = before_task.record_checkpoint(draft.id, at=draft.created_at)
+        checkpoint, _ = self._store.create_checkpoint(
+            before_task=before_task,
+            after_task=after_task,
+            checkpoint=draft,
+            event=self._event(
+                "CheckpointCreated",
+                draft.created_at,
+                task_id,
+                {
+                    "checkpoint_id": draft.id,
+                    "reason": draft.resume_reason,
+                    "required_fresh_observation": draft.required_fresh_observation,
+                    "unresolved_action_ref": draft.unresolved_action_ref,
+                },
+            ),
+        )
+        return checkpoint
+
+    def latest_checkpoint(self, task_id: str) -> Checkpoint | None:
+        return self._store.latest_checkpoint(task_id)
+
+    def _build_checkpoint_draft(
+        self,
+        *,
+        task: Task,
+        stages: tuple[Stage, ...],
+        verified_facts: tuple[Fact, ...],
+        reason: str,
+        checkpoint_id: str,
+        unresolved_action_ref: str | None,
+    ) -> CheckpointDraft:
+        observation = (
+            self._store.load_observation(task.last_observation_id)
+            if task.last_observation_id is not None
+            else None
+        )
+        completed = tuple(
+            {
+                "id": stage.id,
+                "ordinal": stage.ordinal,
+                "objective": stage.objective,
+                "progress_summary": stage.progress_summary,
+                "completed_at": stage.completed_at,
+                "evidence_refs": list(stage.evidence_refs),
+            }
+            for stage in stages
+            if stage.status is StageStatus.COMPLETED
+        )
+        device_summary: dict[str, object] = {
+            "device_id": task.device_id,
+            "last_observation_id": task.last_observation_id,
+        }
+        if observation is not None:
+            device_summary.update(
+                {
+                    "foreground_app": observation.device_state.foreground_app,
+                    "connection_state": observation.device_state.connection_state.value,
+                    "captured_at": observation.captured_at,
+                }
+            )
+        progress = (
+            {"at": task.last_meaningful_progress_at}
+            if task.last_meaningful_progress_at is not None
+            else None
+        )
+        return CheckpointDraft(
+            id=checkpoint_id,
+            task_id=task.id,
+            goal=task.goal,
+            status_at_checkpoint=task.status,
+            current_stage_id=task.current_stage_id,
+            completed_stage_summaries=completed,
+            verified_facts=verified_facts,
+            device_summary=device_summary,
+            last_meaningful_progress=progress,
+            failure_summary=asdict(task.failure_state) if task.failure_state else None,
+            resume_reason=reason,
+            required_fresh_observation=unresolved_action_ref is not None,
+            unresolved_action_ref=unresolved_action_ref,
+            created_at=self._clock(),
+        )
+
+    @staticmethod
+    def _failure_state(
+        task: Task,
+        *,
+        code: str,
+        summary: str,
+        action_id: str,
+        verdict: str,
+        at: str,
+    ) -> FailureState:
+        previous = task.failure_state
+        return FailureState(
+            code=code,
+            summary=summary,
+            retry_count=(previous.retry_count if previous else 0) + 1,
+            no_progress_count=(previous.no_progress_count if previous else 0) + 1,
+            last_failed_action_id=action_id,
+            last_verdict=verdict,
+            recoverable=True,
+            updated_at=at,
+        )
+
     def _cleanup_artifacts(self, artifacts: list[ArtifactRef]) -> None:
         if self._artifact_store is None:
             return
@@ -335,11 +789,13 @@ class RuntimeKernel:
         created_at: str,
         task_id: str,
         payload: dict[str, object],
+        *,
+        actor: EventActor = EventActor.RUNTIME,
     ) -> RuntimeEventDraft:
         return RuntimeEventDraft(
             id=self._id_factory(),
             type=event_type,
-            actor=EventActor.RUNTIME,
+            actor=actor,
             payload=payload,
             correlation_id=task_id,
             created_at=created_at,

@@ -1,6 +1,17 @@
 """Persistent fact spine for the isolated Soul Mobile Runtime kernel."""
 
+from .action import (
+    Action,
+    ActionExecution,
+    ActionStatus,
+    ActionType,
+    ActionValidationStatus,
+    ExecutionError,
+    InvalidActionTransition,
+)
+from .checkpoint import Checkpoint, CheckpointDraft
 from .event import EventActor, RuntimeEvent, RuntimeEventDraft
+from .fact import Fact, FactScope, FactStatus
 from .kernel import RuntimeKernel
 from .observation import (
     ArtifactRef,
@@ -34,16 +45,29 @@ from .task import (
     TaskSource,
     TaskStatus,
 )
+from .verify import Verification, VerificationMethod, VerificationVerdict
 
 __all__ = [
+    "Action",
+    "ActionExecution",
+    "ActionStatus",
+    "ActionType",
+    "ActionValidationStatus",
     "ArtifactRef",
     "ArtifactStorePort",
     "ChannelAvailability",
+    "Checkpoint",
+    "CheckpointDraft",
     "ConnectionState",
     "ConsistencyStatus",
     "DeviceState",
     "EventActor",
+    "ExecutionError",
+    "Fact",
+    "FactScope",
+    "FactStatus",
     "FailureState",
+    "InvalidActionTransition",
     "InvalidStageTransition",
     "InvalidTaskTransition",
     "KeyboardState",
@@ -51,15 +75,15 @@ __all__ = [
     "ObservationConsistency",
     "ObservationProviderPort",
     "Orientation",
+    "RawObservation",
+    "RawScreenshot",
+    "RawUiTree",
     "RecordNotFound",
     "RuntimeEvent",
     "RuntimeEventDraft",
     "RuntimeKernel",
     "RuntimeStoreError",
     "RuntimeStorePort",
-    "RawObservation",
-    "RawScreenshot",
-    "RawUiTree",
     "ScreenshotChannel",
     "Stage",
     "StageStatus",
@@ -68,4 +92,7 @@ __all__ = [
     "TaskSource",
     "TaskStatus",
     "UiTreeChannel",
+    "Verification",
+    "VerificationMethod",
+    "VerificationVerdict",
 ]

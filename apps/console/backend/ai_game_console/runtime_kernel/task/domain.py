@@ -196,6 +196,28 @@ class Task:
         _utc_timestamp(at, "observation timestamp")
         return replace(self, last_observation_id=observation_id, updated_at=at)
 
+    def record_progress(self, *, at: str) -> Task:
+        _utc_timestamp(at, "progress timestamp")
+        return replace(
+            self,
+            last_meaningful_progress_at=at,
+            failure_state=None,
+            updated_at=at,
+        )
+
+    def record_failure(self, failure_state: FailureState, *, at: str) -> Task:
+        if self.terminal:
+            raise InvalidTaskTransition("terminal Task cannot record another failure")
+        _utc_timestamp(at, "failure timestamp")
+        if failure_state.updated_at != at:
+            raise ValueError("failure_state.updated_at must match its Task mutation")
+        return replace(self, failure_state=failure_state, updated_at=at)
+
+    def record_checkpoint(self, checkpoint_id: str, *, at: str) -> Task:
+        _required(checkpoint_id, "checkpoint_id")
+        _utc_timestamp(at, "checkpoint timestamp")
+        return replace(self, latest_checkpoint_id=checkpoint_id, updated_at=at)
+
 
 def _required(value: str, name: str) -> str:
     if not isinstance(value, str) or not value.strip():

@@ -332,7 +332,7 @@ def test_restart_recovers_task_stage_observation_and_events(tmp_path: Path) -> N
     assert artifacts.read(observation.screenshot.artifact) == SCREENSHOT
 
 
-def test_phase_2_database_migrates_once_without_losing_facts(tmp_path: Path) -> None:
+def test_phase_1_database_migrates_to_phase_4_without_losing_facts(tmp_path: Path) -> None:
     database_path = tmp_path / "runtime.db"
     with sqlite3.connect(database_path) as connection:
         connection.executescript(sqlite_store_module._PHASE_2_SCHEMA)
@@ -396,9 +396,10 @@ def test_phase_2_database_migrates_once_without_losing_facts(tmp_path: Path) -> 
     assert [event.sequence for event in reopened.list_events("task-old")] == [1, 2]
     assert reopened.load_observation("obs-migrated").id == "obs-migrated"
     with sqlite3.connect(database_path) as connection:
-        assert connection.execute("SELECT MAX(revision) FROM runtime_schema").fetchone()[0] == 2
+        assert connection.execute("SELECT MAX(revision) FROM runtime_schema").fetchone()[0] == 3
         assert connection.execute("SELECT COUNT(*) FROM runtime_schema WHERE revision=2").fetchone()[0] == 1
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert connection.execute("SELECT COUNT(*) FROM runtime_schema WHERE revision=3").fetchone()[0] == 1
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
 
 
 def test_android_adapter_uses_only_explicit_read_only_commands() -> None:

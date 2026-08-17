@@ -2,10 +2,14 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from .action import Action, ActionExecution
+from .checkpoint import Checkpoint, CheckpointDraft
 from .event import RuntimeEvent, RuntimeEventDraft
+from .fact import Fact
 from .observation import ArtifactRef, Observation, RawObservation
 from .stage import Stage
 from .task import Task
+from .verify import Verification
 
 
 class RuntimeStoreError(RuntimeError):
@@ -13,7 +17,7 @@ class RuntimeStoreError(RuntimeError):
 
 
 class RecordNotFound(RuntimeStoreError):
-    """Raised when a Task or Stage is absent from the Runtime Store."""
+    """Raised when a Runtime record is absent from the Runtime Store."""
 
 
 class StoreConflict(RuntimeStoreError):
@@ -65,6 +69,68 @@ class RuntimeStorePort(Protocol):
     def list_observations(self, task_id: str) -> tuple[Observation, ...]: ...
 
     def latest_observation(self, task_id: str) -> Observation | None: ...
+
+    def create_action(self, action: Action, event: RuntimeEventDraft) -> RuntimeEvent: ...
+
+    def load_action(self, task_id: str, action_id: str) -> Action: ...
+
+    def list_actions(self, task_id: str) -> tuple[Action, ...]: ...
+
+    def record_action_execution(
+        self,
+        *,
+        before_task: Task,
+        after_task: Task,
+        before_action: Action,
+        after_action: Action,
+        execution: ActionExecution,
+        event: RuntimeEventDraft,
+    ) -> RuntimeEvent: ...
+
+    def load_action_execution(self, action_id: str) -> ActionExecution: ...
+
+    def record_verification(
+        self,
+        *,
+        before_task: Task,
+        after_task: Task,
+        before_action: Action,
+        after_action: Action,
+        verification: Verification,
+        event: RuntimeEventDraft,
+    ) -> RuntimeEvent: ...
+
+    def load_verification(self, action_id: str) -> Verification: ...
+
+    def commit_successful_verification(
+        self,
+        *,
+        before_task: Task,
+        after_task: Task,
+        before_stage: Stage,
+        after_stage: Stage | None,
+        before_action: Action,
+        after_action: Action,
+        verification: Verification,
+        facts: tuple[Fact, ...],
+        checkpoint: CheckpointDraft | None,
+        events: tuple[RuntimeEventDraft, ...],
+    ) -> tuple[tuple[RuntimeEvent, ...], Checkpoint | None]: ...
+
+    def list_facts(self, task_id: str, *, verified_only: bool = False) -> tuple[Fact, ...]: ...
+
+    def create_checkpoint(
+        self,
+        *,
+        before_task: Task,
+        after_task: Task,
+        checkpoint: CheckpointDraft,
+        event: RuntimeEventDraft,
+    ) -> tuple[Checkpoint, RuntimeEvent]: ...
+
+    def load_checkpoint(self, task_id: str, checkpoint_id: str) -> Checkpoint: ...
+
+    def latest_checkpoint(self, task_id: str) -> Checkpoint | None: ...
 
 
 class ObservationProviderPort(Protocol):
