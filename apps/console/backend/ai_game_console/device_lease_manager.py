@@ -178,6 +178,14 @@ class DeviceLeaseManager:
             )
             return
         
+        # 检查是否已存在相同 unresolved_action_ref 的 Checkpoint（去重）
+        latest_checkpoint = self._store.latest_checkpoint(lease.task_id)
+        if latest_checkpoint and latest_checkpoint.unresolved_action_ref == lease.action_id:
+            logger.info(
+                f"Checkpoint already exists for unresolved action {lease.action_id}, skipping"
+            )
+            return
+        
         # 构建 Checkpoint
         stages = self._store.list_stages(lease.task_id)
         verified_facts = self._store.list_facts(lease.task_id, verified_only=True)
