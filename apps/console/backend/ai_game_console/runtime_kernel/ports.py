@@ -6,6 +6,7 @@ from .action import Action, ActionExecution
 from .checkpoint import Checkpoint, CheckpointDraft
 from .event import RuntimeEvent, RuntimeEventDraft
 from .fact import Fact
+from .lease import DeviceExecutionLease
 from .observation import ArtifactRef, Observation, RawObservation
 from .stage import Stage
 from .task import Task
@@ -131,6 +132,31 @@ class RuntimeStorePort(Protocol):
     def load_checkpoint(self, task_id: str, checkpoint_id: str) -> Checkpoint: ...
 
     def latest_checkpoint(self, task_id: str) -> Checkpoint | None: ...
+
+    def acquire_lease(
+        self,
+        *,
+        device_id: str,
+        task_id: str,
+        holder_process_id: str,
+        ttl_seconds: int,
+        lease_id: str,
+        acquired_at: str,
+    ) -> DeviceExecutionLease: ...
+
+    def renew_lease(
+        self, lease_id: str, new_expires_at: str, new_heartbeat_at: str
+    ) -> DeviceExecutionLease: ...
+
+    def release_lease(self, lease_id: str) -> None: ...
+
+    def get_lease_for_device(self, device_id: str) -> DeviceExecutionLease | None: ...
+
+    def get_lease_for_task(self, task_id: str) -> DeviceExecutionLease | None: ...
+
+    def list_expired_leases(self, now: str) -> tuple[DeviceExecutionLease, ...]: ...
+
+    def update_lease_action(self, lease_id: str, action_id: str | None) -> None: ...
 
 
 class ObservationProviderPort(Protocol):

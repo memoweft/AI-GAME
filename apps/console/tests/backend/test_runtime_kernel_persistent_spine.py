@@ -290,7 +290,7 @@ def test_restart_recovery_preserves_all_committed_facts(tmp_path: Path) -> None:
     assert process_b.current_stage("task-1") is None
 
 
-def test_schema_contains_phase_4_action_verify_commit_tables(tmp_path: Path) -> None:
+def test_schema_contains_phase_5_lease_tables(tmp_path: Path) -> None:
     database_path = tmp_path / "runtime.db"
     store = SQLiteRuntimeStore(database_path)
     store.initialize()
@@ -314,6 +314,7 @@ def test_schema_contains_phase_4_action_verify_commit_tables(tmp_path: Path) -> 
         "runtime_verifications",
         "runtime_facts",
         "runtime_checkpoints",
+        "runtime_device_leases",
     }
 
 

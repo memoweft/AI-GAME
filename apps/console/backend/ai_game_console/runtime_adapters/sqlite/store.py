@@ -19,6 +19,8 @@ from ...runtime_kernel.action import (
 from ...runtime_kernel.checkpoint import Checkpoint, CheckpointDraft
 from ...runtime_kernel.event import EventActor, RuntimeEvent, RuntimeEventDraft
 from ...runtime_kernel.fact import Fact, FactScope, FactStatus
+from ...runtime_kernel.lease import DeviceExecutionLease
+from ...runtime_kernel.lease.errors import LeaseConflict, LeaseExpired, LeaseNotFound
 from ...runtime_kernel.observation import (
     ArtifactRef,
     ChannelAvailability,
@@ -38,7 +40,7 @@ from ...runtime_kernel.task import FailureState, Task, TaskSource, TaskStatus
 from ...runtime_kernel.verify import Verification, VerificationMethod, VerificationVerdict
 
 
-_SCHEMA_REVISION = 3
+_SCHEMA_REVISION = 4
 
 _PHASE_2_SCHEMA = """
 CREATE TABLE IF NOT EXISTS runtime_schema (
@@ -287,6 +289,26 @@ CREATE INDEX ix_runtime_checkpoints_task_created
 ON runtime_checkpoints(task_id, created_at, id);
 """
 
+_MIGRATION_3_TO_4 = """
+CREATE TABLE runtime_device_leases (
+    id TEXT PRIMARY KEY,
+    device_id TEXT NOT NULL,
+    task_id TEXT NOT NULL REFERENCES runtime_tasks(id) ON DELETE RESTRICT,
+    holder_process_id TEXT NOT NULL,
+    acquired_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    last_heartbeat_at TEXT NOT NULL,
+    action_id TEXT REFERENCES runtime_actions(id) ON DELETE RESTRICT,
+    UNIQUE(device_id)
+);
+
+CREATE INDEX ix_runtime_device_leases_task
+ON runtime_device_leases(task_id);
+
+CREATE INDEX ix_runtime_device_leases_expires
+ON runtime_device_leases(expires_at);
+"""
+
 
 class SQLiteRuntimeStore:
     """SQLite adapter implementing the Runtime Store port without live wiring."""
@@ -336,6 +358,13 @@ class SQLiteRuntimeStore:
                     connection,
                     statements=_MIGRATION_2_TO_3,
                     target_revision=3,
+                )
+                revision = 3
+            if revision == 3:
+                self._apply_migration(
+                    connection,
+                    statements=_MIGRATION_3_TO_4,
+                    target_revision=4,
                 )
 
     @staticmethod
@@ -1535,6 +1564,206 @@ class SQLiteRuntimeStore:
                 status=ConsistencyStatus(row["consistency_status"]),
                 reason=row["consistency_reason"],
             ),
+        )
+
+    def acquire_lease(
+        self,
+        *,
+        device_id: str,
+        task_id: str,
+        holder_process_id: str,
+        ttl_seconds: int,
+        lease_id: str,
+        acquired_at: str,
+    ) -> DeviceExecutionLease:
+        """获取设备独占权，如果已被占用则抛出 LeaseConflict"""
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                # 检查设备是否已被占用
+                existing = connection.execute(
+                    """
+                    SELECT id, task_id
+                    FROM runtime_device_leases
+                    WHERE device_id = ?
+                    """,
+                    (device_id,),
+                ).fetchone()
+                
+                if existing:
+                    raise LeaseConflict(
+                        device_id=device_id,
+                        existing_task_id=existing["task_id"],
+                        existing_lease_id=existing["id"],
+                        requested_task_id=task_id,
+                    )
+                
+                # 计算过期时间
+                from datetime import timedelta
+                acquired_dt = datetime.fromisoformat(acquired_at.replace("Z", "+00:00"))
+                expires_dt = acquired_dt.replace(microsecond=0) + timedelta(seconds=ttl_seconds)
+                expires_at = expires_dt.isoformat()
+                
+                # 插入新 Lease
+                connection.execute(
+                    """
+                    INSERT INTO runtime_device_leases (
+                        id, device_id, task_id, holder_process_id,
+                        acquired_at, expires_at, last_heartbeat_at, action_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        lease_id,
+                        device_id,
+                        task_id,
+                        holder_process_id,
+                        acquired_at,
+                        expires_at,
+                        acquired_at,
+                        None,
+                    ),
+                )
+                connection.commit()
+                
+                return DeviceExecutionLease(
+                    id=lease_id,
+                    device_id=device_id,
+                    task_id=task_id,
+                    holder_process_id=holder_process_id,
+                    acquired_at=acquired_at,
+                    expires_at=expires_at,
+                    last_heartbeat_at=acquired_at,
+                    action_id=None,
+                )
+            except Exception:
+                connection.rollback()
+                raise
+
+    def renew_lease(
+        self, lease_id: str, new_expires_at: str, new_heartbeat_at: str
+    ) -> DeviceExecutionLease:
+        """续期 Lease"""
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    """
+                    SELECT id, device_id, task_id, holder_process_id,
+                           acquired_at, expires_at, last_heartbeat_at, action_id
+                    FROM runtime_device_leases
+                    WHERE id = ?
+                    """,
+                    (lease_id,),
+                ).fetchone()
+                
+                if not row:
+                    raise LeaseNotFound(lease_id=lease_id)
+                
+                connection.execute(
+                    """
+                    UPDATE runtime_device_leases
+                    SET expires_at = ?, last_heartbeat_at = ?
+                    WHERE id = ?
+                    """,
+                    (new_expires_at, new_heartbeat_at, lease_id),
+                )
+                connection.commit()
+                
+                return DeviceExecutionLease(
+                    id=row["id"],
+                    device_id=row["device_id"],
+                    task_id=row["task_id"],
+                    holder_process_id=row["holder_process_id"],
+                    acquired_at=row["acquired_at"],
+                    expires_at=new_expires_at,
+                    last_heartbeat_at=new_heartbeat_at,
+                    action_id=row["action_id"],
+                )
+            except Exception:
+                connection.rollback()
+                raise
+
+    def release_lease(self, lease_id: str) -> None:
+        """释放 Lease"""
+        with self._connection() as connection:
+            connection.execute(
+                "DELETE FROM runtime_device_leases WHERE id = ?",
+                (lease_id,),
+            )
+            connection.commit()
+
+    def get_lease_for_device(self, device_id: str) -> DeviceExecutionLease | None:
+        """查询设备当前 Lease"""
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT id, device_id, task_id, holder_process_id,
+                       acquired_at, expires_at, last_heartbeat_at, action_id
+                FROM runtime_device_leases
+                WHERE device_id = ?
+                """,
+                (device_id,),
+            ).fetchone()
+            
+            if not row:
+                return None
+            
+            return self._lease_from_row(row)
+
+    def get_lease_for_task(self, task_id: str) -> DeviceExecutionLease | None:
+        """查询 Task 当前 Lease"""
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT id, device_id, task_id, holder_process_id,
+                       acquired_at, expires_at, last_heartbeat_at, action_id
+                FROM runtime_device_leases
+                WHERE task_id = ?
+                """,
+                (task_id,),
+            ).fetchone()
+            
+            if not row:
+                return None
+            
+            return self._lease_from_row(row)
+
+    def list_expired_leases(self, now: str) -> tuple[DeviceExecutionLease, ...]:
+        """查询所有已过期的 Lease"""
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, device_id, task_id, holder_process_id,
+                       acquired_at, expires_at, last_heartbeat_at, action_id
+                FROM runtime_device_leases
+                WHERE expires_at <= ?
+                ORDER BY expires_at
+                """,
+                (now,),
+            ).fetchall()
+            
+            return tuple(self._lease_from_row(row) for row in rows)
+
+    def update_lease_action(self, lease_id: str, action_id: str | None) -> None:
+        """更新 Lease 关联的 Action"""
+        with self._connection() as connection:
+            connection.execute(
+                "UPDATE runtime_device_leases SET action_id = ? WHERE id = ?",
+                (action_id, lease_id),
+            )
+            connection.commit()
+
+    @staticmethod
+    def _lease_from_row(row: sqlite3.Row) -> DeviceExecutionLease:
+        return DeviceExecutionLease(
+            id=row["id"],
+            device_id=row["device_id"],
+            task_id=row["task_id"],
+            holder_process_id=row["holder_process_id"],
+            acquired_at=row["acquired_at"],
+            expires_at=row["expires_at"],
+            last_heartbeat_at=row["last_heartbeat_at"],
+            action_id=row["action_id"],
         )
 
 

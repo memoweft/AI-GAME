@@ -12,6 +12,8 @@ from .action import (
 from .checkpoint import Checkpoint, CheckpointDraft
 from .event import EventActor, RuntimeEvent, RuntimeEventDraft
 from .fact import Fact, FactScope, FactStatus
+from .lease import DeviceExecutionLease
+from .lease.errors import LeaseConflict, LeaseExpired, LeaseNotFound
 from .kernel import RuntimeKernel
 from .observation import (
     ArtifactRef,
@@ -60,6 +62,7 @@ __all__ = [
     "CheckpointDraft",
     "ConnectionState",
     "ConsistencyStatus",
+    "DeviceExecutionLease",
     "DeviceState",
     "EventActor",
     "ExecutionError",
@@ -71,6 +74,9 @@ __all__ = [
     "InvalidStageTransition",
     "InvalidTaskTransition",
     "KeyboardState",
+    "LeaseConflict",
+    "LeaseExpired",
+    "LeaseNotFound",
     "Observation",
     "ObservationConsistency",
     "ObservationProviderPort",
