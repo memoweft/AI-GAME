@@ -85,45 +85,48 @@ class DeviceLeaseManager:
     
     def _cleanup_orphaned_leases(self) -> None:
         """清理孤立 Lease（进程已死或已过期）"""
-        now = self._clock()
-        expired = self._store.list_expired_leases(now)
-        
-        if not expired:
-            return
-        
-        logger.info(f"Found {len(expired)} expired leases, checking process liveness")
-        
-        for lease in expired:
-            # 检查进程是否存活
-            if self._is_process_alive(lease.holder_process_id):
-                # 进程还活着，但 Lease 过期了（可能是续期失败）
-                logger.warning(
-                    f"Lease {lease.id} expired but process {lease.holder_process_id} "
-                    f"is still alive (device={lease.device_id}, task={lease.task_id})"
-                )
-            else:
-                # 进程已死
-                logger.warning(
-                    f"Lease {lease.id} orphaned: process {lease.holder_process_id} dead "
-                    f"(device={lease.device_id}, task={lease.task_id})"
-                )
+        try:
+            now = self._clock()
+            expired = self._store.list_expired_leases(now)
             
-            # 如果有关联 Action，创建恢复 Checkpoint
-            if lease.action_id:
-                try:
-                    self._create_recovery_checkpoint(lease)
-                except Exception as e:
-                    logger.error(
-                        f"Failed to create recovery checkpoint for lease {lease.id}: {e}",
-                        exc_info=True,
+            if not expired:
+                return
+            
+            logger.info(f"Found {len(expired)} expired leases, checking process liveness")
+            
+            for lease in expired:
+                # 检查进程是否存活
+                if self._is_process_alive(lease.holder_process_id):
+                    # 进程还活着，但 Lease 过期了（可能是续期失败）
+                    logger.warning(
+                        f"Lease {lease.id} expired but process {lease.holder_process_id} "
+                        f"is still alive (device={lease.device_id}, task={lease.task_id})"
                     )
-            
-            # 释放 Lease
-            try:
-                self._store.release_lease(lease.id)
-                logger.info(f"Released orphaned lease {lease.id}")
-            except Exception as e:
-                logger.error(f"Failed to release lease {lease.id}: {e}", exc_info=True)
+                else:
+                    # 进程已死
+                    logger.warning(
+                        f"Lease {lease.id} orphaned: process {lease.holder_process_id} dead "
+                        f"(device={lease.device_id}, task={lease.task_id})"
+                    )
+                
+                # 如果有关联 Action，创建恢复 Checkpoint
+                if lease.action_id:
+                    try:
+                        self._create_recovery_checkpoint(lease)
+                    except Exception as e:
+                        logger.error(
+                            f"Failed to create recovery checkpoint for lease {lease.id}: {e}",
+                            exc_info=True,
+                        )
+                
+                # 释放 Lease
+                try:
+                    self._store.release_lease(lease.id)
+                    logger.info(f"Released orphaned lease {lease.id}")
+                except Exception as e:
+                    logger.error(f"Failed to release lease {lease.id}: {e}", exc_info=True)
+        except Exception as e:
+            logger.error(f"Error during lease cleanup: {e}", exc_info=True)
     
     def _is_process_alive(self, process_id: str) -> bool:
         """检查进程是否存在（跨平台）"""

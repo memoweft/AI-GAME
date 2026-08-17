@@ -5,6 +5,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from ..device_lease_manager import DeviceLeaseManager
 from .action import Action, ActionExecution, ActionStatus, ActionType, ExecutionError
 from .checkpoint import Checkpoint, CheckpointDraft
 from .event import EventActor, RuntimeEvent, RuntimeEventDraft
@@ -40,6 +41,7 @@ class RuntimeKernel:
         action_executor: ActionExecutorPort | None = None,
         clock: Callable[[], str] | None = None,
         id_factory: Callable[[], str] | None = None,
+        lease_manager: DeviceLeaseManager | None = None,
     ) -> None:
         self._store = store
         self._observation_provider = observation_provider
@@ -47,6 +49,7 @@ class RuntimeKernel:
         self._action_executor = action_executor
         self._clock = clock or _utc_now
         self._id_factory = id_factory or (lambda: str(uuid4()))
+        self._lease_manager = lease_manager
         self._store.initialize()
 
     def close(self) -> None:
@@ -895,6 +898,11 @@ class RuntimeKernel:
             correlation_id=task_id,
             created_at=created_at,
         )
+    
+    def shutdown(self) -> None:
+        """关闭 Kernel 和相关资源"""
+        if self._lease_manager:
+            self._lease_manager.stop_background_cleanup()
 
 
 def _utc_now() -> str:
