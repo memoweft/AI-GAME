@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "provider": "huggingface",
+  "modelId": "mPLUG/GUI-Owl-1.5-8B-Instruct",
+  "revision": "06d5faecff74840bab2be2425e9c42667a5d04fc",
+  "architecture": "Qwen3VLForConditionalGeneration",
+  "modelType": "qwen3_vl",
+  "tensorType": "BF16",
+  "license": "MIT",
+  "expectedBytes": 17545912230,
+  "files": [
+    { "path": ".gitattributes", "bytes": 1519 },
+    { "path": "chat_template.json", "bytes": 5499 },
+    { "path": "config.json", "bytes": 1468 },
+    { "path": "generation_config.json", "bytes": 214 },
+    { "path": "merges.txt", "bytes": 1671839 },
+    { "path": "model-00001-of-00004.safetensors", "bytes": 4902275944 },
+    { "path": "model-00002-of-00004.safetensors", "bytes": 4915962496 },
+    { "path": "model-00003-of-00004.safetensors", "bytes": 4999831048 },
+    { "path": "model-00004-of-00004.safetensors", "bytes": 2716270024 },
+    { "path": "model.safetensors.index.json", "bytes": 67759 },
+    { "path": "preprocessor_config.json", "bytes": 390 },
+    { "path": "README.md", "bytes": 3540 },
+    { "path": "tokenizer_config.json", "bytes": 10868 },
+    { "path": "tokenizer.json", "bytes": 7032403 },
+    { "path": "video_preprocessor_config.json", "bytes": 386 },
+    { "path": "vocab.json", "bytes": 2776833 }
+  ]
+}

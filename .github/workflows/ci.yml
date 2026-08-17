@@ -1,0 +1,63 @@
+name: Verify AI-GAME Console
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Windows test and build
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.12.0"
+          cache: npm
+          cache-dependency-path: apps/console/frontend/package-lock.json
+
+      - name: Install and test backend
+        shell: pwsh
+        run: |
+          uv venv runtime/envs/console --python 3.11
+          uv pip install --python runtime/envs/console/Scripts/python.exe --editable "apps/console/backend[dev]"
+          & runtime/envs/console/Scripts/python.exe -m pytest apps/console/tests/backend -p no:cacheprovider -q
+
+      - name: Install, test, and build frontend
+        shell: pwsh
+        run: |
+          npm --prefix apps/console/frontend ci
+          npm --prefix apps/console/frontend run test
+          npm --prefix apps/console/frontend run build
+
+      - name: Smoke-test managed console lifecycle
+        shell: pwsh
+        run: |
+          $started = $false
+          try {
+            & .\scripts\console.ps1 start -NoBrowser
+            $started = $true
+            & .\scripts\console.ps1 status
+          } finally {
+            if ($started) {
+              & .\scripts\console.ps1 stop -NoBrowser
+            }
+          }

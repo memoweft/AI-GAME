@@ -1,0 +1,45 @@
+# Runtime data and large model artifacts
+runtime/**
+!runtime/.gitkeep
+.runtime/
+models/
+cache/
+logs/
+sessions/
+screenshots/
+tmp/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.local.env
+secrets/
+# Machine-specific runtime configuration. Commit only sanitized *.env.example files.
+config/*.env
+!config/*.env.example
+
+# Exploratory screenshots and other local work evidence
+work/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# JavaScript / desktop console
+node_modules/
+dist/
+build/
+
+# IDE / OS
+.idea/
+.vscode/
+Thumbs.db
+Desktop.ini
+*.log
+*.pid
