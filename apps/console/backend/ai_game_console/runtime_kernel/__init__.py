@@ -11,6 +11,7 @@ from .action import (
 )
 from .checkpoint import Checkpoint, CheckpointDraft
 from .event import EventActor, RuntimeEvent, RuntimeEventDraft
+from .executor import ActionExecutionResult, ActionExecutorPort
 from .fact import Fact, FactScope, FactStatus
 from .lease import DeviceExecutionLease
 from .lease.errors import LeaseConflict, LeaseExpired, LeaseNotFound
@@ -52,6 +53,8 @@ from .verify import Verification, VerificationMethod, VerificationVerdict
 __all__ = [
     "Action",
     "ActionExecution",
+    "ActionExecutionResult",
+    "ActionExecutorPort",
     "ActionStatus",
     "ActionType",
     "ActionValidationStatus",

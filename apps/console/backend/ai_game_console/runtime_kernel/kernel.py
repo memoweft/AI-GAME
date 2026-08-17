@@ -8,6 +8,7 @@ from uuid import uuid4
 from .action import Action, ActionExecution, ActionStatus, ActionType, ExecutionError
 from .checkpoint import Checkpoint, CheckpointDraft
 from .event import EventActor, RuntimeEvent, RuntimeEventDraft
+from .executor import ActionExecutionResult, ActionExecutorPort
 from .fact import Fact, FactScope, FactStatus
 from .observation import (
     ArtifactRef,
@@ -36,12 +37,14 @@ class RuntimeKernel:
         *,
         observation_provider: ObservationProviderPort | None = None,
         artifact_store: ArtifactStorePort | None = None,
+        action_executor: ActionExecutorPort | None = None,
         clock: Callable[[], str] | None = None,
         id_factory: Callable[[], str] | None = None,
     ) -> None:
         self._store = store
         self._observation_provider = observation_provider
         self._artifact_store = artifact_store
+        self._action_executor = action_executor
         self._clock = clock or _utc_now
         self._id_factory = id_factory or (lambda: str(uuid4()))
         self._store.initialize()
@@ -463,6 +466,98 @@ class RuntimeKernel:
             ),
         )
         return execution
+
+    def execute_action(
+        self,
+        *,
+        task_id: str,
+        action_id: str,
+    ) -> ActionExecution:
+        """执行 Action 的完整栅栏检查 + Lease 获取 + 物理下发
+        
+        这是 Phase 5 的新方法，整合了：
+        1. prepare_action_execution() 栅栏检查
+        2. DeviceExecutionLease 获取和管理
+        3. 真实 ADB 执行
+        4. record_action_execution() 结果持久化
+        """
+        if self._action_executor is None:
+            raise RuntimeError("action executor is not configured")
+        
+        # 1. 栅栏检查
+        action = self.prepare_action_execution(task_id=task_id, action_id=action_id)
+        task = self._store.load_task(task_id)
+        
+        # 2. 获取设备独占 Lease
+        lease_id = self._id_factory()
+        acquired_at = self._clock()
+        import os
+        lease = self._store.acquire_lease(
+            device_id=task.device_id,
+            task_id=task_id,
+            holder_process_id=str(os.getpid()),
+            ttl_seconds=60,
+            lease_id=lease_id,
+            acquired_at=acquired_at,
+        )
+        
+        try:
+            # 3. 更新 Lease 关联 Action（用于崩溃恢复）
+            self._store.update_lease_action(lease.id, action_id)
+            
+            # 4. 根据 Action 类型调用执行器
+            result: ActionExecutionResult
+            if action.type == ActionType.TAP:
+                result = self._action_executor.execute_tap(
+                    device_id=task.device_id,
+                    x=action.params["x"],
+                    y=action.params["y"],
+                )
+            elif action.type == ActionType.SWIPE:
+                result = self._action_executor.execute_swipe(
+                    device_id=task.device_id,
+                    start_x=action.params["start_x"],
+                    start_y=action.params["start_y"],
+                    end_x=action.params["end_x"],
+                    end_y=action.params["end_y"],
+                    duration_ms=action.params.get("duration_ms", 300),
+                )
+            elif action.type == ActionType.INPUT_TEXT:
+                result = self._action_executor.execute_input_text(
+                    device_id=task.device_id,
+                    text=action.params["text"],
+                )
+            elif action.type == ActionType.BACK:
+                result = self._action_executor.execute_back(
+                    device_id=task.device_id,
+                )
+            elif action.type == ActionType.HOME:
+                result = self._action_executor.execute_home(
+                    device_id=task.device_id,
+                )
+            else:
+                raise ValueError(f"unsupported action type: {action.type}")
+            
+            # 5. 清除 Lease 的 Action 关联
+            self._store.update_lease_action(lease.id, None)
+            
+            # 6. 持久化执行结果
+            execution = self.record_action_execution(
+                task_id=task_id,
+                action_id=action_id,
+                accepted=result.accepted,
+                adapter_code=result.adapter_code,
+                error=result.error,
+                started_at=result.started_at,
+                finished_at=result.finished_at,
+                lease_ref=lease.id,
+            )
+            
+            return execution
+        
+        finally:
+            # 7. 释放 Lease（无论成功或失败）
+            self._store.release_lease(lease.id)
 
     def verify_action(
         self,
