@@ -122,7 +122,109 @@ runtime_checkpoints
 466 passed, 1 existing TestClient deprecation warning
 ```
 
-## 5. 保留给后续施工单
+## 5. 恢复路径验证（2026-08-17）
+
+Phase 4 恢复承诺已通过 4 个进程重启场景测试验证（`test_runtime_kernel_recovery_paths.py`）：
+
+### 5.1 No-replay 语义
+
+**防护机制**：
+- `prepare_action_execution()` 强制 Action 状态必须为 `PROPOSED`
+- EXECUTED/FAILED/UNCERTAIN 状态无法重新 dispatch
+- `unresolved_action_ref` 提供人工恢复的语义标记
+
+**验证场景**：
+```python
+# 场景 1: Action 执行后、验证前崩溃
+propose_action()  # PROPOSED
+prepare_action_execution()
+record_action_execution()  # EXECUTED
+# 💥 进程崩溃
+create_checkpoint(unresolved_action_ref=action_id)
+# 重启后：状态检查拒绝重放（不是 PROPOSED）
+```
+
+**结论**：状态检查是第一道防线，`unresolved_action_ref` 是防御深度的语义标记。
+
+### 5.2 FAIL vs UNCERTAIN 恢复语义
+
+**FAIL（验证失败，结果明确）**：
+- Action 状态 → `FAILED`
+- 不写入 Facts，不推进 Stage
+- **不自动创建 Checkpoint**
+- 允许立即 propose 和 prepare 新 Action（resolved 状态）
+- Task 进入 `failure_state`（可恢复）
+
+**UNCERTAIN（物理结果不确定）**：
+- Action 状态 → `UNCERTAIN`
+- 不写入 Facts，不推进 Stage
+- **不自动创建 Checkpoint**（需要手动调用 `create_checkpoint()`）
+- Task 进入 `failure_state`（可恢复）
+- 如果手动创建 Checkpoint 带 `unresolved_action_ref`，则阻止重放
+
+**设计空白**：
+- UNCERTAIN 场景是否应该自动创建 Checkpoint？
+- 当前需要外层决策逻辑显式调用 `create_checkpoint(unresolved_action_ref=...)`
+- 建议：在 Phase 5 前明确 UNCERTAIN 的自动化策略
+
+### 5.3 人工恢复决策流程
+
+当 `unresolved_action_ref` 存在时：
+
+```text
+1. 加载 Checkpoint
+   ├─ unresolved_action_ref: action-123
+   ├─ required_fresh_observation: true
+   └─ resume_reason: "uncertain physical outcome"
+
+2. 人工检查物理设备状态
+   ├─ 查看最后的 Observation after
+   ├─ 查看 Action 意图和预期结果
+   └─ 检查当前设备屏幕
+
+3. 决策路径
+   ├─ A. 补偿：手动标记 Action 为 VERIFIED + 添加 Facts
+   ├─ B. 重试：capture_observation() → propose_action()（新 Action）
+   ├─ C. 跳过：标记 Action 为 FAILED → 继续新决策
+   └─ D. 终止：close Task
+```
+
+**当前状态**：
+- ✅ 数据模型支持：Checkpoint 记录 `unresolved_action_ref`
+- ✅ 恢复检测：`prepare_action_execution()` 拒绝重放
+- ⏸️ UI/API：无人工恢复界面
+- ⏸️ 策略：无自动补偿/重试/跳过逻辑
+
+### 5.4 跨进程恢复正确性
+
+**验证结果**：
+- SQLite 持久化完整：Action/Verification/Fact/Checkpoint 全部正确恢复
+- Checkpoint 状态重建：`unresolved_action_ref`、`required_fresh_observation` 正确
+- 事件序列连续：`through_sequence` 正确，新事件单调递增
+- ID 生成安全：UUID 避免跨进程冲突
+
+**测试覆盖**：
+- 4 个进程重启场景（`test_runtime_kernel_recovery_paths.py`）
+- 35 个 runtime_kernel 测试通过
+- 完整回归：470 个后端测试通过
+
+### 5.5 剩余恢复风险
+
+**已解决**：
+- ✅ No-replay 语义：状态检查 + checkpoint 标记
+- ✅ 原子提交回滚：Fact 插入失败时完整回滚
+- ✅ 跨进程状态恢复：数据库持久化正确
+
+**待实现**：
+- ⏸️ UNCERTAIN 自动 Checkpoint 策略
+- ⏸️ 人工恢复 UI/API（补偿/重试/跳过）
+- ⏸️ DeviceExecutionLease 的恢复语义（Phase 5）
+- ⏸️ 自动补偿策略（基于 Action 类型的幂等性）
+
+**文档**：
+- `PHASE_4_RECOVERY_VERIFICATION.md`：完整恢复场景分析
+
+## 6. 保留给后续施工单
 
 本阶段明确没有实现：
 
@@ -130,6 +232,7 @@ runtime_checkpoints
 - Android ActionExecutorPort / ADB input；
 - Planner / Operator / Language / Router；
 - Checkpoint event replay service、loop/STUCK threshold 或自动 recovery ladder；
+- 人工恢复决策 UI/API（补偿/重试/跳过/终止）；
 - Gateway 消息、pause/resume/cancel/takeover、API/SSE、前端；
 - 真实 Android smoke 与 MVP battery task。
 
