@@ -1,6 +1,6 @@
 # Runtime Kernel 实施路线图与当前状态
 
-**更新日期**: 2025-01-XX  
+**更新日期**: 2026-08-19  
 **项目**: AI-GAME Console - 隔离 Runtime Kernel  
 **仓库**: https://github.com/memoweft/AI-GAME
 
@@ -25,11 +25,11 @@
 | Phase 2 | 持久化脊柱 | ✅ 完成 | 26 passed | Task/Stage/Observation 基础 |
 | Phase 3 | Observation 脊柱 | ✅ 完成 | 17 passed | 捕获、通道、老化逻辑 |
 | Phase 4 | Action→Verify→Commit | ✅ 完成 | 18 passed | 原子提交、恢复策略 |
-| **Phase 5** | **设备所有权** | **🚧 进行中** | **40 passed** | **Lease、执行器、排空** |
+| **Phase 5** | **设备所有权** | **🚧 进行中** | **57 passed** | **Lease、执行器、排空、E2E 集成** |
 | Phase 6 | Gateway 契约 | ⏳ 待开始 | - | 消息路由、会话管理 |
 | Phase 7 | Legacy 迁移 | ⏳ 待开始 | - | 三阶段切换、数据迁移 |
 
-**当前测试总数**: 470 → 510 passed (Phase 4 + Phase 5 Week 1-4)
+**当前测试总数**: 507 passed（全量回归，2026-08-19；Phase 5 Week 7 Day 3 后）
 
 ---
 
@@ -172,6 +172,40 @@
 
 ---
 
+### Phase 5 Week 7: 端到端集成测试 🚧 (Day 1-3 完成, 17 个新测试)
+
+> 注：原计划的 Week 5（Deadline 保护）和 Week 6（管理 UI/API）暂未实施，
+> 项目直接进入 Week 7 端到端集成测试验证已实现的 Lease 生命周期。
+
+**测试文件**:
+- `tests/backend/test_runtime_kernel_e2e_integration.py`（5 tests）
+- `tests/backend/test_runtime_kernel_e2e_concurrency.py`（4 tests）
+- `tests/backend/test_runtime_kernel_execute_action.py`（8 tests，含 Day 3 增强）
+
+**Day 1 — 进程崩溃恢复与过期清理** (commit b1f1810):
+- 孤立 Lease 恢复：死 PID 检测 → Checkpoint(unresolved_action_ref) → 释放
+- 过期 Lease 清理：存活 PID + 过期 TTL → 警告日志 → 释放 + Checkpoint
+- Checkpoint 去重：重复扫描不创建重复 Checkpoint
+
+**Day 2 — 多 Task 并发与后台线程稳定性** (commit 6a508cd):
+- 不同设备上的多 Task 并发执行互不干扰
+- 并发 acquire 冲突：仅一个成功，另一个 `LeaseConflict`
+- 后台清理线程长期运行稳定性 + 异常容错隔离
+
+**Day 3 — execute_action 完整流程** (2026-08-19):
+- `propose → execute → verify → commit` 完整链路集成测试
+- SUCCESS 裁决：commit Facts + Stage COMPLETED + Task 回到 PLANNING + Checkpoint(stage_completed)
+- FAIL 裁决：Action FAILED、Stage 保持 ACTIVE、失败记录不阻断、可基于新 Observation 恢复
+- 类型化执行器全覆盖（tap/swipe/input_text/back/home 5 种分发）
+- 栅栏增强：设备 Lease 冲突（`LeaseConflict`）、防重放、防过期决策
+
+**全量回归**: 507 passed（~97s）
+
+**文档**:
+- `PHASE_5_WEEK_7_E2E_TESTING_PLAN.md`（10 个场景，8 个已验证 ✅）
+
+---
+
 ## 🚧 Phase 5 剩余工作
 
 ### Week 5: Deadline 保护机制 (估计 3-5 天)
@@ -248,39 +282,25 @@
 
 ---
 
-### Week 7: 端到端集成测试 (估计 3-5 天)
+### Week 7: 端到端集成测试 (3-5 天, 🚧 Day 1-3 完成)
 
 **目标**: 验证完整的 Lease 生命周期和恢复流程
 
-**测试场景**:
-1. **并发冲突**
-   - 两个进程同时 acquire 同一设备
-   - 验证只有一个成功，另一个抛出 `LeaseConflict`
+**测试场景**（详见 `PHASE_5_WEEK_7_E2E_TESTING_PLAN.md`）:
+1. ✅ **并发冲突** (Day 2)：并发 acquire 仅一个成功，另一个 `LeaseConflict`
+2. ✅ **进程崩溃恢复** (Day 1)：孤立 Lease 检测 → Checkpoint(unresolved_action_ref)
+3. ⏳ **Deadline 超时**：依赖 Week 5（暂未实施）
+4. 🎯 **真实设备测试**（可选，低优先级）
+5. 🚧 **性能测试** (Day 4 待做)：Lease 续期开销、清理线程 CPU 占用
 
-2. **进程崩溃恢复**
-   - 模拟进程在持有 Lease 时崩溃
-   - 验证后台清理检测到孤立 Lease
-   - 验证 Checkpoint 正确创建
-
-3. **Deadline 超时**
-   - 模拟长时间持有 Lease
-   - 验证 Deadline 触发释放
-   - 验证任务进入恢复状态
-
-4. **真实设备测试**
-   - 在真实 Android 设备上执行 Action
-   - 验证 Lease 获取/释放
-   - 验证 ADB 命令执行
-
-5. **性能测试**
-   - Lease 续期开销
-   - 清理线程 CPU 占用
-   - 大量 Lease 并发场景
+**剩余** (Day 4-5):
+- Day 4: 性能基准（Lease 续期开销、后台清理 CPU <1%）
+- Day 5: 测试报告 + 故障排查指南
 
 **文档**:
-- 测试报告
-- 性能基准
-- 故障排查指南
+- 测试报告 (Day 5)
+- 性能基准 (Day 4)
+- 故障排查指南 (Day 5)
 
 ---
 
@@ -288,15 +308,16 @@
 
 Phase 5 完成的定义：
 - ✅ Week 1-4 完成（40 tests passed）
-- ⏳ Week 5-7 完成（估计新增 15-20 tests）
-- ⏳ 所有测试通过（目标：~530 tests）
-- ⏳ 真实设备执行 tap/swipe/back/home 成功
-- ⏳ 两个 Task 无法同时 acquire 同一设备
-- ⏳ Lease 过期后自动清理
-- ⏳ 进程崩溃后孤立 Lease 创建恢复 Checkpoint
-- ⏳ Deadline 超时触发自动释放
-- ⏳ 管理 API 可查询和手动干预
-- ⏳ 文档完整：API、配置、部署、故障排查
+- 🚧 Week 7 进行中（Day 1-3 完成，17 tests；Day 4 性能基准 / Day 5 报告待做）
+- ⏳ Week 5（Deadline 保护）、Week 6（管理 UI/API）——计划保留，暂未实施
+- ✅ 所有测试通过（实际：507 passed，2026-08-19）
+- ⏳ 真实设备执行 tap/swipe/back/home 成功（可选，低优先级）
+- ✅ 两个 Task 无法同时 acquire 同一设备（Day 2 并发冲突测试）
+- ✅ Lease 过期后自动清理（Day 1 过期清理测试）
+- ✅ 进程崩溃后孤立 Lease 创建恢复 Checkpoint（Day 1 崩溃恢复测试）
+- ⏳ Deadline 超时触发自动释放（依赖 Week 5）
+- ⏳ 管理 API 可查询和手动干预（依赖 Week 6）
+- 🚧 文档完整：Week 7 测试报告/故障排查 Day 5 待做
 
 ---
 
@@ -337,14 +358,14 @@ Phase 5 完成的定义：
 ## 📈 项目进度
 
 ### 整体进度
-- **已完成**: Phase 0-4 + Phase 5 Week 1-4
-- **进行中**: Phase 5 Week 5-7
-- **待开始**: Phase 6-7
+- **已完成**: Phase 0-4 + Phase 5 Week 1-4 + Week 7 Day 1-3
+- **进行中**: Phase 5 Week 7（Day 4 性能基准 / Day 5 报告）
+- **待开始**: Phase 5 Week 5-6（计划保留）、Phase 6-7
 
-### 代码统计（截至 Week 4）
-- 测试数量: 510 passed
+### 代码统计（截至 Week 7 Day 3, 2026-08-19）
+- 测试数量: 507 passed（其中 Phase 5 共 57 个，含 Week 7 新增 17 个）
 - 代码行数: ~15,000 lines (backend runtime_kernel)
-- 文档: 10+ 设计文档
+- 文档: 11+ 设计文档
 
 ### 时间估算
 - Phase 5 剩余: 2-3 周
@@ -380,18 +401,14 @@ Phase 5 完成的定义：
 
 ## 🚀 下一步行动
 
-### 立即开始（Week 5）
-1. 实现 Lease Deadline 保护
-2. 扩展 DeviceExecutionLease 模型
-3. 修改续期逻辑检查 Deadline
-4. 编写 Deadline 超时测试
-5. 更新文档
+### 立即开始（Week 7 Day 4-5）
+1. Day 4: 性能基准测试（Lease 续期开销、后台清理 CPU 占用）
+2. Day 5: 编写 Week 7 测试报告
+3. Day 5: 更新故障排查指南
 
-### 短期规划（Week 6-7）
-1. 实现管理 API
-2. 端到端集成测试
-3. 真实设备测试
-4. 性能基准测试
+### 短期规划（Week 5-6，计划保留）
+1. Lease Deadline 保护（防止无限续期）
+2. 管理 API（Lease 查询与手动干预）
 
 ### 中期规划（Phase 6-7）
 1. Gateway 消息路由
@@ -415,7 +432,8 @@ Phase 5 完成的定义：
 
 ### 实施总结
 - `PHASE_5_WEEK_4_DEVICE_LEASE_MANAGER.md`: Week 4 实施总结
+- `PHASE_5_WEEK_7_E2E_TESTING_PLAN.md`: Week 7 端到端集成测试计划与进度
 
 ---
 
-**最后更新**: Phase 5 Week 4 完成，推送到 GitHub (commit ca875c9)
+**最后更新**: Phase 5 Week 7 Day 3 完成（2026-08-19），全量回归 507 passed
