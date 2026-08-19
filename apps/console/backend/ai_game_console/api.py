@@ -60,6 +60,7 @@ from .mobile_task_adapter import (
 from .mobile_task_profiles import resolve_mobile_skill_scope
 from .openai_chat import OpenAIChatProvider
 from .repository import SQLiteRepository
+from .runtime_admin import LeaseAdminService, create_lease_admin_router
 from .soul_integration import SoulIntegration, SoulIntegrationError
 from .soul_application_composition import (
     SoulApplicationUnavailable,
@@ -542,9 +543,13 @@ def create_app(
     mobile_task_archive: MobileTaskArchive | Any | None = None,
     application_runtime: Any | None = None,
     application_runtime_archive: Any | None = None,
+    runtime_admin: LeaseAdminService | None = None,
     console_shutdown_callback: Callable[[], None] | None = None,
 ) -> FastAPI:
     resolved_settings = settings or Settings.from_env()
+    resolved_runtime_admin = runtime_admin or LeaseAdminService(
+        resolved_settings.data_dir / "runtime" / "runtime.db"
+    )
     resolved_repository = repository or SQLiteRepository(resolved_settings.database_path)
     resolved_cloud_configuration = cloud_configuration or CloudChatConfiguration(
         resolved_repository,
@@ -731,6 +736,8 @@ def create_app(
             )
             if callable(mobile_task_shutdown):
                 shutdown_callbacks.append(mobile_task_shutdown)
+            # Week 6: 停止 Lease 后台清理并关闭 runtime.db（未初始化时为空操作）
+            shutdown_callbacks.append(resolved_runtime_admin.shutdown)
             application_shutdown = getattr(
                 resolved_application_runtime, "shutdown", None
             )
@@ -763,6 +770,7 @@ def create_app(
     app.state.mobile_task_archive = resolved_mobile_task_archive
     app.state.application_runtime = resolved_application_runtime
     app.state.application_runtime_archive = resolved_application_archive
+    app.state.runtime_admin = resolved_runtime_admin
     app.state.console_shutdown_callback = console_shutdown_callback
 
     app.add_middleware(
@@ -1466,6 +1474,8 @@ def create_app(
         )
 
     app.include_router(router)
+    # Week 6: Runtime Lease 管理 API（懒初始化，不产生额外数据库文件）
+    app.include_router(create_lease_admin_router(resolved_runtime_admin))
 
     @app.get("/health", response_model=HealthResponse)
     def root_health():
