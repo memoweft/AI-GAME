@@ -396,11 +396,12 @@ def test_phase_1_database_migrates_to_phase_5_without_losing_facts(tmp_path: Pat
     assert [event.sequence for event in reopened.list_events("task-old")] == [1, 2]
     assert reopened.load_observation("obs-migrated").id == "obs-migrated"
     with sqlite3.connect(database_path) as connection:
-        assert connection.execute("SELECT MAX(revision) FROM runtime_schema").fetchone()[0] == 4
+        assert connection.execute("SELECT MAX(revision) FROM runtime_schema").fetchone()[0] == 5
         assert connection.execute("SELECT COUNT(*) FROM runtime_schema WHERE revision=2").fetchone()[0] == 1
         assert connection.execute("SELECT COUNT(*) FROM runtime_schema WHERE revision=3").fetchone()[0] == 1
         assert connection.execute("SELECT COUNT(*) FROM runtime_schema WHERE revision=4").fetchone()[0] == 1
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert connection.execute("SELECT COUNT(*) FROM runtime_schema WHERE revision=5").fetchone()[0] == 1
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 5
 
 
 def test_android_adapter_uses_only_explicit_read_only_commands() -> None:

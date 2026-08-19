@@ -6,7 +6,7 @@ import os
 import sys
 import time
 from collections.abc import Callable
-from threading import Thread
+from threading import Lock, Thread
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -37,6 +37,10 @@ class DeviceLeaseManager:
         self._process_id = process_id or str(os.getpid())
         self._cleanup_thread: Thread | None = None
         self._cleanup_running = False
+        # Week 6: 清理统计（后台线程与 API 线程共享）
+        self._stats_lock = Lock()
+        self._cleanup_runs = 0
+        self._cleanup_errors = 0
     
     def start_background_cleanup(self, interval_seconds: int = 30) -> None:
         """启动后台线程清理孤立 Lease
@@ -72,9 +76,13 @@ class DeviceLeaseManager:
     def _cleanup_loop(self, interval_seconds: int) -> None:
         """后台清理循环"""
         while self._cleanup_running:
+            with self._stats_lock:
+                self._cleanup_runs += 1
             try:
                 self._cleanup_orphaned_leases()
             except Exception as e:
+                with self._stats_lock:
+                    self._cleanup_errors += 1
                 logger.error(f"Lease cleanup failed: {e}", exc_info=True)
             
             # 分段 sleep，便于快速停止
@@ -83,20 +91,118 @@ class DeviceLeaseManager:
                     break
                 time.sleep(1.0)
     
-    def _cleanup_orphaned_leases(self) -> None:
-        """清理孤立 Lease（进程已死或已过期）"""
+    def trigger_cleanup(self) -> dict[str, int]:
+        """Week 6 手动干预：同步触发一轮清理（与后台线程同一逻辑）"""
+        with self._stats_lock:
+            self._cleanup_runs += 1
+        try:
+            return self._cleanup_orphaned_leases()
+        except Exception as e:
+            with self._stats_lock:
+                self._cleanup_errors += 1
+            logger.error(f"Manual lease cleanup failed: {e}", exc_info=True)
+            return {
+                "expired_found": 0,
+                "deadline_exceeded": 0,
+                "released": 0,
+                "checkpointed": 0,
+                "errors": 1,
+            }
+    
+    def force_release(self, lease_id: str) -> dict[str, bool | str | None]:
+        """Week 6 手动干预：强制释放指定 Lease
+        
+        若 Lease 关联了 Action，先创建恢复 Checkpoint（原因 manual_admin_release）。
+        """
+        lease = self._store.get_lease(lease_id)
+        if lease is None:
+            return {
+                "lease_id": lease_id,
+                "found": False,
+                "released": False,
+                "checkpointed": False,
+                "error": None,
+            }
+        
+        checkpointed = False
+        if lease.action_id:
+            try:
+                self._create_recovery_checkpoint(
+                    lease, resume_reason="manual_admin_release"
+                )
+                checkpointed = True
+            except Exception as e:
+                logger.error(
+                    f"Failed to create recovery checkpoint for force-released "
+                    f"lease {lease.id}: {e}",
+                    exc_info=True,
+                )
+        
+        try:
+            self._store.release_lease(lease_id)
+        except Exception as e:
+            logger.error(f"Failed to force-release lease {lease_id}: {e}", exc_info=True)
+            return {
+                "lease_id": lease_id,
+                "found": True,
+                "released": False,
+                "checkpointed": checkpointed,
+                "error": str(e),
+            }
+        
+        logger.info(f"Force-released lease {lease_id} by admin")
+        return {
+            "lease_id": lease_id,
+            "found": True,
+            "released": True,
+            "checkpointed": checkpointed,
+            "error": None,
+        }
+    
+    def cleanup_stats(self) -> dict[str, int]:
+        """Week 6: 清理统计（runs/errors）"""
+        with self._stats_lock:
+            return {"runs": self._cleanup_runs, "errors": self._cleanup_errors}
+    
+    def is_process_alive(self, process_id: str) -> bool:
+        """Week 6: 公开进程存活检测（管理查询用）"""
+        return self._is_process_alive(process_id)
+    
+    def _cleanup_orphaned_leases(self) -> dict[str, int]:
+        """清理孤立 Lease（进程已死或已过期），返回清理摘要
+
+        Week 5 Deadline 保护：deadline 超限的 Lease 无论进程是否存活都立即释放
+        （续期窗口已关闭，不再无限延长），Checkpoint 原因标记 deadline_exceeded。
+        """
+        summary = {
+            "expired_found": 0,
+            "deadline_exceeded": 0,
+            "released": 0,
+            "checkpointed": 0,
+            "errors": 0,
+        }
         try:
             now = self._clock()
             expired = self._store.list_expired_leases(now)
             
             if not expired:
-                return
+                return summary
             
+            summary["expired_found"] = len(expired)
             logger.info(f"Found {len(expired)} expired leases, checking process liveness")
             
             for lease in expired:
-                # 检查进程是否存活
-                if self._is_process_alive(lease.holder_process_id):
+                deadline_exceeded = lease.is_deadline_exceeded(now)
+                
+                if deadline_exceeded:
+                    # Week 5: 绝对 Deadline 已超限，续期不再允许，立即释放
+                    summary["deadline_exceeded"] += 1
+                    logger.warning(
+                        f"Lease {lease.id} exceeded deadline {lease.deadline_at} "
+                        f"(device={lease.device_id}, task={lease.task_id}, "
+                        f"holder={lease.holder_process_id}); releasing without renewal"
+                    )
+                elif self._is_process_alive(lease.holder_process_id):
                     # 进程还活着，但 Lease 过期了（可能是续期失败）
                     logger.warning(
                         f"Lease {lease.id} expired but process {lease.holder_process_id} "
@@ -112,8 +218,17 @@ class DeviceLeaseManager:
                 # 如果有关联 Action，创建恢复 Checkpoint
                 if lease.action_id:
                     try:
-                        self._create_recovery_checkpoint(lease)
+                        self._create_recovery_checkpoint(
+                            lease,
+                            resume_reason=(
+                                "deadline_exceeded"
+                                if deadline_exceeded
+                                else "process_crash_during_lease_hold"
+                            ),
+                        )
+                        summary["checkpointed"] += 1
                     except Exception as e:
+                        summary["errors"] += 1
                         logger.error(
                             f"Failed to create recovery checkpoint for lease {lease.id}: {e}",
                             exc_info=True,
@@ -122,11 +237,15 @@ class DeviceLeaseManager:
                 # 释放 Lease
                 try:
                     self._store.release_lease(lease.id)
+                    summary["released"] += 1
                     logger.info(f"Released orphaned lease {lease.id}")
                 except Exception as e:
+                    summary["errors"] += 1
                     logger.error(f"Failed to release lease {lease.id}: {e}", exc_info=True)
         except Exception as e:
+            summary["errors"] += 1
             logger.error(f"Error during lease cleanup: {e}", exc_info=True)
+        return summary
     
     def _is_process_alive(self, process_id: str) -> bool:
         """检查进程是否存在（跨平台）"""
@@ -154,14 +273,21 @@ class DeviceLeaseManager:
             except OSError:
                 return False
     
-    def _create_recovery_checkpoint(self, lease: DeviceExecutionLease) -> None:
+    def _create_recovery_checkpoint(
+        self,
+        lease: DeviceExecutionLease,
+        *,
+        resume_reason: str = "process_crash_during_lease_hold",
+    ) -> None:
         """为孤立 Lease 创建恢复 Checkpoint
         
         当进程崩溃时，如果 Lease 关联了 Action，说明 Action 可能：
         1. 已 propose 但未 execute（状态 = PROPOSED）
         2. 已 execute 但未 verify（状态 = EXECUTED）
         
-        两种情况都需要创建 Checkpoint 标记 unresolved_action_ref
+        两种情况都需要创建 Checkpoint 标记 unresolved_action_ref。
+        resume_reason 区分崩溃（默认）、Deadline 超限（deadline_exceeded）
+        和管理员手动释放（manual_admin_release）。
         """
         from uuid import uuid4
         from .runtime_kernel.action import ActionStatus
@@ -243,7 +369,7 @@ class DeviceLeaseManager:
                 if task.failure_state
                 else None
             ),
-            resume_reason="process_crash_during_lease_hold",
+            resume_reason=resume_reason,
             required_fresh_observation=True,
             unresolved_action_ref=lease.action_id,
             created_at=self._clock(),

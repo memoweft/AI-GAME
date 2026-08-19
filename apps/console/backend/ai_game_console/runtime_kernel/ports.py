@@ -6,7 +6,7 @@ from .action import Action, ActionExecution
 from .checkpoint import Checkpoint, CheckpointDraft
 from .event import RuntimeEvent, RuntimeEventDraft
 from .fact import Fact
-from .lease import DeviceExecutionLease
+from .lease import DeviceExecutionLease, LeaseStats
 from .observation import ArtifactRef, Observation, RawObservation
 from .stage import Stage
 from .task import Task
@@ -142,6 +142,7 @@ class RuntimeStorePort(Protocol):
         ttl_seconds: int,
         lease_id: str,
         acquired_at: str,
+        deadline_seconds: int | None = None,
     ) -> DeviceExecutionLease: ...
 
     def renew_lease(
@@ -150,11 +151,26 @@ class RuntimeStorePort(Protocol):
 
     def release_lease(self, lease_id: str) -> None: ...
 
+    def get_lease(self, lease_id: str) -> DeviceExecutionLease | None: ...
+
     def get_lease_for_device(self, device_id: str) -> DeviceExecutionLease | None: ...
 
     def get_lease_for_task(self, task_id: str) -> DeviceExecutionLease | None: ...
 
     def list_expired_leases(self, now: str) -> tuple[DeviceExecutionLease, ...]: ...
+
+    def list_deadline_exceeded_leases(
+        self, now: str
+    ) -> tuple[DeviceExecutionLease, ...]: ...
+
+    def list_leases(
+        self,
+        *,
+        device_id: str | None = None,
+        task_id: str | None = None,
+    ) -> tuple[DeviceExecutionLease, ...]: ...
+
+    def lease_stats(self, now: str) -> LeaseStats: ...
 
     def update_lease_action(self, lease_id: str, action_id: str | None) -> None: ...
 

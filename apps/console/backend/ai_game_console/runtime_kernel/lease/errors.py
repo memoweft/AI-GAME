@@ -21,12 +21,25 @@ class LeaseConflict(Exception):
 
 
 class LeaseExpired(Exception):
-    """Lease 已过期"""
-    def __init__(self, lease_id: str, expires_at: str, now: str) -> None:
+    """Lease 已过期或已超过绝对 Deadline（Week 5）"""
+    def __init__(
+        self,
+        lease_id: str,
+        expires_at: str,
+        now: str,
+        deadline_at: str | None = None,
+    ) -> None:
         self.lease_id = lease_id
         self.expires_at = expires_at
         self.now = now
-        super().__init__(f"Lease {lease_id} expired at {expires_at} (now: {now})")
+        self.deadline_at = deadline_at
+        if deadline_at is not None:
+            super().__init__(
+                f"Lease {lease_id} exceeded deadline {deadline_at} (now: {now}); "
+                f"renewal is no longer allowed"
+            )
+        else:
+            super().__init__(f"Lease {lease_id} expired at {expires_at} (now: {now})")
 
 
 class LeaseNotFound(Exception):

@@ -17,6 +17,7 @@ class DeviceExecutionLease:
     holder_process_id: str
     acquired_at: str
     expires_at: str
+    deadline_at: str  # 绝对截止时刻（Week 5）：续期永远无法推迟
     last_heartbeat_at: str
     action_id: str | None  # 当前执行的 Action（用于恢复检测）
 
@@ -27,16 +28,25 @@ class DeviceExecutionLease:
         _required(self.holder_process_id, "lease.holder_process_id")
         _utc_timestamp(self.acquired_at, "lease.acquired_at")
         _utc_timestamp(self.expires_at, "lease.expires_at")
+        _utc_timestamp(self.deadline_at, "lease.deadline_at")
         _utc_timestamp(self.last_heartbeat_at, "lease.last_heartbeat_at")
         if self.action_id is not None:
             _required(self.action_id, "lease.action_id")
+        if self.deadline_at < self.expires_at:
+            raise ValueError(
+                "lease.deadline_at must not be earlier than lease.expires_at"
+            )
 
     def is_expired(self, now: str) -> bool:
         """检查 Lease 是否已过期"""
         return self.expires_at <= now
 
+    def is_deadline_exceeded(self, now: str) -> bool:
+        """检查 Lease 是否已超过绝对 Deadline（Week 5）"""
+        return self.deadline_at <= now
+
     def renew(self, new_expires_at: str, new_heartbeat_at: str) -> DeviceExecutionLease:
-        """续期 Lease，返回新实例"""
+        """续期 Lease，返回新实例（deadline_at 不变，续期不可推迟绝对截止）"""
         return DeviceExecutionLease(
             id=self.id,
             device_id=self.device_id,
@@ -44,6 +54,7 @@ class DeviceExecutionLease:
             holder_process_id=self.holder_process_id,
             acquired_at=self.acquired_at,
             expires_at=new_expires_at,
+            deadline_at=self.deadline_at,
             last_heartbeat_at=new_heartbeat_at,
             action_id=self.action_id,
         )
@@ -57,9 +68,21 @@ class DeviceExecutionLease:
             holder_process_id=self.holder_process_id,
             acquired_at=self.acquired_at,
             expires_at=self.expires_at,
+            deadline_at=self.deadline_at,
             last_heartbeat_at=self.last_heartbeat_at,
             action_id=action_id,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class LeaseStats:
+    """当前 Lease 统计（Week 6 管理查询；release 即删除，无历史记录）"""
+
+    total: int
+    active: int
+    expired: int
+    deadline_exceeded: int
+    avg_current_hold_seconds: float | None
 
 
 def _required(value: str, name: str) -> str:

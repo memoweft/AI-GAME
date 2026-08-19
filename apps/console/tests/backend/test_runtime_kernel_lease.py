@@ -230,7 +230,7 @@ def test_renew_lease_extends_expiration(tmp_path: Path) -> None:
     )
     store.create_task(task, event)
     
-    # 获取 Lease
+    # 获取 Lease（显式长 Deadline，验证续期可正常延长 TTL）
     acquired_at = clock()
     lease = store.acquire_lease(
         device_id="device-1",
@@ -239,6 +239,7 @@ def test_renew_lease_extends_expiration(tmp_path: Path) -> None:
         ttl_seconds=60,
         lease_id="lease-1",
         acquired_at=acquired_at,
+        deadline_seconds=3600,
     )
     
     original_expires_at = lease.expires_at
@@ -304,7 +305,7 @@ def test_list_expired_leases_returns_expired_only(tmp_path: Path) -> None:
         acquired_at=TIMES[0],
     )
     
-    # Lease 2: 较晚过期（ttl=3600）
+    # Lease 2: 较晚过期（ttl=3600，配同等 Deadline 避免 Week 5 默认 300s 截止）
     lease2 = store.acquire_lease(
         device_id="device-2",
         task_id="task-2",
@@ -312,6 +313,7 @@ def test_list_expired_leases_returns_expired_only(tmp_path: Path) -> None:
         ttl_seconds=3600,
         lease_id="lease-2",
         acquired_at=TIMES[1],
+        deadline_seconds=3600,
     )
     
     # 在 Lease 1 过期时间后查询

@@ -4,7 +4,7 @@ import json
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, Mapping
 
@@ -19,7 +19,7 @@ from ...runtime_kernel.action import (
 from ...runtime_kernel.checkpoint import Checkpoint, CheckpointDraft
 from ...runtime_kernel.event import EventActor, RuntimeEvent, RuntimeEventDraft
 from ...runtime_kernel.fact import Fact, FactScope, FactStatus
-from ...runtime_kernel.lease import DeviceExecutionLease
+from ...runtime_kernel.lease import DeviceExecutionLease, LeaseStats
 from ...runtime_kernel.lease.errors import LeaseConflict, LeaseExpired, LeaseNotFound
 from ...runtime_kernel.observation import (
     ArtifactRef,
@@ -40,7 +40,10 @@ from ...runtime_kernel.task import FailureState, Task, TaskSource, TaskStatus
 from ...runtime_kernel.verify import Verification, VerificationMethod, VerificationVerdict
 
 
-_SCHEMA_REVISION = 4
+_SCHEMA_REVISION = 5
+
+# Week 5: 默认 Lease 绝对 Deadline = 获取后 300 秒（续期不可推迟）
+DEFAULT_LEASE_DEADLINE_SECONDS = 300
 
 _PHASE_2_SCHEMA = """
 CREATE TABLE IF NOT EXISTS runtime_schema (
@@ -309,6 +312,13 @@ CREATE INDEX ix_runtime_device_leases_expires
 ON runtime_device_leases(expires_at);
 """
 
+_MIGRATION_4_TO_5 = """
+ALTER TABLE runtime_device_leases ADD COLUMN deadline_at TEXT;
+
+CREATE INDEX ix_runtime_device_leases_deadline
+ON runtime_device_leases(deadline_at);
+"""
+
 
 class SQLiteRuntimeStore:
     """SQLite adapter implementing the Runtime Store port without live wiring."""
@@ -366,6 +376,42 @@ class SQLiteRuntimeStore:
                     statements=_MIGRATION_3_TO_4,
                     target_revision=4,
                 )
+                revision = 4
+            if revision == 4:
+                self._apply_migration(
+                    connection,
+                    statements=_MIGRATION_4_TO_5,
+                    target_revision=5,
+                )
+                self._backfill_lease_deadlines(connection)
+
+    @staticmethod
+    def _backfill_lease_deadlines(connection: sqlite3.Connection) -> None:
+        """为 v4 库中存量 Lease 行回填 deadline_at = acquired_at + 默认 300 秒"""
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """
+                SELECT id, acquired_at
+                FROM runtime_device_leases
+                WHERE deadline_at IS NULL
+                """
+            ).fetchall()
+            for row in rows:
+                acquired_dt = datetime.fromisoformat(
+                    row["acquired_at"].replace("Z", "+00:00")
+                )
+                deadline_at = (
+                    acquired_dt + timedelta(seconds=DEFAULT_LEASE_DEADLINE_SECONDS)
+                ).isoformat()
+                connection.execute(
+                    "UPDATE runtime_device_leases SET deadline_at = ? WHERE id = ?",
+                    (deadline_at, row["id"]),
+                )
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
 
     @staticmethod
     def _apply_migration(
@@ -1575,8 +1621,12 @@ class SQLiteRuntimeStore:
         ttl_seconds: int,
         lease_id: str,
         acquired_at: str,
+        deadline_seconds: int | None = None,
     ) -> DeviceExecutionLease:
-        """获取设备独占权，如果已被占用则抛出 LeaseConflict"""
+        """获取设备独占权，如果已被占用则抛出 LeaseConflict
+
+        Week 5：deadline_at 为绝对截止（默认 acquired_at + 300s），续期不可推迟。
+        """
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
@@ -1598,19 +1648,33 @@ class SQLiteRuntimeStore:
                         requested_task_id=task_id,
                     )
                 
-                # 计算过期时间
-                from datetime import timedelta
+                # 计算过期时间和绝对 Deadline（Week 5）
                 acquired_dt = datetime.fromisoformat(acquired_at.replace("Z", "+00:00"))
                 expires_dt = acquired_dt.replace(microsecond=0) + timedelta(seconds=ttl_seconds)
                 expires_at = expires_dt.isoformat()
-                
+
+                effective_deadline = (
+                    deadline_seconds
+                    if deadline_seconds is not None
+                    else DEFAULT_LEASE_DEADLINE_SECONDS
+                )
+                deadline_dt = acquired_dt.replace(microsecond=0) + timedelta(
+                    seconds=effective_deadline
+                )
+                deadline_at = deadline_dt.isoformat()
+                if deadline_dt < expires_dt:
+                    raise ValueError(
+                        "deadline_seconds must not be shorter than ttl_seconds "
+                        f"(deadline {deadline_at} earlier than expires {expires_at})"
+                    )
+
                 # 插入新 Lease
                 connection.execute(
                     """
                     INSERT INTO runtime_device_leases (
                         id, device_id, task_id, holder_process_id,
-                        acquired_at, expires_at, last_heartbeat_at, action_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        acquired_at, expires_at, deadline_at, last_heartbeat_at, action_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         lease_id,
@@ -1619,6 +1683,7 @@ class SQLiteRuntimeStore:
                         holder_process_id,
                         acquired_at,
                         expires_at,
+                        deadline_at,
                         acquired_at,
                         None,
                     ),
@@ -1632,6 +1697,7 @@ class SQLiteRuntimeStore:
                     holder_process_id=holder_process_id,
                     acquired_at=acquired_at,
                     expires_at=expires_at,
+                    deadline_at=deadline_at,
                     last_heartbeat_at=acquired_at,
                     action_id=None,
                 )
@@ -1642,14 +1708,19 @@ class SQLiteRuntimeStore:
     def renew_lease(
         self, lease_id: str, new_expires_at: str, new_heartbeat_at: str
     ) -> DeviceExecutionLease:
-        """续期 Lease"""
+        """续期 Lease
+
+        Week 5 Deadline 保护：
+        1. new_heartbeat_at >= deadline_at 时抛 LeaseExpired（续期窗口已关闭）；
+        2. 否则钳制 new_expires_at = min(请求值, deadline_at)，续期永不跨越 Deadline。
+        """
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 row = connection.execute(
                     """
                     SELECT id, device_id, task_id, holder_process_id,
-                           acquired_at, expires_at, last_heartbeat_at, action_id
+                           acquired_at, expires_at, deadline_at, last_heartbeat_at, action_id
                     FROM runtime_device_leases
                     WHERE id = ?
                     """,
@@ -1659,13 +1730,26 @@ class SQLiteRuntimeStore:
                 if not row:
                     raise LeaseNotFound(lease_id=lease_id)
                 
+                deadline_at = row["deadline_at"]
+                if deadline_at is not None and new_heartbeat_at >= deadline_at:
+                    raise LeaseExpired(
+                        lease_id=lease_id,
+                        expires_at=row["expires_at"],
+                        now=new_heartbeat_at,
+                        deadline_at=deadline_at,
+                    )
+                
+                effective_expires_at = new_expires_at
+                if deadline_at is not None and new_expires_at > deadline_at:
+                    effective_expires_at = deadline_at
+                
                 connection.execute(
                     """
                     UPDATE runtime_device_leases
                     SET expires_at = ?, last_heartbeat_at = ?
                     WHERE id = ?
                     """,
-                    (new_expires_at, new_heartbeat_at, lease_id),
+                    (effective_expires_at, new_heartbeat_at, lease_id),
                 )
                 connection.commit()
                 
@@ -1675,7 +1759,8 @@ class SQLiteRuntimeStore:
                     task_id=row["task_id"],
                     holder_process_id=row["holder_process_id"],
                     acquired_at=row["acquired_at"],
-                    expires_at=new_expires_at,
+                    expires_at=effective_expires_at,
+                    deadline_at=row["deadline_at"] or row["expires_at"],
                     last_heartbeat_at=new_heartbeat_at,
                     action_id=row["action_id"],
                 )
@@ -1692,13 +1777,31 @@ class SQLiteRuntimeStore:
             )
             connection.commit()
 
+    def get_lease(self, lease_id: str) -> DeviceExecutionLease | None:
+        """按 ID 查询 Lease（Week 6 管理查询/手动释放）"""
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT id, device_id, task_id, holder_process_id,
+                       acquired_at, expires_at, deadline_at, last_heartbeat_at, action_id
+                FROM runtime_device_leases
+                WHERE id = ?
+                """,
+                (lease_id,),
+            ).fetchone()
+            
+            if not row:
+                return None
+            
+            return self._lease_from_row(row)
+
     def get_lease_for_device(self, device_id: str) -> DeviceExecutionLease | None:
         """查询设备当前 Lease"""
         with self._connection() as connection:
             row = connection.execute(
                 """
                 SELECT id, device_id, task_id, holder_process_id,
-                       acquired_at, expires_at, last_heartbeat_at, action_id
+                       acquired_at, expires_at, deadline_at, last_heartbeat_at, action_id
                 FROM runtime_device_leases
                 WHERE device_id = ?
                 """,
@@ -1716,7 +1819,7 @@ class SQLiteRuntimeStore:
             row = connection.execute(
                 """
                 SELECT id, device_id, task_id, holder_process_id,
-                       acquired_at, expires_at, last_heartbeat_at, action_id
+                       acquired_at, expires_at, deadline_at, last_heartbeat_at, action_id
                 FROM runtime_device_leases
                 WHERE task_id = ?
                 """,
@@ -1734,7 +1837,7 @@ class SQLiteRuntimeStore:
             rows = connection.execute(
                 """
                 SELECT id, device_id, task_id, holder_process_id,
-                       acquired_at, expires_at, last_heartbeat_at, action_id
+                       acquired_at, expires_at, deadline_at, last_heartbeat_at, action_id
                 FROM runtime_device_leases
                 WHERE expires_at <= ?
                 ORDER BY expires_at
@@ -1743,6 +1846,97 @@ class SQLiteRuntimeStore:
             ).fetchall()
             
             return tuple(self._lease_from_row(row) for row in rows)
+
+    def list_deadline_exceeded_leases(self, now: str) -> tuple[DeviceExecutionLease, ...]:
+        """查询所有已超过绝对 Deadline 的 Lease（Week 5）"""
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, device_id, task_id, holder_process_id,
+                       acquired_at, expires_at, deadline_at, last_heartbeat_at, action_id
+                FROM runtime_device_leases
+                WHERE deadline_at IS NOT NULL AND deadline_at <= ?
+                ORDER BY deadline_at
+                """,
+                (now,),
+            ).fetchall()
+            
+            return tuple(self._lease_from_row(row) for row in rows)
+
+    def list_leases(
+        self,
+        *,
+        device_id: str | None = None,
+        task_id: str | None = None,
+    ) -> tuple[DeviceExecutionLease, ...]:
+        """列出当前所有 Lease（Week 6 管理查询），支持设备/任务过滤"""
+        clauses: list[str] = []
+        params: list[str] = []
+        if device_id is not None:
+            clauses.append("device_id = ?")
+            params.append(device_id)
+        if task_id is not None:
+            clauses.append("task_id = ?")
+            params.append(task_id)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT id, device_id, task_id, holder_process_id,
+                       acquired_at, expires_at, deadline_at, last_heartbeat_at, action_id
+                FROM runtime_device_leases
+                {where}
+                ORDER BY acquired_at, id
+                """,
+                params,
+            ).fetchall()
+            
+            return tuple(self._lease_from_row(row) for row in rows)
+
+    def lease_stats(self, now: str) -> LeaseStats:
+        """当前 Lease 统计（Week 6 管理查询；release 即删除，无历史记录）"""
+        now_dt = datetime.fromisoformat(now.replace("Z", "+00:00"))
+        with self._connection() as connection:
+            total = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM runtime_device_leases"
+                ).fetchone()[0]
+            )
+            active = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM runtime_device_leases WHERE expires_at > ?",
+                    (now,),
+                ).fetchone()[0]
+            )
+            deadline_exceeded = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) FROM runtime_device_leases
+                    WHERE deadline_at IS NOT NULL AND deadline_at <= ?
+                    """,
+                    (now,),
+                ).fetchone()[0]
+            )
+            rows = connection.execute(
+                "SELECT acquired_at FROM runtime_device_leases"
+            ).fetchall()
+        avg_hold: float | None = None
+        if rows:
+            holds = [
+                (
+                    now_dt
+                    - datetime.fromisoformat(row["acquired_at"].replace("Z", "+00:00"))
+                ).total_seconds()
+                for row in rows
+            ]
+            avg_hold = sum(holds) / len(holds)
+        return LeaseStats(
+            total=total,
+            active=active,
+            expired=total - active,
+            deadline_exceeded=deadline_exceeded,
+            avg_current_hold_seconds=avg_hold,
+        )
 
     def update_lease_action(self, lease_id: str, action_id: str | None) -> None:
         """更新 Lease 关联的 Action"""
@@ -1755,6 +1949,10 @@ class SQLiteRuntimeStore:
 
     @staticmethod
     def _lease_from_row(row: sqlite3.Row) -> DeviceExecutionLease:
+        deadline_at = row["deadline_at"] if "deadline_at" in row.keys() else None
+        if deadline_at is None:
+            # 防御：v4 库未完成回填的存量行（正常路径 initialize 已回填）
+            deadline_at = row["expires_at"]
         return DeviceExecutionLease(
             id=row["id"],
             device_id=row["device_id"],
@@ -1762,6 +1960,7 @@ class SQLiteRuntimeStore:
             holder_process_id=row["holder_process_id"],
             acquired_at=row["acquired_at"],
             expires_at=row["expires_at"],
+            deadline_at=deadline_at,
             last_heartbeat_at=row["last_heartbeat_at"],
             action_id=row["action_id"],
         )
