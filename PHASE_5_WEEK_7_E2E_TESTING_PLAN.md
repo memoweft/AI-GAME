@@ -1,7 +1,7 @@
 # Phase 5 Week 7: 端到端集成测试计划
 
 **目标**: 验证 DeviceExecutionLease 完整生命周期和恢复流程  
-**状态**: 🚧 进行中（Day 1-3 完成，Day 4 性能基准 / Day 5 报告待做）  
+**状态**: 🚧 进行中（Day 1-4 完成，仅剩 Day 5 测试报告/故障排查）  
 **预计时间**: 3-5 天
 
 ---
@@ -97,7 +97,7 @@
 
 ---
 
-### 6. 后台清理线程稳定性测试 ✅ (Day 2，CPU 占用待 Day 4 基准)
+### 6. 后台清理线程稳定性测试 ✅ (Day 2 + Day 4)
 
 **场景**: 后台清理线程长期运行
 
@@ -105,9 +105,9 @@
 - ✅ 线程启动和停止正常
 - ✅ 清理循环不会崩溃
 - ✅ 异常被正确捕获和记录
-- [ ] CPU 占用合理（<1%）→ 归入 Day 4 性能基准
+- ✅ CPU 占用合理（<1%）：实测 **0.16%**（Day 4，空闲、10s 窗口）
 
-**测试**: `test_runtime_kernel_e2e_concurrency.py::test_background_cleanup_thread_stability` + `test_background_cleanup_handles_exceptions_gracefully`
+**测试**: `test_runtime_kernel_e2e_concurrency.py::test_background_cleanup_thread_stability` + `test_background_cleanup_handles_exceptions_gracefully` + `test_runtime_kernel_e2e_performance.py::test_background_cleanup_cpu_idle`
 
 **实现方式**:
 - 启动后台清理
@@ -211,9 +211,22 @@
 6. ✅ 实现 `test_execute_action_complete_flow_integration`（+ FAIL 裁决变体）
 7. ✅ 增强现有 `test_runtime_kernel_execute_action.py`（INPUT_TEXT/HOME、Lease 冲突、重放拒绝、过期决策拒绝）
 
-### Day 4: 并发冲突和性能测试
-8. 实现 `test_concurrent_lease_acquisition_conflict`
-9. 性能基准测试（Lease 续期开销）
+### Day 4: 并发冲突和性能测试 ✅
+8. ✅ 实现 `test_concurrent_lease_acquisition_conflict`（实际在 Day 2 完成）
+9. ✅ 性能基准测试（Lease 续期开销 + 多设备规模 + 清理线程 CPU）
+
+**Day 4 基准结果**（`test_runtime_kernel_e2e_performance.py`，3 tests）:
+
+| 操作 | n | 中位数 | p99 | max |
+|------|---|--------|-----|-----|
+| acquire_lease | 200 | 7.9ms | 8.9ms | 10.2ms |
+| renew_lease | 600 | 7.9ms | 8.3ms | 10.1ms |
+| release_lease | 200 | 7.9ms | 10.2ms | 19.2ms |
+| 50 设备并发获取+释放 | 50+50 | 6.4ms | — | 总计 690ms |
+| 后台清理线程 CPU（空闲） | 10s 窗口 | **0.16%** | — | — |
+
+注：单操作 ~8ms 主要来自每次调用新建 SQLite 连接的开销（文件打开 + PRAGMA），
+对 Lease 操作频率（每 Task 每分钟几次）完全可接受；无 busy-loop、无病态锁等待。
 
 ### Day 5: 文档和清理
 10. 编写测试报告
@@ -224,10 +237,10 @@
 
 ## 🎯 成功标准
 
-- ✅ 所有新增集成测试通过（实际 17 个：e2e_integration 5 + e2e_concurrency 4 + execute_action 8）
-- ✅ 全量回归继续通过（实际 507 passed，2026-08-19）
-- [ ] 无内存泄漏或资源泄漏（Day 4/5 验证）
-- [ ] CPU 占用合理（后台清理 <1%，Day 4 基准）
+- ✅ 所有新增集成测试通过（实际 20 个：e2e_integration 5 + e2e_concurrency 4 + execute_action 8 + e2e_performance 3）
+- ✅ 全量回归继续通过（实际 510 passed，2026-08-19）
+- [ ] 无内存泄漏或资源泄漏（Day 5 报告中说明）
+- ✅ CPU 占用合理（后台清理实测 0.16% < 1%）
 - [ ] 文档完整（测试报告、故障排查，Day 5）
 
 ---
@@ -250,6 +263,6 @@
 
 - **Day 1** (commit b1f1810): 进程崩溃恢复、Lease 过期清理、Checkpoint 去重 — 3 个集成测试 ✅
 - **Day 2** (commit 6a508cd): 多 Task 并发、并发 acquire 冲突、后台清理线程稳定性与异常容错 — 4 个集成测试 ✅
-- **Day 3** (2026-08-19): execute_action 完整流程（SUCCESS 提交 + FAIL 恢复）、execute_action 测试增强（5 种类型全覆盖、LeaseConflict、防重放、防过期决策）— 6 个新测试 ✅，全量回归 507 passed
-- **Day 4** (待做): 性能基准（Lease 续期开销、后台清理 CPU）
+- **Day 3** (2026-08-19): execute_action 完整流程（SUCCESS 提交 + FAIL 恢复）、execute_action 测试增强（5 种类型全覆盖、LeaseConflict、防重放、防过期决策）— 6 个新测试 ✅
+- **Day 4** (2026-08-19): 性能基准 — acquire/renew/release 中位数 ~7.9ms、50 设备并发 690ms、后台清理空闲 CPU 0.16%（<1% 达标）— 3 个新测试 ✅，全量回归 510 passed
 - **Day 5** (待做): 测试报告、故障排查指南

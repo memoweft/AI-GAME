@@ -25,11 +25,11 @@
 | Phase 2 | 持久化脊柱 | ✅ 完成 | 26 passed | Task/Stage/Observation 基础 |
 | Phase 3 | Observation 脊柱 | ✅ 完成 | 17 passed | 捕获、通道、老化逻辑 |
 | Phase 4 | Action→Verify→Commit | ✅ 完成 | 18 passed | 原子提交、恢复策略 |
-| **Phase 5** | **设备所有权** | **🚧 进行中** | **57 passed** | **Lease、执行器、排空、E2E 集成** |
+| **Phase 5** | **设备所有权** | **🚧 进行中** | **60 passed** | **Lease、执行器、排空、E2E 集成** |
 | Phase 6 | Gateway 契约 | ⏳ 待开始 | - | 消息路由、会话管理 |
 | Phase 7 | Legacy 迁移 | ⏳ 待开始 | - | 三阶段切换、数据迁移 |
 
-**当前测试总数**: 507 passed（全量回归，2026-08-19；Phase 5 Week 7 Day 3 后）
+**当前测试总数**: 510 passed（全量回归，2026-08-19；Phase 5 Week 7 Day 4 后）
 
 ---
 
@@ -172,7 +172,7 @@
 
 ---
 
-### Phase 5 Week 7: 端到端集成测试 🚧 (Day 1-3 完成, 17 个新测试)
+### Phase 5 Week 7: 端到端集成测试 🚧 (Day 1-4 完成, 20 个新测试)
 
 > 注：原计划的 Week 5（Deadline 保护）和 Week 6（管理 UI/API）暂未实施，
 > 项目直接进入 Week 7 端到端集成测试验证已实现的 Lease 生命周期。
@@ -181,6 +181,7 @@
 - `tests/backend/test_runtime_kernel_e2e_integration.py`（5 tests）
 - `tests/backend/test_runtime_kernel_e2e_concurrency.py`（4 tests）
 - `tests/backend/test_runtime_kernel_execute_action.py`（8 tests，含 Day 3 增强）
+- `tests/backend/test_runtime_kernel_e2e_performance.py`（3 tests，Day 4 基准）
 
 **Day 1 — 进程崩溃恢复与过期清理** (commit b1f1810):
 - 孤立 Lease 恢复：死 PID 检测 → Checkpoint(unresolved_action_ref) → 释放
@@ -199,10 +200,15 @@
 - 类型化执行器全覆盖（tap/swipe/input_text/back/home 5 种分发）
 - 栅栏增强：设备 Lease 冲突（`LeaseConflict`）、防重放、防过期决策
 
-**全量回归**: 507 passed（~97s）
+**Day 4 — 性能基准** (2026-08-19):
+- acquire/renew/release 单操作：中位数 ~7.9ms、p99 ~9ms（200 轮 × 3 续期）
+- 50 设备并发获取+释放：总计 690ms
+- 后台清理线程空闲 CPU：**0.16%**（达标 <1% 目标，无 busy-loop）
+
+**全量回归**: 510 passed（~118s）
 
 **文档**:
-- `PHASE_5_WEEK_7_E2E_TESTING_PLAN.md`（10 个场景，8 个已验证 ✅）
+- `PHASE_5_WEEK_7_E2E_TESTING_PLAN.md`（10 个场景，9 个已验证 ✅，场景 10 可选）
 
 ---
 
@@ -291,15 +297,14 @@
 2. ✅ **进程崩溃恢复** (Day 1)：孤立 Lease 检测 → Checkpoint(unresolved_action_ref)
 3. ⏳ **Deadline 超时**：依赖 Week 5（暂未实施）
 4. 🎯 **真实设备测试**（可选，低优先级）
-5. 🚧 **性能测试** (Day 4 待做)：Lease 续期开销、清理线程 CPU 占用
+5. ✅ **性能测试** (Day 4)：Lease 续期开销中位数 ~7.9ms、清理线程空闲 CPU 0.16%
 
-**剩余** (Day 4-5):
-- Day 4: 性能基准（Lease 续期开销、后台清理 CPU <1%）
+**剩余** (Day 5):
 - Day 5: 测试报告 + 故障排查指南
 
 **文档**:
 - 测试报告 (Day 5)
-- 性能基准 (Day 4)
+- 性能基准 (Day 4 ✅)
 - 故障排查指南 (Day 5)
 
 ---
@@ -308,9 +313,9 @@
 
 Phase 5 完成的定义：
 - ✅ Week 1-4 完成（40 tests passed）
-- 🚧 Week 7 进行中（Day 1-3 完成，17 tests；Day 4 性能基准 / Day 5 报告待做）
+- 🚧 Week 7 进行中（Day 1-4 完成，20 tests；仅 Day 5 报告/指南待做）
 - ⏳ Week 5（Deadline 保护）、Week 6（管理 UI/API）——计划保留，暂未实施
-- ✅ 所有测试通过（实际：507 passed，2026-08-19）
+- ✅ 所有测试通过（实际：510 passed，2026-08-19）
 - ⏳ 真实设备执行 tap/swipe/back/home 成功（可选，低优先级）
 - ✅ 两个 Task 无法同时 acquire 同一设备（Day 2 并发冲突测试）
 - ✅ Lease 过期后自动清理（Day 1 过期清理测试）
@@ -358,12 +363,12 @@ Phase 5 完成的定义：
 ## 📈 项目进度
 
 ### 整体进度
-- **已完成**: Phase 0-4 + Phase 5 Week 1-4 + Week 7 Day 1-3
-- **进行中**: Phase 5 Week 7（Day 4 性能基准 / Day 5 报告）
+- **已完成**: Phase 0-4 + Phase 5 Week 1-4 + Week 7 Day 1-4
+- **进行中**: Phase 5 Week 7（仅剩 Day 5 测试报告/故障排查）
 - **待开始**: Phase 5 Week 5-6（计划保留）、Phase 6-7
 
-### 代码统计（截至 Week 7 Day 3, 2026-08-19）
-- 测试数量: 507 passed（其中 Phase 5 共 57 个，含 Week 7 新增 17 个）
+### 代码统计（截至 Week 7 Day 4, 2026-08-19）
+- 测试数量: 510 passed（其中 Phase 5 共 60 个，含 Week 7 新增 20 个）
 - 代码行数: ~15,000 lines (backend runtime_kernel)
 - 文档: 11+ 设计文档
 
@@ -401,10 +406,10 @@ Phase 5 完成的定义：
 
 ## 🚀 下一步行动
 
-### 立即开始（Week 7 Day 4-5）
-1. Day 4: 性能基准测试（Lease 续期开销、后台清理 CPU 占用）
-2. Day 5: 编写 Week 7 测试报告
-3. Day 5: 更新故障排查指南
+### 立即开始（Week 7 Day 5）
+1. Day 5: 编写 Week 7 测试报告（引用 Day 4 基准数据）
+2. Day 5: 更新故障排查指南
+3. Day 5: 代码审查和重构
 
 ### 短期规划（Week 5-6，计划保留）
 1. Lease Deadline 保护（防止无限续期）
@@ -436,4 +441,4 @@ Phase 5 完成的定义：
 
 ---
 
-**最后更新**: Phase 5 Week 7 Day 3 完成（2026-08-19），全量回归 507 passed
+**最后更新**: Phase 5 Week 7 Day 4 完成（2026-08-19），全量回归 510 passed
