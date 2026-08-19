@@ -25,11 +25,11 @@
 | Phase 2 | 持久化脊柱 | ✅ 完成 | 26 passed | Task/Stage/Observation 基础 |
 | Phase 3 | Observation 脊柱 | ✅ 完成 | 17 passed | 捕获、通道、老化逻辑 |
 | Phase 4 | Action→Verify→Commit | ✅ 完成 | 18 passed | 原子提交、恢复策略 |
-| **Phase 5** | **设备所有权** | **🚧 进行中** | **60 passed** | **Lease、执行器、排空、E2E 集成** |
+| **Phase 5** | **设备所有权** | **✅ 完成** | **79 passed** | **Lease、执行器、排空、Deadline、管理 API、E2E 集成** |
 | Phase 6 | Gateway 契约 | ⏳ 待开始 | - | 消息路由、会话管理 |
 | Phase 7 | Legacy 迁移 | ⏳ 待开始 | - | 三阶段切换、数据迁移 |
 
-**当前测试总数**: 510 passed（全量回归，2026-08-19；Phase 5 Week 7 完成后）
+**当前测试总数**: 529 passed（全量回归，2026-08-19；Phase 5 全部完成后）
 
 ---
 
@@ -174,8 +174,8 @@
 
 ### Phase 5 Week 7: 端到端集成测试 ✅ (Day 1-5 全部完成, 20 个测试, 2026-08-19 收官)
 
-> 注：原计划的 Week 5（Deadline 保护）和 Week 6（管理 UI/API）暂未实施，
-> 项目直接进入 Week 7 端到端集成测试验证已实现的 Lease 生命周期。
+> 注：原计划的 Week 5（Deadline 保护）和 Week 6（管理 UI/API）曾延后，
+> 项目直接进入 Week 7 端到端集成测试；两周已于 2026-08-19 补做完成（见下节）。
 
 **测试文件**:
 - `tests/backend/test_runtime_kernel_e2e_integration.py`（5 tests）
@@ -212,9 +212,9 @@
 
 ---
 
-## 🚧 Phase 5 剩余工作
+## ✅ Phase 5 补做工作（Week 5-6，2026-08-19 全部完成）
 
-### Week 5: Deadline 保护机制 (估计 3-5 天)
+### Week 5: Deadline 保护机制 ✅（补做完成, 2026-08-19, 10 tests）
 
 **目标**: 防止 Lease 无限续期，确保异常情况下任务最终超时
 
@@ -247,7 +247,7 @@
 
 ---
 
-### Week 6: 管理 UI/API (估计 5-7 天)
+### Week 6: 管理 UI/API ✅（补做完成, 2026-08-19, 9 tests）
 
 **目标**: 提供 Lease 状态查询和手动干预能力
 
@@ -295,7 +295,7 @@
 **测试场景**（详见 `PHASE_5_WEEK_7_E2E_TESTING_PLAN.md`）:
 1. ✅ **并发冲突** (Day 2)：并发 acquire 仅一个成功，另一个 `LeaseConflict`
 2. ✅ **进程崩溃恢复** (Day 1)：孤立 Lease 检测 → Checkpoint(unresolved_action_ref)
-3. ⏳ **Deadline 超时**：依赖 Week 5（暂未实施）
+3. ✅ **Deadline 超时**：Week 5 补做完成 —— 超 Deadline 强制回收（含存活进程）+ `deadline_exceeded` Checkpoint（见下节 Week 5）
 4. 🎯 **真实设备测试**（可选，低优先级）
 5. ✅ **性能测试** (Day 4)：Lease 续期开销中位数 ~7.9ms、清理线程空闲 CPU 0.16%
 
@@ -316,18 +316,19 @@
 
 ## 🎯 Phase 5 成功标准
 
-Phase 5 完成的定义：
+**Phase 5 已于 2026-08-19 全部完成。** 完成的定义：
 - ✅ Week 1-4 完成（40 tests passed）
 - ✅ Week 7 完成（Day 1-5，20 tests；测试报告 + 故障排查指南 + 代码审查齐备）
-- ⏳ Week 5（Deadline 保护）、Week 6（管理 UI/API）——计划保留，暂未实施
-- ✅ 所有测试通过（实际：510 passed，2026-08-19）
+- ✅ Week 5（Deadline 保护）补做完成（10 tests，2026-08-19）
+- ✅ Week 6（管理 UI/API）补做完成（9 tests，2026-08-19）
+- ✅ 所有测试通过（实际：529 passed，2026-08-19）
 - ⏳ 真实设备执行 tap/swipe/back/home 成功（可选，低优先级）
 - ✅ 两个 Task 无法同时 acquire 同一设备（Day 2 并发冲突测试）
 - ✅ Lease 过期后自动清理（Day 1 过期清理测试）
 - ✅ 进程崩溃后孤立 Lease 创建恢复 Checkpoint（Day 1 崩溃恢复测试）
-- ⏳ Deadline 超时触发自动释放（依赖 Week 5）
-- ⏳ 管理 API 可查询和手动干预（依赖 Week 6）
-- ✅ 文档完整：Week 7 测试报告 + 故障排查指南（Day 5，`docs/NEW/PHASE_5_WEEK_7_E2E_VERIFICATION.md`）
+- ✅ Deadline 超时触发自动释放（Week 5：超 Deadline 强制回收，持有进程存活与否均回收）
+- ✅ 管理 API 可查询和手动干预（Week 6：`/api/v1/runtime/leases` 系列端点）
+- ✅ 文档完整：Week 7 测试报告 + 故障排查指南 + Week 5 Deadline 文档 + Week 6 API/运维文档
 
 ---
 
@@ -368,20 +369,20 @@ Phase 5 完成的定义：
 ## 📈 项目进度
 
 ### 整体进度
-- **已完成**: Phase 0-4 + Phase 5 Week 1-4 + Week 7（端到端集成测试，Day 1-5 全部完成）
-- **进行中**: 无（Week 7 已于 2026-08-19 收官）
-- **待开始**: Phase 5 Week 5-6（计划保留）、Phase 6-7
+- **已完成**: Phase 0-5 全部完成（Phase 5：Week 1-4 + Week 5/6 补做 + Week 7，2026-08-19 收官）
+- **进行中**: 无
+- **待开始**: Phase 6-7
 
-### 代码统计（截至 Week 7 收官, 2026-08-19）
-- 测试数量: 510 passed（其中 Phase 5 共 60 个，含 Week 7 新增 20 个）
+### 代码统计（截至 Phase 5 收官, 2026-08-19）
+- 测试数量: 529 passed（其中 Phase 5 共 79 个：Week 1-4 40 + Week 5 10 + Week 6 9 + Week 7 20）
 - 代码行数: ~15,000 lines (backend runtime_kernel)
-- 文档: 12+ 设计文档（新增 Week 7 测试报告/故障排查指南）
+- 文档: 15+ 设计文档（新增 Week 5 Deadline 文档、Week 6 API 规范/运维手册）
 
 ### 时间估算
-- Phase 5 剩余: 2-3 周
+- Phase 5: 已完成（剩余 0）
 - Phase 6: 3-4 周
 - Phase 7: 2-3 周
-- **总计剩余**: 7-10 周
+- **总计剩余**: 5-7 周
 
 ---
 
@@ -411,18 +412,15 @@ Phase 5 完成的定义：
 
 ## 🚀 下一步行动
 
-### Week 7 已完成（2026-08-19）
-- ✅ 20 个测试全部通过（5+4+8+3），全量回归 510 passed
-- ✅ 测试报告 + 故障排查指南（首版）+ 代码审查 → `docs/NEW/PHASE_5_WEEK_7_E2E_VERIFICATION.md`
+### Phase 5 已完成（2026-08-19 全部收官）
+- ✅ Week 7：20 个测试全部通过，测试报告 + 故障排查指南（首版）+ 代码审查 → `docs/NEW/PHASE_5_WEEK_7_E2E_VERIFICATION.md`
+- ✅ Week 5 补做：Deadline 保护（10 tests）→ `docs/NEW/PHASE_5_WEEK_5_DEADLINE_PROTECTION.md`
+- ✅ Week 6 补做：管理 UI/API（9 tests）→ `docs/NEW/PHASE_5_WEEK_6_ADMIN_API.md`
+- ✅ 全量回归 529 passed
 - 可选后续：场景 10 真机冒烟（建议 Phase 6 集成前执行一次）
 
-### 立即开始（二选一）
-1. **Phase 6: Gateway 契约实现**（推荐，按路线图顺序推进）
-2. Phase 5 Week 5-6 补做（Lease Deadline 保护 / 管理 API）——计划保留
-
-### 短期规划（Week 5-6，计划保留）
-1. Lease Deadline 保护（防止无限续期）
-2. 管理 API（Lease 查询与手动干预）
+### 立即开始
+1. **Phase 6: Gateway 契约实现**（按路线图顺序推进）
 
 ### 中期规划（Phase 6-7）
 1. Gateway 消息路由
@@ -446,9 +444,11 @@ Phase 5 完成的定义：
 
 ### 实施总结
 - `PHASE_5_WEEK_4_DEVICE_LEASE_MANAGER.md`: Week 4 实施总结
+- `PHASE_5_WEEK_5_DEADLINE_PROTECTION.md`: Week 5 Deadline 保护（绝对截止 + 强制回收）
+- `PHASE_5_WEEK_6_ADMIN_API.md`: Week 6 管理 API 规范 + 运维手册
 - `PHASE_5_WEEK_7_E2E_TESTING_PLAN.md`: Week 7 端到端集成测试计划与进度
 - `PHASE_5_WEEK_7_E2E_VERIFICATION.md`: Week 7 测试报告 + 故障排查指南 + 代码审查
 
 ---
 
-**最后更新**: Phase 5 Week 7 完成（Day 5 收官, 2026-08-19），全量回归 510 passed
+**最后更新**: Phase 5 全部完成（Week 5/6 补做, 2026-08-19），全量回归 529 passed
