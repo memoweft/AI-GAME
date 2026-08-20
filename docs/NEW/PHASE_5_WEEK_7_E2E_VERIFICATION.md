@@ -14,7 +14,8 @@
 - ✅ execute_action 完整链路：propose → execute（含 Lease 集成）→ verify → commit，5 种 Action 类型全覆盖
 - ✅ 后台清理线程：长期稳定性、异常容错、CPU 占用
 - ✅ 性能基准：Lease 单操作开销、50 设备规模、清理线程空闲 CPU
-- 🎯 范围外：真实设备测试（场景 10，可选/低优先级）、Week 5 Deadline 保护、Week 6 管理 UI/API（计划保留，暂未实施）
+- ✅ 场景 10 真机冒烟已通过（mumu emulator-5554，Android 15；详见 §3 场景 10 与 §7）
+- 🎯 范围外：Week 5 Deadline 保护、Week 6 管理 UI/API（计划保留，暂未实施）
 
 ---
 
@@ -30,7 +31,7 @@
 
 ---
 
-## 3. 场景覆盖（10 场景，9 完成 + 1 可选）
+## 3. 场景覆盖（10 场景，全部完成）
 
 | # | 场景 | 状态 | 测试 |
 |---|------|------|------|
@@ -43,7 +44,7 @@
 | 7 | Checkpoint 去重（重复扫描） | ✅ | `e2e_integration::test_checkpoint_deduplication_on_repeated_cleanup` |
 | 8 | 跨平台进程检测 | ✅ | `test_device_lease_manager.py` 单元 + Day 1/2 集成实测（存活/死亡 PID 双路径） |
 | 9 | execute_action 完整流程 | ✅ | `e2e_integration`（SUCCESS 提交 + FAIL 恢复）+ `execute_action` 4 个 Day 3 增强测试 |
-| 10 | 真实设备测试 | 🎯 可选 | 需真实 Android 设备 + AdbActionExecutor，低优先级 |
+| 10 | 真实设备测试 | ✅ 已冒烟 | mumu 模拟器（emulator-5554，Android 15）：发现/观察/执行/Gateway E2E 全链路通过，冒烟脚本 `apps/console/scripts/scene10_device_smoke.py` |
 
 ---
 
@@ -98,7 +99,7 @@ Week 7 相关测试共 **20 个**，分布在 4 个文件（其中 `execute_acti
 
 | 风险 | 等级 | 说明 |
 |------|------|------|
-| 真实设备路径未集成验证 | 低 | `AdbActionExecutor` 仅有单元级覆盖；Fake 已验证全部 Kernel 逻辑。场景 10 可选，建议 Phase 6 前用真机跑一次冒烟 |
+| ~~真实设备路径未集成验证~~ | ✅ 已消除（场景 10 冒烟通过） | 已在 mumu 模拟器（emulator-5554，Android 15）跑通真机冒烟：发现层 / 观察层（截图 720x1280 + 状态一致性）/ 执行层（home/tap/swipe/back）/ Gateway E2E（Lease → `in_use` → 409 `DEVICE_NOT_AVAILABLE` → 释放 → `available`）。冒烟脚本 `apps/console/scripts/scene10_device_smoke.py`。冒烟中发现并修复 2 个真实设备路径 bug：`adb_executor.py` 相对导入层级错误（模块此前不可导入）、执行器未剥离 `adb:` 前缀 |
 | Windows 进程检测边界 | 极低 | `PermissionError` 路径仅 Unix 相关，Windows 下走 PID 存在性检查（已实测存活/死亡双路径） |
 | Week 5 Deadline 保护未实施 | 中（计划内） | 长时间执行超时的强制回收尚未实现，计划保留 |
 | Week 6 管理 UI/API 未实施 | 中（计划内） | Lease 管理视图尚未提供，当前只能通过 DB/日志检查 |
@@ -162,7 +163,7 @@ SELECT * FROM runtime_device_leases WHERE device_id = ?;
 Week 7 端到端集成测试**完成**：10 个场景中 9 个已验证（1 个可选真机场景留待后续），20 个相关测试全部通过，全量回归 510 passed。Lease 生命周期、并发冲突、崩溃恢复、清理线程、execute_action 防护链均达到计划验证点；性能基准全部达标（单操作 ~8ms、50 设备 690ms、空闲 CPU 0.16% < 1% 目标）。
 
 **Phase 5 状态更新**: Week 1-4 + Week 7 完成；Week 5（Deadline 保护）与 Week 6（管理 UI/API）计划保留未实施。  
-**下一步建议**: 开始 Phase 6（Gateway 契约），或按需补做 Week 5/6；真机冒烟（场景 10）建议在 Phase 6 集成前执行一次。
+**下一步建议**: Phase 6（Gateway 契约）与 Phase 7（切流接线）已完成；真机冒烟（场景 10）已在本报告 §7 中记录为通过，剩余计划内项为 Week 5（Deadline 保护）与 Week 6（管理 UI/API）。
 
 ---
 

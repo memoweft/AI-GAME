@@ -3,8 +3,20 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from ...runtime_kernel.action import ExecutionError
-from ...runtime_kernel.executor import ActionExecutionResult, ActionExecutorPort
+from ..runtime_kernel.action import ExecutionError
+from ..runtime_kernel.executor import ActionExecutionResult, ActionExecutorPort
+
+
+def _serial_from_device_id(device_id: str) -> str:
+    """从设备 id 中提取真实 ADB 序列号。
+
+    网关规范形式为 ``adb:<serial>``；与 AndroidObservationProvider 一致，
+    同时接受规范形式与裸序列号（adb 客户端无法识别带前缀的序列号）。
+    """
+    prefix = "adb:"
+    if device_id.startswith(prefix):
+        return device_id[len(prefix) :]
+    return device_id
 
 
 class AdbActionExecutor:
@@ -12,6 +24,7 @@ class AdbActionExecutor:
     
     实现 ActionExecutorPort 接口，调用真实 ADB 命令。
     每个方法对应一个 Android 动作类型。
+    device_id 接受网关规范形式 ``adb:<serial>`` 或裸序列号。
     """
     
     DEFAULT_TIMEOUT_SECONDS = 5.0
@@ -42,7 +55,7 @@ class AdbActionExecutor:
         command = (
             str(self.adb_path.resolve()),
             "-s",
-            device_id,
+            _serial_from_device_id(device_id),
             "shell",
             "input",
             "tap",
@@ -78,7 +91,7 @@ class AdbActionExecutor:
         command = (
             str(self.adb_path.resolve()),
             "-s",
-            device_id,
+            _serial_from_device_id(device_id),
             "shell",
             "input",
             "swipe",
@@ -114,7 +127,7 @@ class AdbActionExecutor:
         command = (
             str(self.adb_path.resolve()),
             "-s",
-            device_id,
+            _serial_from_device_id(device_id),
             "shell",
             "input",
             "text",
@@ -137,7 +150,7 @@ class AdbActionExecutor:
         command = (
             str(self.adb_path.resolve()),
             "-s",
-            device_id,
+            _serial_from_device_id(device_id),
             "shell",
             "input",
             "keyevent",
@@ -160,7 +173,7 @@ class AdbActionExecutor:
         command = (
             str(self.adb_path.resolve()),
             "-s",
-            device_id,
+            _serial_from_device_id(device_id),
             "shell",
             "input",
             "keyevent",
