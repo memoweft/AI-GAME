@@ -673,6 +673,7 @@ legacy 逐字节一致）；`LEGACY_TASK_WRITE_DISABLED` 仍为预留码（未 r
 - 三阶段模式切换（LEGACY → DRAINING → KERNEL_ACTIVE）
 - 运行时模式守卫
 - 新旧系统共存期间的兼容性
+- **数据迁移闭环（2026-08-20 确认）**：按冻结策略（`docs/NEW/PHASE_1_LEGACY_MIGRATION_STRATEGY.md` §2），旧归档库在切流时 **Freeze、不做行级迁移**——legacy 侧只读归档，切流快照作为数据回滚锚点。**行级复制明确不在范围内**（未实施、不计划）；三阶段切换 + 快照方案为既定迁移方法，真机切流演练已验证全路径（`PHASE_7_CUTOVER_DRILL_REPORT.md`）
 
 ---
 

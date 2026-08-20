@@ -1,8 +1,8 @@
 # Phase 1 — Legacy Migration Strategy
 
-> 状态：FROZEN DESIGN  
+> 状态：FROZEN DESIGN（设计冻结，未再修改）  
 > 日期：2026-08-10  
-> 迁移执行状态：NOT STARTED
+> 迁移执行状态：EXECUTED PER FROZEN STRATEGY（2026-08-20，Phase 7 完成；行级迁移明确不在范围内，见 §16）
 
 ## 1. 目标
 
@@ -371,7 +371,9 @@ Soul personality/preference/agent
 - 回滚演练结果；
 - Owner 是否接受 cutover 效果。
 
-## 15. Phase 1 未执行事项
+## 15. Phase 1 未执行事项（设计冻结时点 2026-08-10）
+
+> 本节为设计冻结时点的快照。执行已于 2026-08-20 由 Phase 7 完成（见 §16）。
 
 - 未冻结或复制旧数据库；
 - 未创建 `runtime.db`；
@@ -385,4 +387,8 @@ Soul personality/preference/agent
 
 ## 16. 状态
 
-`DESIGN FROZEN — MIGRATION NOT STARTED`
+`DESIGN FROZEN — EXECUTED PER FROZEN STRATEGY（2026-08-20，Phase 7 完成）`
+
+- **执行方式 = 冻结策略本身**：三阶段切换（LEGACY → DRAINING → KERNEL_ACTIVE）+ 切流前快照 + 排空门禁 + 回滚 runbook，按 §9 M0–M6 落地；真机切流演练验证全路径（`PHASE_7_CUTOVER_DRILL_REPORT.md`：快照、数据一致性、配置回滚、§5 验证清单 5/5、默认配置未改变）。
+- **行级迁移：明确不在范围内（out of scope）**。按 §2 冻结策略第 2 条，旧 `runtime/console/mobile-tasks.db` 在切流时 Freeze、作为只读归档保留，**不做行级复制**——未实施、不计划。既定迁移方法是「三阶段切换 + 快照」，数据回滚锚点为切流快照（runbook §4），不是行级同步。
+- 设计内容自冻结后未再修改；执行未引入对本文档任何条款的偏离。
