@@ -141,9 +141,13 @@ def build_gateway_composition(
 ) -> GatewayComposition:
     """Production wiring for the gateway on the shared runtime directory.
 
-    Lease management is intentionally NOT wired yet: the Kernel has no
-    public lease-listing service, so ``AdbDeviceRegistry`` runs without
-    an active-device overlay until the cutover work order connects it.
+    Phase 7 cutover wiring: the ``AdbDeviceRegistry`` receives the
+    Kernel's ``active_leased_device_ids`` as its active-device overlay,
+    so any device the Kernel currently holds via an unexpired Lease is
+    reported ``IN_USE`` in the device catalog and rejected with
+    ``DEVICE_NOT_AVAILABLE`` (409) on ``POST /tasks`` — device
+    exclusivity is now enforced end-to-end once the runtime mode is
+    ``kernel_active``.
     """
     runtime_dir = settings.data_dir / "runtime"
     if kernel is None:
@@ -161,7 +165,8 @@ def build_gateway_composition(
         store.initialize()
     if device_registry is None:
         device_registry = AdbDeviceRegistry(
-            AdbTargetDiscovery(adb_path=settings.adb_path)
+            AdbTargetDiscovery(adb_path=settings.adb_path),
+            active_device_ids=kernel.active_leased_device_ids,
         )
     gateway = TaskGateway(
         kernel=kernel,

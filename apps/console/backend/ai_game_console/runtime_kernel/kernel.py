@@ -907,6 +907,27 @@ class RuntimeKernel:
     def latest_checkpoint(self, task_id: str) -> Checkpoint | None:
         return self._store.latest_checkpoint(task_id)
 
+    def active_leased_device_ids(self) -> frozenset[str]:
+        """当前未过期 Lease 持有的设备 id 集合（Phase 7 切流接线）。
+
+        供 Gateway 组合传给 ``AdbDeviceRegistry(active_device_ids=...)``：
+        Kernel 以未过期 Lease 独占中的设备在 Gateway 设备目录中显示为
+        ``IN_USE``，对已租设备的 ``POST /tasks`` 以 ``DEVICE_NOT_AVAILABLE``
+        拒绝——补齐切流到 KERNEL_ACTIVE 后设备独占的最后一公里。
+
+        过期判定与 Lease 机制本身一致（``DeviceExecutionLease.is_expired``，
+        ``expires_at <= now`` 字符串比较），``now`` 取 Kernel 自身时钟。
+        存储不可用时退化为空集合：叠加层故障不得拖垮设备目录。
+        """
+        try:
+            leases = self._store.list_leases()
+        except Exception:
+            return frozenset()
+        now = self._clock()
+        return frozenset(
+            lease.device_id for lease in leases if not lease.is_expired(now)
+        )
+
     def _build_checkpoint_draft(
         self,
         *,

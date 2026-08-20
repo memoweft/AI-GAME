@@ -4,9 +4,9 @@ Serves ``list_devices`` / ``get_device`` from the read-only
 ``AdbTargetDiscovery`` (``adb devices -l`` only). Availability rules:
 
 * ``IN_USE`` — the device id appears in the active-device overlay. The
-  overlay hook is reserved for the lease wiring at cutover: the Kernel has
-  no public lease-listing service, so the composition (not this adapter)
-  decides which devices are actively leased. Default: no overlay.
+  production composition wires the Kernel's ``active_leased_device_ids``
+  as the overlay, so any device held by an unexpired Kernel Lease is
+  reported in use. Default: no overlay.
 * ``AVAILABLE`` — ADB reports the device as ``ready``.
 * ``UNAVAILABLE`` — anything else (offline, unauthorized, unknown), and
   also the safe fallback for an unrecognized status string.
