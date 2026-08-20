@@ -635,14 +635,14 @@ legacy 逐字节一致）；`LEGACY_TASK_WRITE_DISABLED` 仍为预留码（未 r
 ## 📈 项目进度
 
 ### 整体进度
-- **已完成**: Phase 0-7 全部完成；Phase 6 Week 1（Kernel 控制面）+ Week 2（Gateway 应用服务包）+ Week 3（HTTP API 表面 + 错误模型）+ Week 4（SSE 事件流 + 客户端投影 + 控制 UI）+ 集成（§17 全清单 10/10 验收、场景 10 待设备、全量回归，2026-08-20）；Phase 7 Legacy 迁移 Week 1（运行时模式 guard + 接线 + 门控 + Deprecation）+ Week 2（快照 + 排空门禁）+ Week 3（监控端点 + 回滚 runbook + 切流/回滚/快照恢复测试）+ 集成（§6 七项验收 7/7、全量回归，2026-08-20）
+- **已完成**: Phase 0-7 全部完成；Phase 6 Week 1（Kernel 控制面）+ Week 2（Gateway 应用服务包）+ Week 3（HTTP API 表面 + 错误模型）+ Week 4（SSE 事件流 + 客户端投影 + 控制 UI）+ 集成（§17 全清单 10/10 验收、场景 10 待设备、全量回归，2026-08-20）；Phase 7 Legacy 迁移 Week 1（运行时模式 guard + 接线 + 门控 + Deprecation）+ Week 2（快照 + 排空门禁）+ Week 3（监控端点 + 回滚 runbook + 切流/回滚/快照恢复测试）+ 集成（§6 七项验收 7/7、全量回归，2026-08-20）+ Kernel Lease 接线（Lease → Gateway 设备独占，+10 tests）+ 场景 10 真机冒烟（mumu emulator-5554，Android 15）+ 生产环境部署真机切流演练（legacy→draining→kernel_active→legacy 全循环、快照 + 数据完整性 + 回滚，`PHASE_7_CUTOVER_DRILL_REPORT.md`，2026-08-20）
 - **待开始**: —（路线图 Phase 0-7 全部完成）
 
-### 代码统计（截至 Phase 7 集成, 2026-08-20）
-- 后端测试: 708 passed（Phase 6 基线 688 + Phase 7 新增 20：`test_runtime_mode.py` +2 + `test_legacy_cutover.py` 7 + `test_legacy_cutover_helpers.py` 6 + `test_legacy_cutover_integration.py` 5）
+### 代码统计（截至 Phase 7 切流演练, 2026-08-20）
+- 后端测试: 718 passed（Phase 6 基线 688 + Phase 7 新增 20：`test_runtime_mode.py` +2 + `test_legacy_cutover.py` 7 + `test_legacy_cutover_helpers.py` 6 + `test_legacy_cutover_integration.py` 5 + Kernel Lease 接线 `test_gateway_device_lease_wiring.py` +10）
 - 前端测试: 52 passed（9 文件，本阶段无前端改动，与 Phase 6 一致）
 - 代码行数: ~18,500 lines (backend runtime_kernel + gateway 包 + gateway_api + device_registry + `runtime_mode`/`legacy_cutover` + 前端 gateway 客户端)
-- 文档: 18+ 设计文档（新增 `PHASE_7_LEGACY_CUTOVER_PLAN.md` + `PHASE_7_ROLLBACK_RUNBOOK.md` + `PHASE_7_INTEGRATION_ACCEPTANCE.md`）
+- 文档: 18+ 设计文档（新增 `PHASE_7_LEGACY_CUTOVER_PLAN.md` + `PHASE_7_ROLLBACK_RUNBOOK.md` + `PHASE_7_INTEGRATION_ACCEPTANCE.md` + `PHASE_7_CUTOVER_DRILL_REPORT.md`）
 
 ### 时间估算
 - Phase 5: 已完成（剩余 0）
@@ -692,12 +692,18 @@ legacy 逐字节一致）；`LEGACY_TASK_WRITE_DISABLED` 仍为预留码（未 r
 - ✅ Week 4：SSE 事件流 + 客户端投影 + 控制 UI（后端 7 SSE tests + 前端 13 tests，全量回归 679 passed）—— `GET /tasks/{task_id}/events/stream`（`after_sequence` 续传 + 心跳 + 流前校验）、`eventStream.ts`（自持游标、断线重开、`calibrateCursor` max 校准）、`projection.ts`（§13 用户可读投影 + takeover 判定）、`useGatewayTaskStream.ts`（Snapshot→回填→SSE→断线重连）、`GatewayTaskWorkspace.tsx`（pause/resume/cancel/takeover 按钮 + takeover 横幅 + 任务进展时间线）
 - ✅ **集成（完成）**：契约 §17 全清单 **10/10** 逐项核对通过 + 场景 10 真机冒烟（当前机器无 adb，记录"待设备"，Fake 证据覆盖全链路）+ 全量回归（后端 **688 passed** + 前端 **52 passed**）→ `PHASE_6_INTEGRATION_ACCEPTANCE.md`
 
-### 立即开始
-1. **Phase 7: Legacy 迁移**（三阶段切换、数据迁移）
+### Phase 7（2026-08-20 启动，2026-08-20 完成）
+- ✅ Week 1：运行时模式 guard + 接线 + 门控 + Deprecation
+- ✅ Week 2：快照 + 排空门禁
+- ✅ Week 3：监控端点 + 回滚 runbook + 切流/回滚/快照恢复测试
+- ✅ **集成（完成）**：§6 七项验收 7/7 + 全量回归（后端 708 passed + 前端 52 passed）→ `PHASE_7_INTEGRATION_ACCEPTANCE.md`
+- ✅ Kernel Lease 接线：Kernel Lease → Gateway 设备独占（`active_leased_device_ids` + AdbDeviceRegistry 叠加层，+10 tests）
+- ✅ 场景 10 真机冒烟：通过（mumu emulator-5554，Android 15；发现并修复 `adb_executor.py` 相对导入 + `adb:` 前缀剥离 2 个真实设备路径 bug）
+- ✅ **生产环境部署（真机切流演练）**：`legacy → draining → kernel_active → legacy` 全循环 + 切流前快照 + 数据完整性 + 回滚，runbook §5 验证清单 5/5（2 项带已记录偏差 D-1 / F-1、F-2）→ `PHASE_7_CUTOVER_DRILL_REPORT.md`；默认配置未改变
 
 ### 中期规划（Phase 7+）
-1. Legacy 迁移策略（LEGACY_ACTIVE → DRAINING → KERNEL_ACTIVE）
-2. 生产环境部署
+1. ✅ Legacy 迁移策略（三阶段切换已完成；行级迁移按冻结策略不在范围内，快照方案为既定闭环——见 `docs/NEW/PHASE_1_LEGACY_MIGRATION_STRATEGY.md` §2/§5/§16 与 roadmap「关键设计决策 4」）
+2. ✅ 生产环境部署（真机切流演练完成 2026-08-20，`PHASE_7_CUTOVER_DRILL_REPORT.md`；kernel 侧执行链路真机启用为后续阶段）
 
 ---
 
@@ -723,7 +729,11 @@ legacy 逐字节一致）；`LEGACY_TASK_WRITE_DISABLED` 仍为预留码（未 r
 - `PHASE_5_WEEK_7_E2E_VERIFICATION.md`: Week 7 测试报告 + 故障排查指南 + 代码审查
 - `PHASE_6_GATEWAY_CONTRACT_PLAN.md`: Phase 6 实施计划（4 周 + 集成）
 - `PHASE_6_WEEK_4_SSE_CLIENT_UI.md`: Week 4 SSE 事件流 + 客户端投影 + 控制 UI 实施总结
+- `PHASE_7_LEGACY_CUTOVER_PLAN.md`: Phase 7 Legacy 迁移计划（仓库根）
+- `PHASE_7_ROLLBACK_RUNBOOK.md`: 回滚 runbook（仓库根）
+- `PHASE_7_INTEGRATION_ACCEPTANCE.md`: Phase 7 集成验收（仓库根）
+- `PHASE_7_CUTOVER_DRILL_REPORT.md`: 真机切流演练报告（仓库根）
 
 ---
 
-**最后更新**: Phase 6 集成完成（§17 全清单 10/10 验收、场景 10 待设备, 2026-08-20），全量回归 688 passed（后端）+ 前端 52 passed；Phase 6 ✅，进入 Phase 7
+**最后更新**: Phase 7 生产环境部署真机切流演练完成（legacy→draining→kernel_active→legacy 全循环、快照 + 数据完整性 + 回滚, 2026-08-20），场景 10 真机冒烟通过（mumu emulator-5554）；全量回归 718 passed（后端）+ 前端 52 passed；Phase 0-7 全部 ✅

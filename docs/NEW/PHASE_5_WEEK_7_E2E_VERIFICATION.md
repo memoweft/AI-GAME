@@ -15,7 +15,7 @@
 - ✅ 后台清理线程：长期稳定性、异常容错、CPU 占用
 - ✅ 性能基准：Lease 单操作开销、50 设备规模、清理线程空闲 CPU
 - ✅ 场景 10 真机冒烟已通过（mumu emulator-5554，Android 15；详见 §3 场景 10 与 §7）
-- 🎯 范围外：Week 5 Deadline 保护、Week 6 管理 UI/API（计划保留，暂未实施）
+- ✅ Week 5 Deadline 保护、Week 6 管理 UI/API：已于 2026-08-19 补做完成（`PHASE_5_WEEK_5_DEADLINE_PROTECTION.md` / `PHASE_5_WEEK_6_ADMIN_API.md`，提交 `66e83f8` / `743b21d`）
 
 ---
 
@@ -101,8 +101,8 @@ Week 7 相关测试共 **20 个**，分布在 4 个文件（其中 `execute_acti
 |------|------|------|
 | ~~真实设备路径未集成验证~~ | ✅ 已消除（场景 10 冒烟通过） | 已在 mumu 模拟器（emulator-5554，Android 15）跑通真机冒烟：发现层 / 观察层（截图 720x1280 + 状态一致性）/ 执行层（home/tap/swipe/back）/ Gateway E2E（Lease → `in_use` → 409 `DEVICE_NOT_AVAILABLE` → 释放 → `available`）。冒烟脚本 `apps/console/scripts/scene10_device_smoke.py`。冒烟中发现并修复 2 个真实设备路径 bug：`adb_executor.py` 相对导入层级错误（模块此前不可导入）、执行器未剥离 `adb:` 前缀 |
 | Windows 进程检测边界 | 极低 | `PermissionError` 路径仅 Unix 相关，Windows 下走 PID 存在性检查（已实测存活/死亡双路径） |
-| Week 5 Deadline 保护未实施 | 中（计划内） | 长时间执行超时的强制回收尚未实现，计划保留 |
-| Week 6 管理 UI/API 未实施 | 中（计划内） | Lease 管理视图尚未提供，当前只能通过 DB/日志检查 |
+| ~~Week 5 Deadline 保护未实施~~ | ✅ 已消除（2026-08-19 补做完成） | 绝对截止 + 强制回收已实施，见 `PHASE_5_WEEK_5_DEADLINE_PROTECTION.md`（提交 `66e83f8`） |
+| ~~Week 6 管理 UI/API 未实施~~ | ✅ 已消除（2026-08-19 补做完成） | 管理 API + 运维手册已实施，见 `PHASE_5_WEEK_6_ADMIN_API.md`（提交 `743b21d`） |
 
 ---
 
@@ -162,8 +162,8 @@ SELECT * FROM runtime_device_leases WHERE device_id = ?;
 
 Week 7 端到端集成测试**完成**：10 个场景中 9 个已验证（1 个可选真机场景留待后续），20 个相关测试全部通过，全量回归 510 passed。Lease 生命周期、并发冲突、崩溃恢复、清理线程、execute_action 防护链均达到计划验证点；性能基准全部达标（单操作 ~8ms、50 设备 690ms、空闲 CPU 0.16% < 1% 目标）。
 
-**Phase 5 状态更新**: Week 1-4 + Week 7 完成；Week 5（Deadline 保护）与 Week 6（管理 UI/API）计划保留未实施。  
-**下一步建议**: Phase 6（Gateway 契约）与 Phase 7（切流接线）已完成；真机冒烟（场景 10）已在本报告 §7 中记录为通过，剩余计划内项为 Week 5（Deadline 保护）与 Week 6（管理 UI/API）。
+**Phase 5 状态更新**: Week 1-7 全部完成（Week 5 Deadline 保护与 Week 6 管理 UI/API 已于 2026-08-19 补做完成）。  
+**下一步建议**: Phase 6（Gateway 契约）与 Phase 7（Legacy 迁移 + 真机切流演练）已全部完成；真机冒烟（场景 10）已在本报告 §7 中记录为通过。详见 `RUNTIME_KERNEL_ROADMAP_STATUS.md`。
 
 ---
 
