@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { LucideIcon } from 'lucide-react';
 import {
+  Activity,
   AlertCircle,
   AlertTriangle,
   Bot,
@@ -24,6 +25,7 @@ import {
 } from 'lucide-react';
 import { API_BASE, ApiError, api } from './api';
 import { EmptyState } from './components/EmptyState';
+import { GatewayTaskWorkspace } from './components/GatewayTaskWorkspace';
 import { StatusBadge } from './components/StatusBadge';
 import { CloudModelSettings } from './components/CloudModelSettings';
 import { MobileTaskWorkspace } from './components/MobileTaskWorkspace';
@@ -40,7 +42,7 @@ import type {
   Target,
 } from './types';
 
-type PageId = 'agent' | 'soul' | 'targets' | 'settings';
+type PageId = 'agent' | 'gateway' | 'soul' | 'targets' | 'settings';
 type ResourceKey = 'targets' | 'runtime';
 
 interface NavItem {
@@ -52,6 +54,7 @@ interface NavItem {
 
 const NAV_ITEMS: NavItem[] = [
   { id: 'agent', label: '一句话开始', description: '说出目标，让手机智能体替你完成', icon: ListTodo },
+  { id: 'gateway', label: '网关任务', description: '创建任务、实时跟踪进度并远程控制', icon: Activity },
   { id: 'soul', label: 'Soul', description: 'AI Game 中可长期运行的一项应用功能', icon: Heart },
   { id: 'targets', label: '设备', description: '查看模拟器、真机和平板连接', icon: MonitorSmartphone },
   { id: 'settings', label: '设置', description: '模型、执行器与连接配置', icon: Settings },
@@ -177,6 +180,7 @@ export default function App() {
 
         <main className="page-content">
           {page === 'agent' && <MobileTaskWorkspace targets={targets} />}
+          {page === 'gateway' && <GatewayTaskWorkspace />}
           {page === 'soul' && <SoulWorkspace />}
           {page === 'targets' && (
             <TargetsPage targets={targets} loading={loading} error={errors.targets} onRetry={() => void loadAll()} onTargets={setTargets} onToast={setToast} onRefresh={() => void loadAll()} />

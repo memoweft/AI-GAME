@@ -1051,6 +1051,25 @@ class _SQLiteTaskStore:
             ).fetchall()
             return [self._get_state(connection, str(row["task_id"])) for row in rows]
 
+    def active_tasks(self) -> tuple[int, list[str]]:
+        """排空门禁：统计尚未终结的 Legacy 任务。
+
+        活动任务即仍处于 queued/planning/running/stopping 的任务；这些是切流
+        到 KERNEL_ACTIVE 之前必须排空（自然完成或被显式停止）的对象。返回
+        (活动任务数, 活动任务 ID 列表)，ID 按创建时间升序。
+        """
+        self.initialize()
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT task_id FROM mobile_tasks
+                WHERE status IN ('queued','planning','running','stopping')
+                ORDER BY created_at ASC, rowid ASC
+                """
+            ).fetchall()
+            task_ids = [str(row["task_id"]) for row in rows]
+            return len(task_ids), task_ids
+
     def skill_memory(self, skill_scope_id: str | None) -> SkillMemory | None:
         if skill_scope_id is None:
             return None

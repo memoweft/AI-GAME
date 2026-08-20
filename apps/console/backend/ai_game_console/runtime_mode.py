@@ -44,8 +44,9 @@ class RuntimeModeGuard:
     """Runtime mode guard for request handlers
     
     使用场景：
-    - Legacy Task 创建 API：DRAINING/KERNEL_ACTIVE 时拒绝
-    - Kernel Action 执行：LEGACY 时拒绝
+    - Legacy Task 创建 API：DRAINING/KERNEL_ACTIVE 时拒绝（require_legacy_writable）
+    - Legacy Task 输入/停止：KERNEL_ACTIVE 时拒绝（require_legacy_runtime_available）
+    - Kernel Action 执行：LEGACY 时拒绝（require_kernel_active）
     """
     
     def __init__(self, mode: RuntimeMode) -> None:
@@ -61,6 +62,18 @@ class RuntimeModeGuard:
         if self.mode == "kernel_active":
             raise RuntimeModeError(
                 "Legacy task creation is permanently disabled in KERNEL_ACTIVE mode"
+            )
+
+    def require_legacy_runtime_available(self) -> None:
+        """要求 Legacy 运行时仍可用（LEGACY/DRAINING 可用，KERNEL_ACTIVE 禁用）
+
+        用于存量任务的输入/停止等控制端点：DRAINING 期存量任务仍需可被
+        输入或停止以自然排空，仅在 KERNEL_ACTIVE 期完全禁用 Legacy 写路径。
+        """
+        if self.mode == "kernel_active":
+            raise RuntimeModeError(
+                "Legacy task control (inputs/stop) is permanently disabled "
+                "in KERNEL_ACTIVE mode"
             )
     
     def require_kernel_active(self) -> None:
@@ -79,6 +92,10 @@ class RuntimeModeGuard:
     def is_legacy_writable(self) -> bool:
         """Legacy Task 创建是否可用"""
         return self.mode == "legacy"
+
+    def is_legacy_runtime_available(self) -> bool:
+        """Legacy 运行时（输入/停止等控制）是否可用"""
+        return self.mode != "kernel_active"
     
     def is_kernel_active(self) -> bool:
         """Kernel Action 执行是否可用"""

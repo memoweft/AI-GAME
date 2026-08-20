@@ -130,3 +130,35 @@ def test_runtime_mode_guard_error_messages_are_actionable() -> None:
         guard_kernel.require_legacy_writable()
     except RuntimeModeError as e:
         assert "permanently disabled" in str(e)
+
+
+def test_runtime_mode_guard_legacy_runtime_available() -> None:
+    """验证 require_legacy_runtime_available / is_legacy_runtime_available 的分模式行为
+
+    存量任务的输入/停止端点在 LEGACY 与 DRAINING 期必须保持可用（以便存量任务
+    自然排空），仅在 KERNEL_ACTIVE 期永久禁用。
+    """
+    legacy = RuntimeModeGuard("legacy")
+    legacy.require_legacy_runtime_available()  # 不抛异常
+    assert legacy.is_legacy_runtime_available() is True
+
+    draining = RuntimeModeGuard("draining")
+    draining.require_legacy_runtime_available()  # 不抛异常（排空期仍需可停止/输入）
+    assert draining.is_legacy_runtime_available() is True
+
+    kernel = RuntimeModeGuard("kernel_active")
+    with pytest.raises(
+        RuntimeModeError, match="permanently disabled in KERNEL_ACTIVE"
+    ):
+        kernel.require_legacy_runtime_available()
+    assert kernel.is_legacy_runtime_available() is False
+
+
+def test_runtime_mode_guard_runtime_available_message_is_actionable() -> None:
+    """验证存量任务控制被禁用时的错误消息可操作"""
+    kernel = RuntimeModeGuard("kernel_active")
+    try:
+        kernel.require_legacy_runtime_available()
+    except RuntimeModeError as e:
+        assert "inputs/stop" in str(e)
+        assert "KERNEL_ACTIVE" in str(e)

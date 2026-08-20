@@ -123,6 +123,7 @@ describe('控制台统一入口', () => {
     const nav = screen.getByRole('navigation', { name: '主导航' });
     expect(within(nav).getAllByRole('button').map((button) => button.textContent?.trim())).toEqual([
       '一句话开始',
+      '网关任务',
       'Soul',
       '设备',
       '设置',

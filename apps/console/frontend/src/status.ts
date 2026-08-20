@@ -2,6 +2,7 @@ import type {
   ApprovalStatus,
   Blocker,
   EventLevel,
+  GatewayTaskStatus,
   RunStatus,
   RuntimeStatus,
   TargetStatus,
@@ -86,6 +87,18 @@ const EVENT_LEVEL: Record<EventLevel, StatusMeta> = {
   debug: { label: '调试', detail: '调试信息', tone: 'neutral', icon: 'help' },
 };
 
+const GATEWAY_TASK_STATUS: Record<GatewayTaskStatus, StatusMeta> = {
+  CREATED: { label: '已创建', detail: '任务已登记，等待调度', tone: 'neutral', icon: 'clock' },
+  PLANNING: { label: '规划中', detail: 'Runtime 正在生成阶段计划', tone: 'info', icon: 'clock' },
+  RUNNING: { label: '运行中', detail: '任务正在设备上执行', tone: 'info', icon: 'play' },
+  WAITING: { label: '等待中', detail: '任务等待外部条件', tone: 'info', icon: 'clock' },
+  PAUSED: { label: '已暂停', detail: '任务已暂停，可恢复或接管', tone: 'warning', icon: 'pause' },
+  STUCK: { label: '受阻', detail: '任务卡住，需要人工介入', tone: 'danger', icon: 'warning' },
+  COMPLETED: { label: '已完成', detail: '任务全部阶段已验证完成', tone: 'success', icon: 'check' },
+  FAILED: { label: '执行失败', detail: '任务在执行中失败', tone: 'danger', icon: 'error' },
+  CANCELLED: { label: '已取消', detail: '任务已被取消', tone: 'neutral', icon: 'error' },
+};
+
 const UNKNOWN: StatusMeta = {
   label: '未知状态',
   detail: '服务返回了暂不认识的状态',
@@ -126,4 +139,28 @@ export function runtimeStatusMeta(status?: string | null): StatusMeta {
 
 export function eventLevelMeta(level?: string | null): StatusMeta {
   return EVENT_LEVEL[(level || 'info') as EventLevel] ?? EVENT_LEVEL.info;
+}
+
+export interface GatewayTaskStatusOptions {
+  /**
+   * True when the latest pause-family event is a UserTakeover. The kernel
+   * maps both pause and takeover to PAUSED, so the UI distinguishes them by
+   * the event that produced the pause (§13: takeover projection).
+   */
+  userTakeover?: boolean;
+}
+
+export function gatewayTaskStatusMeta(
+  status: string,
+  options?: GatewayTaskStatusOptions,
+): StatusMeta {
+  if (status === 'PAUSED' && options?.userTakeover) {
+    return {
+      label: '用户接管中',
+      detail: '用户已接管设备操作，任务保持暂停',
+      tone: 'warning',
+      icon: 'pause',
+    };
+  }
+  return GATEWAY_TASK_STATUS[status as GatewayTaskStatus] ?? UNKNOWN;
 }

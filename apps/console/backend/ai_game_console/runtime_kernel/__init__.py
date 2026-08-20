@@ -10,6 +10,12 @@ from .action import (
     InvalidActionTransition,
 )
 from .checkpoint import Checkpoint, CheckpointDraft
+from .control import (
+    ControlCommand,
+    ControlError,
+    ControlResult,
+    InvalidControlTransition,
+)
 from .event import EventActor, RuntimeEvent, RuntimeEventDraft
 from .executor import ActionExecutionResult, ActionExecutorPort
 from .fact import Fact, FactScope, FactStatus
@@ -65,6 +71,9 @@ __all__ = [
     "CheckpointDraft",
     "ConnectionState",
     "ConsistencyStatus",
+    "ControlCommand",
+    "ControlError",
+    "ControlResult",
     "DeviceExecutionLease",
     "DeviceState",
     "EventActor",
@@ -74,6 +83,7 @@ __all__ = [
     "FactStatus",
     "FailureState",
     "InvalidActionTransition",
+    "InvalidControlTransition",
     "InvalidStageTransition",
     "InvalidTaskTransition",
     "KeyboardState",

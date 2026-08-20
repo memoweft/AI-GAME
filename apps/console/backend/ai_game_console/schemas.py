@@ -250,6 +250,21 @@ class RuntimeResponse(ApiModel):
     capabilities: list[CapabilitySchema]
 
 
+class RuntimeModeResponse(ApiModel):
+    """Phase 7 运行时模式监控视图。
+
+    运维据此判断切流进度：``draining`` 期应观察 ``active_legacy_task_count``
+    归零（``active_task_ids`` 列出仍未排空的存量任务）后，再切到 ``kernel_active``。
+    """
+
+    mode: str
+    legacy_writable: bool
+    kernel_active: bool
+    draining: bool
+    active_legacy_task_count: int
+    active_task_ids: list[str]
+
+
 class ExecutorActionResponse(ApiModel):
     target_id: str
     action: Literal["tap", "keyevent", "text"]

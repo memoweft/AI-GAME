@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import hmac
+import logging
 import sys
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, FastAPI, Query, Request
+from fastapi import APIRouter, FastAPI, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -43,6 +44,12 @@ from .game_learning import (
 from .game_learning.android_adapter import StzbAndroidEnvironmentFactory
 from .game_learning.profiles import stzb_game_profile
 from .game_learning.verifier import OpenAICompatibleStzbEvidenceAssessor
+from .gateway_api import (
+    GatewayComposition,
+    create_gateway_router,
+    gateway_error_handler,
+)
+from .gateway import GatewayError
 from .mobile_agent import (
     IdempotencyConflict,
     MobileTaskArchive,
@@ -60,6 +67,7 @@ from .mobile_task_adapter import (
 from .mobile_task_profiles import resolve_mobile_skill_scope
 from .openai_chat import OpenAIChatProvider
 from .repository import SQLiteRepository
+from .runtime_mode import RuntimeModeError, RuntimeModeGuard, validate_runtime_mode
 from .runtime_admin import LeaseAdminService, create_lease_admin_router
 from .soul_integration import SoulIntegration, SoulIntegrationError
 from .soul_application_composition import (
@@ -107,6 +115,7 @@ from .schemas import (
     SoulConversationResponse,
     SoulSchedulerStatusSchema,
     SoulWorkspaceResponse,
+    RuntimeModeResponse,
     RuntimeResponse,
     TargetDiscoveryResponse,
     TargetListResponse,
@@ -114,6 +123,7 @@ from .schemas import (
 )
 from .service import ControlPlaneError, ControlPlaneService
 
+logger = logging.getLogger(__name__)
 
 WRITE_CLIENT_HEADER = "console-v1"
 CONSOLE_SHUTDOWN_TOKEN_HEADER = "X-AI-Game-Shutdown-Token"
@@ -545,8 +555,12 @@ def create_app(
     application_runtime_archive: Any | None = None,
     runtime_admin: LeaseAdminService | None = None,
     console_shutdown_callback: Callable[[], None] | None = None,
+    gateway: GatewayComposition | None = None,
 ) -> FastAPI:
     resolved_settings = settings or Settings.from_env()
+    # Phase 7: 启动期校验运行时模式（配置非法即拒绝启动，fail-fast）
+    validate_runtime_mode(resolved_settings.runtime_mode)
+    runtime_mode_guard = RuntimeModeGuard(resolved_settings.runtime_mode)
     resolved_runtime_admin = runtime_admin or LeaseAdminService(
         resolved_settings.data_dir / "runtime" / "runtime.db"
     )
@@ -738,6 +752,10 @@ def create_app(
                 shutdown_callbacks.append(mobile_task_shutdown)
             # Week 6: 停止 Lease 后台清理并关闭 runtime.db（未初始化时为空操作）
             shutdown_callbacks.append(resolved_runtime_admin.shutdown)
+            # Phase 6 Week 3: 显式启用 Gateway 时关闭 gateway.db 与 Runtime 存储
+            if gateway is not None:
+                shutdown_callbacks.append(gateway.store.close)
+                shutdown_callbacks.append(gateway.kernel.close)
             application_shutdown = getattr(
                 resolved_application_runtime, "shutdown", None
             )
@@ -759,6 +777,7 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.settings = resolved_settings
+    app.state.runtime_mode_guard = runtime_mode_guard
     app.state.repository = resolved_repository
     app.state.control_plane = service
     app.state.chat_coordinator = resolved_chat
@@ -772,6 +791,10 @@ def create_app(
     app.state.application_runtime_archive = resolved_application_archive
     app.state.runtime_admin = resolved_runtime_admin
     app.state.console_shutdown_callback = console_shutdown_callback
+    # Phase 6 Week 3: Gateway 契约表面（默认 OFF，显式传入才挂载）
+    app.state.gateway = gateway
+    if gateway is not None:
+        app.add_exception_handler(GatewayError, gateway_error_handler)
 
     app.add_middleware(
         TrustedHostMiddleware,
@@ -1101,15 +1124,32 @@ def create_app(
 
     @router.get("/events", response_model=EventListResponse)
     def list_events(
+        response: Response,
         limit: int = Query(default=100, ge=1, le=500),
         run_id: str | None = Query(default=None),
     ):
+        # Phase 7: 软弃用全局事件列表；任务级事件请改用 Gateway 契约 SSE 流
+        response.headers["Deprecation"] = "true"
         items = service.list_events(limit=limit, run_id=run_id)
         return {"items": items, "count": len(items)}
 
     @router.get("/runtime", response_model=RuntimeResponse)
     def runtime():
         return service.runtime()
+
+    @router.get("/runtime/mode", response_model=RuntimeModeResponse)
+    def runtime_mode_view():
+        # Phase 7: 运行时模式监控。运维据此判断切流进度（draining 期观察
+        # active_legacy_task_count 归零后再切到 kernel_active）。
+        active_count, active_ids = _active_legacy_tasks()
+        return {
+            "mode": runtime_mode_guard.mode,
+            "legacy_writable": runtime_mode_guard.is_legacy_writable(),
+            "kernel_active": runtime_mode_guard.is_kernel_active(),
+            "draining": runtime_mode_guard.is_draining(),
+            "active_legacy_task_count": active_count,
+            "active_task_ids": active_ids,
+        }
 
     @router.get(
         "/settings/cloud",
@@ -1330,12 +1370,48 @@ def create_app(
             )
         return resolved_mobile_tasks
 
+    def _reject_legacy_write(endpoint: str, error: RuntimeModeError) -> ControlPlaneError:
+        """把守卫拒绝转成 403 契约错误，并打 warning 日志（含端点 + 模式）。"""
+        logger.warning(
+            "Legacy 写被运行时模式拒绝 endpoint=%s mode=%s reason=%s",
+            endpoint,
+            runtime_mode_guard.mode,
+            str(error),
+        )
+        return ControlPlaneError(
+            code="LEGACY_TASK_WRITE_DISABLED",
+            message=str(error),
+            status_code=403,
+        )
+
+    def enforce_legacy_writable() -> None:
+        """新建 Legacy Task 门控（DRAINING/KERNEL_ACTIVE 拒绝）。"""
+        try:
+            runtime_mode_guard.require_legacy_writable()
+        except RuntimeModeError as error:
+            raise _reject_legacy_write("POST /tasks", error) from error
+
+    def enforce_legacy_runtime_available(endpoint: str) -> None:
+        """存量任务输入/停止门控（仅 KERNEL_ACTIVE 拒绝）。"""
+        try:
+            runtime_mode_guard.require_legacy_runtime_available()
+        except RuntimeModeError as error:
+            raise _reject_legacy_write(endpoint, error) from error
+
+    def _active_legacy_tasks() -> tuple[int, list[str]]:
+        """读取排空门禁数据；对不支持该查询的归档（如测试 Fake）返回 (0, [])。"""
+        query = getattr(resolved_mobile_task_archive, "active_tasks", None)
+        if not callable(query):
+            return 0, []
+        return query()
+
     @router.post(
         "/tasks",
         status_code=202,
         response_model=MobileTaskSchema,
     )
     def create_mobile_task(request: MobileTaskCreate):
+        enforce_legacy_writable()
         runtime = require_mobile_task_runtime()
         return _mobile_task_payload(
             runtime.start(
@@ -1364,6 +1440,7 @@ def create_app(
         response_model=MobileTaskSchema,
     )
     def send_mobile_task_input(task_id: str, request: MobileTaskInputCreate):
+        enforce_legacy_runtime_available(f"POST /tasks/{task_id}/inputs")
         return _mobile_task_payload(
             require_mobile_task_runtime().send(
                 task_id,
@@ -1378,6 +1455,7 @@ def create_app(
         response_model=MobileTaskSchema,
     )
     def stop_mobile_task(task_id: str, request: MobileTaskStopRequest):
+        enforce_legacy_runtime_available(f"POST /tasks/{task_id}/stop")
         return _mobile_task_payload(
             require_mobile_task_runtime().stop(task_id, request.client_request_id)
         )
@@ -1473,6 +1551,11 @@ def create_app(
             learner.stop(job_id), list(learner.list_profiles())
         )
 
+    # Phase 6 Week 3: Gateway 契约路由（默认 OFF）。显式启用时注册在 legacy
+    # 路由之前，冲突的 canonical 路径按注册顺序解析到新契约——预览 cutover
+    # 终态；legacy 重复实现由独立的 cutover 工单移除（§2：不做 payload 嗅探）。
+    if gateway is not None:
+        app.include_router(create_gateway_router(gateway))
     app.include_router(router)
     # Week 6: Runtime Lease 管理 API（懒初始化，不产生额外数据库文件）
     app.include_router(create_lease_admin_router(resolved_runtime_admin))

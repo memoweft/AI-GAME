@@ -34,6 +34,10 @@ class RuntimeStorePort(Protocol):
 
     def load_task(self, task_id: str) -> Task: ...
 
+    def list_tasks_by_conversation(self, conversation_id: str) -> tuple[Task, ...]: ...
+
+    def list_tasks(self) -> tuple[Task, ...]: ...
+
     def create_stage(self, stage: Stage, event: RuntimeEventDraft) -> RuntimeEvent: ...
 
     def load_stage(self, task_id: str, stage_id: str) -> Stage: ...
@@ -47,6 +51,14 @@ class RuntimeStorePort(Protocol):
         after_task: Task,
         before_stage: Stage,
         after_stage: Stage,
+        event: RuntimeEventDraft,
+    ) -> RuntimeEvent: ...
+
+    def mutate_task(
+        self,
+        *,
+        before_task: Task,
+        after_task: Task,
         event: RuntimeEventDraft,
     ) -> RuntimeEvent: ...
 

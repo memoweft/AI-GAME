@@ -176,6 +176,10 @@ class MobileTaskRuntime:
             raise ValueError("limit must be between 1 and 500")
         return self._store.list(limit)
 
+    def active_tasks(self) -> tuple[int, list[str]]:
+        """排空门禁：返回 (活动任务数, 活动任务 ID 列表)。"""
+        return self._store.active_tasks()
+
     def shutdown(self, timeout: float | None = 5.0) -> None:
         """Quiesce the coordinator, leaving unexecuted work restart-recoverable."""
 

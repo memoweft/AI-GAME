@@ -36,7 +36,41 @@ import type {
   ApplicationInstanceListResponse,
   CreateApplicationInstanceRequest,
   SoulSchedulerStatus,
+  GatewayControlCommand,
+  GatewayControlResponse,
+  GatewayDeviceListResponse,
+  GatewayEventPage,
+  GatewayTaskCreatedResponse,
+  GatewayTaskListResponse,
+  GatewayTaskMessageResponse,
+  GatewayTaskResponse,
 } from './types';
+
+/** §16: the Console identifies itself as one stable Gateway client. */
+export const GATEWAY_CLIENT_ID = 'ai-game-console';
+
+/**
+ * Fresh idempotency key per write (§14). A failed request is NOT retried
+ * with the same key by this client — the user explicitly retries.
+ *
+ * Falls back to a non-crypto key in environments without
+ * `crypto.randomUUID` (e.g. jsdom in tests) — the key only needs to be
+ * unique per request, not cryptographically strong.
+ */
+export function newIdempotencyKey(): string {
+  const c = globalThis.crypto;
+  if (c && typeof c.randomUUID === 'function') {
+    return c.randomUUID();
+  }
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+}
+
+function writeHeaders(clientId: boolean): Record<string, string> {
+  return {
+    'Idempotency-Key': newIdempotencyKey(),
+    ...(clientId ? { 'X-Client-Id': GATEWAY_CLIENT_ID } : {}),
+  };
+}
 
 const configuredBase = import.meta.env.VITE_API_BASE?.trim();
 export const API_BASE = (configuredBase || '/api/v1').replace(/\/$/, '');
@@ -207,4 +241,62 @@ export const api = {
         body: JSON.stringify(body),
       },
     ),
+  // -- Gateway contract (Phase 6) ----------------------------------------
+  getGatewayDevices: () => request<GatewayDeviceListResponse>('/devices'),
+  listGatewayTasks: () => request<GatewayTaskListResponse>('/tasks'),
+  getGatewayTask: (taskId: string) =>
+    request<GatewayTaskResponse>(`/tasks/${encodeURIComponent(taskId)}`),
+  getGatewayTaskEvents: (taskId: string, afterSequence: number, limit = 100) =>
+    request<GatewayEventPage>(
+      `/tasks/${encodeURIComponent(taskId)}/events?after_sequence=${afterSequence}&limit=${limit}`,
+    ),
+  createGatewayTask: (input: {
+    goal: string;
+    device_id: string;
+    conversation_id: string;
+    message_id: string;
+  }) =>
+    request<GatewayTaskCreatedResponse>('/tasks', {
+      method: 'POST',
+      body: JSON.stringify(input),
+      headers: writeHeaders(true),
+    }),
+  sendGatewayTaskMessage: (
+    taskId: string,
+    input: { message_id: string; conversation_id: string; text: string },
+  ) =>
+    request<GatewayTaskMessageResponse>(
+      `/tasks/${encodeURIComponent(taskId)}/messages`,
+      {
+        method: 'POST',
+        body: JSON.stringify(input),
+        headers: writeHeaders(false),
+      },
+    ),
+  sendGatewayControl: (
+    taskId: string,
+    input: { command: GatewayControlCommand; reason?: string },
+  ) =>
+    request<GatewayControlResponse>(
+      `/tasks/${encodeURIComponent(taskId)}/controls`,
+      {
+        method: 'POST',
+        body: JSON.stringify(input),
+        headers: writeHeaders(false),
+      },
+    ),
+  sendGatewayConversationMessage: (
+    conversationId: string,
+    input: { message_id: string; text: string; device_id?: string },
+  ) =>
+    request<GatewayTaskCreatedResponse>(
+      `/conversations/${encodeURIComponent(conversationId)}/messages`,
+      {
+        method: 'POST',
+        body: JSON.stringify(input),
+        headers: writeHeaders(true),
+      },
+    ),
+  gatewayEventStreamUrl: (taskId: string, afterSequence: number) =>
+    `${API_BASE}/tasks/${encodeURIComponent(taskId)}/events/stream?after_sequence=${afterSequence}`,
 };

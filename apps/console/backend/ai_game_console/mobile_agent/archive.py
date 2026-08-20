@@ -24,3 +24,7 @@ class MobileTaskArchive:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
             raise ValueError("limit must be between 1 and 500")
         return self._store.list(limit)
+
+    def active_tasks(self) -> tuple[int, list[str]]:
+        """排空门禁：返回 (活动任务数, 活动任务 ID 列表)。"""
+        return self._store.active_tasks()

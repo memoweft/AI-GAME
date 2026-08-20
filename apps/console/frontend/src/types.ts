@@ -659,3 +659,130 @@ export interface ApplicationCommandRequest {
   client_request_id: string;
   content?: string;
 }
+
+// ---------------------------------------------------------------------------
+// Gateway contract (Phase 6) — docs/NEW/PHASE_1_GATEWAY_CONTRACT_DESIGN.md
+// §18 DESIGN FROZEN: these types mirror the frozen §4–§11 wire shapes and
+// must not drift without an explicit cutover work order.
+// ---------------------------------------------------------------------------
+
+export const GATEWAY_TERMINAL_TASK_STATUSES = [
+  'COMPLETED',
+  'FAILED',
+  'CANCELLED',
+] as const;
+
+export type GatewayTaskStatus =
+  | 'CREATED'
+  | 'PLANNING'
+  | 'RUNNING'
+  | 'WAITING'
+  | 'PAUSED'
+  | 'STUCK'
+  | (typeof GATEWAY_TERMINAL_TASK_STATUSES)[number];
+
+export type GatewayControlCommand = 'pause' | 'resume' | 'cancel' | 'takeover';
+
+export type GatewayDeviceAvailability = 'available' | 'in_use' | 'unavailable';
+
+export interface GatewayStageProjection {
+  id: string;
+  objective: string;
+  completion_criteria: string[];
+}
+
+export interface GatewayCompletedStage extends GatewayStageProjection {
+  completed_at: string | null;
+}
+
+export interface GatewayVerifiedFact {
+  id: string;
+  key: string;
+  value: unknown;
+  confidence: number | null;
+  created_at: string;
+}
+
+/** Frozen 12-key §6 Task Snapshot. */
+export interface GatewayTaskSnapshot {
+  id: string;
+  goal: string;
+  status: GatewayTaskStatus;
+  device_id: string;
+  constraints: unknown[];
+  current_stage: GatewayStageProjection | null;
+  completed_stages: GatewayCompletedStage[];
+  verified_facts: GatewayVerifiedFact[];
+  last_observation_id: string | null;
+  last_event_sequence: number;
+  updated_at: string;
+}
+
+export interface GatewayTaskResponse {
+  task: GatewayTaskSnapshot;
+}
+
+export interface GatewayTaskListResponse {
+  items: GatewayTaskSnapshot[];
+  count: number;
+}
+
+/** Reduced create response (6-key `task`, contract §5). */
+export interface GatewayTaskCreated {
+  id: string;
+  goal: string;
+  status: GatewayTaskStatus;
+  device_id: string;
+  current_stage: null;
+  last_event_sequence: number;
+}
+
+export interface GatewayTaskCreatedResponse {
+  task: GatewayTaskCreated;
+}
+
+export interface GatewayRuntimeEvent {
+  id: string;
+  task_id: string;
+  sequence: number;
+  type: string;
+  actor: string;
+  payload: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface GatewayEventPage {
+  items: GatewayRuntimeEvent[];
+  next_after_sequence: number;
+}
+
+export interface GatewayControlResponse {
+  accepted: boolean;
+  task_id: string;
+  command: GatewayControlCommand;
+  status: GatewayTaskStatus;
+  event_sequence: number;
+}
+
+export interface GatewayTaskMessageResponse {
+  accepted: boolean;
+  task_id: string;
+  message_id: string;
+  event_sequence: number;
+}
+
+export interface GatewayDeviceItem {
+  id: string;
+  availability: GatewayDeviceAvailability;
+}
+
+export interface GatewayDeviceListResponse {
+  items: GatewayDeviceItem[];
+}
+
+/** Frozen §11 SSE `data:` frame — exactly three keys. */
+export interface GatewaySseData {
+  sequence: number;
+  type: string;
+  payload: Record<string, unknown>;
+}

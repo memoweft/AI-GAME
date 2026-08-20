@@ -8,6 +8,7 @@ from uuid import uuid4
 from ..device_lease_manager import DeviceLeaseManager
 from .action import Action, ActionExecution, ActionStatus, ActionType, ExecutionError
 from .checkpoint import Checkpoint, CheckpointDraft
+from .control import ControlCommand, ControlError, ControlResult, InvalidControlTransition
 from .event import EventActor, RuntimeEvent, RuntimeEventDraft
 from .executor import ActionExecutionResult, ActionExecutorPort
 from .fact import Fact, FactScope, FactStatus
@@ -93,6 +94,12 @@ class RuntimeKernel:
 
     def load_task(self, task_id: str) -> Task:
         return self._store.load_task(task_id)
+
+    def list_tasks_by_conversation(self, conversation_id: str) -> tuple[Task, ...]:
+        return self._store.list_tasks_by_conversation(conversation_id)
+
+    def list_tasks(self) -> tuple[Task, ...]:
+        return self._store.list_tasks()
 
     def create_stage(
         self,
@@ -216,6 +223,37 @@ class RuntimeKernel:
     ) -> tuple[RuntimeEvent, ...]:
         return self._store.list_events(task_id, after_sequence=after_sequence)
 
+    def record_user_message(
+        self,
+        *,
+        task_id: str,
+        message_id: str,
+        conversation_id: str,
+        text: str,
+    ) -> RuntimeEvent:
+        """Persist a user message as a `UserMessageReceived` task event.
+
+        The Kernel only records the message; it does not classify intent.
+        Conversation ownership and terminal-Task guards are the Gateway's
+        responsibility (contract §7).
+        """
+        self._store.load_task(task_id)
+        now = self._clock()
+        return self._store.append_event(
+            task_id,
+            self._event(
+                "UserMessageReceived",
+                now,
+                task_id,
+                {
+                    "message_id": message_id,
+                    "conversation_id": conversation_id,
+                    "text": text,
+                },
+                actor=EventActor.USER,
+            ),
+        )
+
     def capture_observation(
         self,
         *,
@@ -327,6 +365,9 @@ class RuntimeKernel:
 
     def latest_observation(self, task_id: str) -> Observation | None:
         return self._store.latest_observation(task_id)
+
+    def verified_facts(self, task_id: str) -> tuple[Fact, ...]:
+        return self._store.list_facts(task_id, verified_only=True)
 
     def propose_action(
         self,
@@ -561,6 +602,86 @@ class RuntimeKernel:
         finally:
             # 7. 释放 Lease（无论成功或失败）
             self._store.release_lease(lease.id)
+
+    def apply_control(
+        self,
+        *,
+        task_id: str,
+        command: ControlCommand | str,
+        reason: str | None = None,
+    ) -> ControlResult:
+        """应用用户控制命令: pause / resume / cancel / takeover (契约 §9).
+
+        语义:
+        - 命令在返回前已持久化到 Task 事件流 (accepted 语义由 Gateway 负责);
+        - ``resume`` 只恢复 Task 状态, 不重新获取 Lease —— Runtime 必须先
+          Observe, 下一次 ``execute_action`` 按现有流程自行获取设备 Lease;
+        - pause/cancel/takeover 若任务持有 active lease 则释放, 让出设备。
+        """
+        if isinstance(command, str):
+            try:
+                command = ControlCommand(command)
+            except ValueError as exc:
+                raise ControlError(f"unknown control command: {command!r}") from exc
+
+        task = self._store.load_task(task_id)
+        now = self._clock()
+
+        if command is ControlCommand.PAUSE:
+            if task.status is not TaskStatus.RUNNING:
+                raise InvalidControlTransition(
+                    f"Task in {task.status.value} cannot be paused"
+                )
+            after = task.transition_to(TaskStatus.PAUSED, at=now)
+            event_type = "TaskPaused"
+        elif command is ControlCommand.RESUME:
+            if task.status is not TaskStatus.PAUSED:
+                raise InvalidControlTransition(
+                    f"Task in {task.status.value} cannot be resumed"
+                )
+            after = task.transition_to(TaskStatus.RUNNING, at=now)
+            event_type = "TaskResumed"
+        elif command is ControlCommand.CANCEL:
+            if task.terminal:
+                raise InvalidControlTransition(
+                    f"Task in {task.status.value} is already terminal"
+                )
+            after = task.transition_to(TaskStatus.CANCELLED, at=now)
+            event_type = "TaskCancelled"
+        elif command is ControlCommand.TAKEOVER:
+            if task.status is not TaskStatus.RUNNING:
+                raise InvalidControlTransition(
+                    f"Task in {task.status.value} cannot be taken over"
+                )
+            after = task.transition_to(TaskStatus.PAUSED, at=now)
+            event_type = "UserTakeover"
+        else:
+            raise ControlError(f"unknown control command: {command!r}")
+
+        persisted = self._store.mutate_task(
+            before_task=task,
+            after_task=after,
+            event=self._event(
+                event_type,
+                now,
+                task_id,
+                {"previous_status": task.status.value, "reason": reason},
+                actor=EventActor.GATEWAY,
+            ),
+        )
+
+        # 控制命令停止设备执行: 释放 Task 当前持有的 Lease (如有)。
+        # release_lease 是幂等删除, 与 execute_action 的 finally 释放无冲突。
+        released_lease_id: str | None = None
+        if command is not ControlCommand.RESUME:
+            lease = self._store.get_lease_for_task(task_id)
+            if lease is not None:
+                self._store.release_lease(lease.id)
+                released_lease_id = lease.id
+
+        return ControlResult(
+            task=after, event=persisted, released_lease_id=released_lease_id
+        )
 
     def verify_action(
         self,

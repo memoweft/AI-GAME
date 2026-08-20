@@ -456,6 +456,22 @@ class SQLiteRuntimeStore:
             raise RecordNotFound(f"Task {task_id} was not found")
         return self._task_from_row(row)
 
+    def list_tasks_by_conversation(self, conversation_id: str) -> tuple[Task, ...]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM runtime_tasks WHERE source_conversation_id = ?"
+                " ORDER BY created_at, id",
+                (conversation_id,),
+            ).fetchall()
+        return tuple(self._task_from_row(row) for row in rows)
+
+    def list_tasks(self) -> tuple[Task, ...]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM runtime_tasks ORDER BY created_at, id"
+            ).fetchall()
+        return tuple(self._task_from_row(row) for row in rows)
+
     def create_stage(self, stage: Stage, event: RuntimeEventDraft) -> RuntimeEvent:
         try:
             with self._transaction() as connection:
@@ -519,6 +535,30 @@ class SQLiteRuntimeStore:
                 return self._insert_event(connection, after_task.id, event)
         except sqlite3.IntegrityError as exc:
             raise StoreConflict(f"could not mutate Task/Stage: {exc}") from exc
+
+    def mutate_task(
+        self,
+        *,
+        before_task: Task,
+        after_task: Task,
+        event: RuntimeEventDraft,
+    ) -> RuntimeEvent:
+        """Atomically mutate a Task and persist its event (control surface)."""
+        if before_task.id != after_task.id:
+            raise StoreConflict("Task identity cannot change during mutation")
+        try:
+            with self._transaction() as connection:
+                task_row = connection.execute(
+                    "SELECT * FROM runtime_tasks WHERE id = ?", (before_task.id,)
+                ).fetchone()
+                if task_row is None:
+                    raise RecordNotFound(f"Task {before_task.id} was not found")
+                if self._task_from_row(task_row) != before_task:
+                    raise StoreConflict("Task changed since it was loaded")
+                self._update_task(connection, after_task)
+                return self._insert_event(connection, after_task.id, event)
+        except sqlite3.IntegrityError as exc:
+            raise StoreConflict(f"could not mutate Task: {exc}") from exc
 
     def append_event(
         self, task_id: str, event: RuntimeEventDraft
