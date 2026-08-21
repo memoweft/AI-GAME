@@ -44,6 +44,8 @@ import type {
   GatewayTaskListResponse,
   GatewayTaskMessageResponse,
   GatewayTaskResponse,
+  GoalRun,
+  GoalRunListResponse,
 } from './types';
 
 /** §16: the Console identifies itself as one stable Gateway client. */
@@ -74,6 +76,7 @@ function writeHeaders(clientId: boolean): Record<string, string> {
 
 const configuredBase = import.meta.env.VITE_API_BASE?.trim();
 export const API_BASE = (configuredBase || '/api/v1').replace(/\/$/, '');
+export const GOAL_API_BASE = API_BASE.replace(/\/v1$/, '/v2');
 
 export class ApiError extends Error {
   readonly status: number;
@@ -95,10 +98,14 @@ function errorMessage(payload: ApiErrorPayload | null, fallback: string): string
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  return requestAtBase<T>(API_BASE, path, init);
+}
+
+async function requestAtBase<T>(base: string, path: string, init?: RequestInit): Promise<T> {
   const isPost = init?.method?.toUpperCase() === 'POST';
   let response: Response;
   try {
-    response = await fetch(`${API_BASE}${path}`, {
+    response = await fetch(`${base}${path}`, {
       ...init,
       headers: {
         Accept: 'application/json',
@@ -132,6 +139,33 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  getGoals: (limit = 100) =>
+    requestAtBase<GoalRunListResponse>(GOAL_API_BASE, `/goals?limit=${limit}`),
+  getGoal: (goalId: string) =>
+    requestAtBase<GoalRun>(GOAL_API_BASE, `/goals/${encodeURIComponent(goalId)}`),
+  createGoal: (goal: string, idempotencyKey: string) =>
+    requestAtBase<GoalRun>(GOAL_API_BASE, '/goals', {
+      method: 'POST',
+      body: JSON.stringify({ goal, idempotency_key: idempotencyKey }),
+    }),
+  retryGoalPreflight: (goalId: string) =>
+    requestAtBase<GoalRun>(
+      GOAL_API_BASE,
+      `/goals/${encodeURIComponent(goalId)}/preflight/retry`,
+      { method: 'POST' },
+    ),
+  selectGoalTarget: (goalId: string, targetId: string) =>
+    requestAtBase<GoalRun>(
+      GOAL_API_BASE,
+      `/goals/${encodeURIComponent(goalId)}/preflight/selection`,
+      { method: 'POST', body: JSON.stringify({ target_id: targetId }) },
+    ),
+  stopGoal: (goalId: string, idempotencyKey: string) =>
+    requestAtBase<GoalRun>(
+      GOAL_API_BASE,
+      `/goals/${encodeURIComponent(goalId)}/controls`,
+      { method: 'POST', body: JSON.stringify({ action: 'stop', idempotency_key: idempotencyKey }) },
+    ),
   getOverview: () => request<OverviewResponse>('/overview'),
   getTargets: () => request<ListResponse<Target>>('/targets'),
   discoverTargets: () =>

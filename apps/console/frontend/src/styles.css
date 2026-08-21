@@ -5958,6 +5958,166 @@ textarea::placeholder {
   border-top: 1px solid var(--border);
 }
 
+/* U2 universal GoalRun surface */
+.goal-composer {
+  position: relative;
+  overflow: hidden;
+}
+
+.goal-composer::after {
+  content: '';
+  position: absolute;
+  width: 280px;
+  height: 280px;
+  right: -120px;
+  top: -150px;
+  border-radius: 999px;
+  background: radial-gradient(circle, color-mix(in srgb, var(--accent) 17%, transparent), transparent 68%);
+  pointer-events: none;
+}
+
+.goal-promise {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  margin-top: 12px;
+}
+
+.goal-promise svg {
+  color: var(--success);
+  flex: 0 0 auto;
+}
+
+.goal-detail {
+  min-width: 0;
+}
+
+.goal-gate {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding: 16px;
+  margin: 16px;
+  border: 1px solid color-mix(in srgb, var(--warning) 38%, var(--border));
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--warning) 8%, var(--surface));
+}
+
+.goal-gate > svg { color: var(--warning); }
+.goal-gate strong { display: block; color: var(--text-primary); }
+.goal-gate p { margin: 4px 0 0; color: var(--text-secondary); font-size: 13px; }
+
+.goal-target-options {
+  display: grid;
+  gap: 8px;
+  padding: 0 16px 16px;
+}
+
+.goal-target-options button {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 13px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-raised);
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+}
+
+.goal-target-options button:hover { border-color: var(--accent); }
+.goal-target-options span { display: grid; gap: 3px; }
+.goal-target-options small { color: var(--text-secondary); }
+
+.goal-progress-grid { margin: 16px; }
+
+.goal-uncompleted {
+  margin: 0 16px 16px;
+  padding: 14px 16px;
+  border-left: 3px solid var(--warning);
+  background: color-mix(in srgb, var(--warning) 7%, var(--surface));
+  border-radius: 0 10px 10px 0;
+}
+
+.goal-uncompleted p { margin: 5px 0 0; color: var(--text-secondary); font-size: 13px; }
+
+.goal-verified {
+  margin: 0 16px 16px;
+  padding: 14px 16px;
+  border-left: 3px solid var(--green);
+  background: color-mix(in srgb, var(--green) 8%, var(--surface));
+  border-radius: 0 10px 10px 0;
+}
+
+.goal-verified strong { display: flex; align-items: center; gap: 7px; }
+.goal-verified p { margin: 6px 0 0; color: var(--text-secondary); font-size: 13px; }
+
+.goal-evidence-list article {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.goal-evidence-list article p {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.advanced-warning {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 16px 18px;
+}
+
+.advanced-warning svg { color: var(--warning); flex: 0 0 auto; }
+.advanced-warning p { margin: 4px 0 0; color: var(--text-secondary); }
+
+.advanced-tabs {
+  display: flex;
+  gap: 8px;
+  padding: 5px;
+  width: fit-content;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.advanced-tabs button {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 13px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.advanced-tabs button[aria-selected='true'] {
+  background: var(--surface-raised);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-sm);
+}
+
+@media (max-width: 720px) {
+  .goal-gate { grid-template-columns: auto minmax(0, 1fr); }
+  .goal-gate .button { grid-column: 1 / -1; width: 100%; }
+  .advanced-tabs { width: 100%; overflow-x: auto; }
+  .advanced-tabs button { flex: 1 0 auto; justify-content: center; }
+}
+
 .agent-technical-body > section {
   min-width: 0;
   border-right: 1px solid var(--border);

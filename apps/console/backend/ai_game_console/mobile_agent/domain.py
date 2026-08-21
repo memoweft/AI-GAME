@@ -209,6 +209,19 @@ class SkillMemory:
 
 
 @dataclass(frozen=True, slots=True)
+class ExperienceHint:
+    """Capability-neutral, scene-conditioned policy advice for one decision."""
+
+    candidate_id: str
+    kind: Literal["positive", "negative", "recovery"]
+    semantic_action: str
+    expected_next_scene: str | None
+    recovery_action: str | None
+    confidence: float
+    provenance_transition_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class MobileTaskState:
     task_id: str
     goal: str
@@ -266,6 +279,7 @@ class DecisionContext:
     consecutive_no_progress: int
     recent_attempts: tuple[ActionAttempt, ...]
     skill_memory: SkillMemory | None
+    experience_hints: tuple[ExperienceHint, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

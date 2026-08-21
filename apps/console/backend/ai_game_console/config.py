@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Mapping
@@ -23,6 +24,10 @@ class Settings:
     local_chat_endpoint: str | None = None
     local_chat_model: str | None = None
     local_chat_api_key: str | None = field(default=None, repr=False)
+    mobile_role_endpoint: str | None = None
+    mobile_role_model: str | None = None
+    mobile_role_api_key: str | None = field(default=None, repr=False)
+    mobile_role_control_script: str | None = None
     cloud_chat_endpoint: str | None = None
     cloud_chat_model: str | None = None
     cloud_chat_api_key: str | None = field(default=None, repr=False)
@@ -54,6 +59,14 @@ class Settings:
             else project_root / "runtime" / "console"
         )
         model_config = read_env_file(project_root / "config" / "model-runtime.env")
+        mobile_role_runtime = read_env_file(
+            project_root / "config" / "mobile-role-runtime.env"
+        )
+        mobile_role_config_path = (
+            values.get("AI_GAME_MOBILE_ROLE_CONFIG_PATH", "").strip()
+            or mobile_role_runtime.get("AI_GAME_MOBILE_ROLE_CONFIG_PATH", "").strip()
+        )
+        mobile_role_config = read_openai_binding_json(mobile_role_config_path)
         cloud_config = read_env_file(project_root / "config" / "cloud-runtime.env")
 
         local_endpoint = _first_nonempty(
@@ -113,6 +126,29 @@ class Settings:
             local_chat_api_key=(
                 _first_nonempty(values, "AI_GAME_LOCAL_CHAT_API_KEY")
                 or model_config.get("GUI_MODEL_API_KEY", "").strip()
+                or None
+            ),
+            mobile_role_endpoint=(
+                _first_nonempty(values, "AI_GAME_MOBILE_ROLE_ENDPOINT")
+                or mobile_role_runtime.get("AI_GAME_MOBILE_ROLE_ENDPOINT", "").strip()
+                or mobile_role_config.get("endpoint")
+                or None
+            ),
+            mobile_role_model=(
+                _first_nonempty(values, "AI_GAME_MOBILE_ROLE_MODEL")
+                or mobile_role_runtime.get("AI_GAME_MOBILE_ROLE_MODEL", "").strip()
+                or mobile_role_config.get("model")
+                or None
+            ),
+            mobile_role_api_key=(
+                _first_nonempty(values, "AI_GAME_MOBILE_ROLE_API_KEY")
+                or mobile_role_runtime.get("AI_GAME_MOBILE_ROLE_API_KEY", "").strip()
+                or mobile_role_config.get("api_key")
+                or None
+            ),
+            mobile_role_control_script=(
+                _first_nonempty(values, "AI_GAME_MOBILE_ROLE_CONTROL_SCRIPT")
+                or mobile_role_runtime.get("AI_GAME_MOBILE_ROLE_CONTROL_SCRIPT", "").strip()
                 or None
             ),
             cloud_chat_endpoint=cloud_endpoint,
@@ -186,6 +222,37 @@ def read_env_file(path: Path) -> dict[str, str]:
         if separator and key.strip():
             values[key.strip()] = value.strip().strip('"').strip("'")
     return values
+
+
+def read_openai_binding_json(raw_path: str) -> dict[str, str]:
+    """Read an explicitly selected local binding file without exposing secrets."""
+    if not raw_path:
+        return {}
+    try:
+        path = Path(raw_path).expanduser().resolve()
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    host = str(payload.get("host") or "").strip()
+    port = payload.get("port")
+    model = str(payload.get("alias") or payload.get("model_name") or "").strip()
+    keys = payload.get("api_keys")
+    api_key = str(keys[0]).strip() if isinstance(keys, list) and keys else ""
+    try:
+        port_number = int(port)
+    except (TypeError, ValueError):
+        return {}
+    if host not in {"127.0.0.1", "localhost", "::1"} or not 1 <= port_number <= 65535:
+        return {}
+    if not model:
+        return {}
+    return {
+        "endpoint": f"http://{host}:{port_number}/v1/chat/completions",
+        "model": model,
+        "api_key": api_key,
+    }
 
 
 def _first_nonempty(values: Mapping[str, str], *keys: str) -> str | None:

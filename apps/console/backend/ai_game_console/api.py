@@ -34,6 +34,7 @@ from .config import Settings
 from .discovery import AdbTargetDiscovery
 from .device_lease import DeviceExecutionLease
 from .execution import GuiExecutor
+from .experience_runtime import ExperienceService, SQLiteExperienceStore
 from .gui_owl_client import OpenAICompatibleGuiOwlClient
 from .game_learning import (
     GameLearner,
@@ -50,6 +51,17 @@ from .gateway_api import (
     gateway_error_handler,
 )
 from .gateway import GatewayError
+from .goal_runtime import (
+    GoalPreflight,
+    GoalRepairManager,
+    GoalService,
+    ProductionGoalRepairs,
+    SQLiteGoalStore,
+    StructuredGoalModel,
+    create_goal_router,
+    goal_error_handler,
+)
+from .goal_runtime.domain import GoalError
 from .mobile_agent import (
     IdempotencyConflict,
     MobileTaskArchive,
@@ -63,6 +75,7 @@ from .mobile_task_adapter import (
     LocalMobileEvidenceStore,
     MobileTaskAndroidDriver,
     OpenAICompatibleMobileRoleModel,
+    OpenAICompatibleToolRoleModel,
 )
 from .mobile_task_profiles import resolve_mobile_skill_scope
 from .openai_chat import OpenAIChatProvider
@@ -556,6 +569,7 @@ def create_app(
     runtime_admin: LeaseAdminService | None = None,
     console_shutdown_callback: Callable[[], None] | None = None,
     gateway: GatewayComposition | None = None,
+    goal_service: GoalService | None = None,
 ) -> FastAPI:
     resolved_settings = settings or Settings.from_env()
     # Phase 7: 启动期校验运行时模式（配置非法即拒绝启动，fail-fast）
@@ -587,21 +601,56 @@ def create_app(
     elif resolved_application_archive is None:
         resolved_application_archive = resolved_application_runtime
     device_execution_lease = DeviceExecutionLease()
+    mobile_evidence = LocalMobileEvidenceStore(
+        resolved_settings.project_root
+        / "runtime"
+        / "sessions"
+        / "mobile-tasks"
+        / "evidence"
+    )
+    experience_service = ExperienceService(
+        SQLiteExperienceStore(resolved_settings.data_dir / "experience.db"),
+        observation_payload=lambda evidence_id: mobile_evidence.load(evidence_id).png_bytes,
+    )
+    structured_goal_model: StructuredGoalModel | None = None
+    mobile_role_endpoint = (
+        resolved_settings.mobile_role_endpoint or resolved_settings.local_chat_endpoint
+    )
+    mobile_role_model = (
+        resolved_settings.mobile_role_model or resolved_settings.local_chat_model
+    )
+    mobile_role_api_key = (
+        resolved_settings.mobile_role_api_key
+        if resolved_settings.mobile_role_endpoint
+        else resolved_settings.local_chat_api_key
+    )
     if (
         resolved_mobile_tasks is None
         and isinstance(resolved_executor, AdbGuiExecutor)
         and resolved_settings.gui_executor_enabled
         and resolved_settings.adb_path
-        and resolved_settings.local_chat_endpoint
-        and resolved_settings.local_chat_model
+        and mobile_role_endpoint
+        and mobile_role_model
     ):
-        mobile_evidence = LocalMobileEvidenceStore(
-            resolved_settings.project_root
-            / "runtime"
-            / "sessions"
-            / "mobile-tasks"
-            / "evidence"
+        role_model = (
+            OpenAICompatibleToolRoleModel(
+                endpoint=mobile_role_endpoint,
+                model=mobile_role_model,
+                api_key=mobile_role_api_key,
+                timeout_seconds=max(resolved_settings.chat_request_timeout_seconds, 120.0),
+                evidence=mobile_evidence,
+            )
+            if resolved_settings.mobile_role_endpoint
+            else OpenAICompatibleMobileRoleModel(
+                endpoint=mobile_role_endpoint,
+                model=mobile_role_model,
+                api_key=mobile_role_api_key,
+                timeout_seconds=resolved_settings.chat_request_timeout_seconds,
+                evidence=mobile_evidence,
+            )
         )
+        if isinstance(role_model, OpenAICompatibleToolRoleModel):
+            structured_goal_model = StructuredGoalModel(role_model)
         resolved_mobile_tasks = MobileTaskRuntime(
             resolved_settings.data_dir / "mobile-tasks.db",
             driver=MobileTaskAndroidDriver(
@@ -610,13 +659,7 @@ def create_app(
                 evidence=mobile_evidence,
                 device_lease=device_execution_lease,
             ),
-            model=OpenAICompatibleMobileRoleModel(
-                endpoint=resolved_settings.local_chat_endpoint,
-                model=resolved_settings.local_chat_model,
-                api_key=resolved_settings.local_chat_api_key,
-                timeout_seconds=resolved_settings.chat_request_timeout_seconds,
-                evidence=mobile_evidence,
-            ),
+            model=role_model,
             # Production tasks may span a long game session. These are only
             # runaway guards; ordinary recovery is driven by visual progress,
             # reflection, owner input, or an explicit stop.
@@ -624,6 +667,7 @@ def create_app(
             max_attempts=2_048,
             queue_capacity=32,
             scope_resolver=resolve_mobile_skill_scope,
+            experience=experience_service,
         )
     resolved_automation_factory = automation_factory
     if (
@@ -708,6 +752,87 @@ def create_app(
         or resolved_mobile_tasks
         or MobileTaskArchive(resolved_settings.data_dir / "mobile-tasks.db")
     )
+    def probe_configured_mobile_target() -> tuple[bool, str, str]:
+        probe = resolved_executor.probe()
+        if probe.status == "ready":
+            return True, "ready", probe.detail
+        blocker = probe.blocker or {}
+        return (
+            False,
+            str(blocker.get("code") or "default_android_target_not_ready"),
+            str(blocker.get("message") or probe.detail or "默认 Android 目标当前不可用。"),
+        )
+
+    goal_store = SQLiteGoalStore(resolved_settings.data_dir / "goals.db")
+
+    def promote_verified_goal_experience(
+        task_id: str, goal_id: str, completion_revision: int
+    ) -> None:
+        # The legacy hint and canonical ledger are independent additive writes;
+        # either can be reconciled later without rewriting Goal completion.
+        try:
+            resolved_mobile_tasks.promote_goal_verified_memory(
+                task_id, goal_id=goal_id, completion_revision=completion_revision
+            )
+        except Exception:
+            pass
+        try:
+            specification = goal_store.specification(goal_id)
+            resolved_mobile_tasks.promote_goal_verified_experience(
+                task_id, goal_id=goal_id, completion_revision=completion_revision,
+                goal_spec_revision=int(specification["revision"]),
+                frozen_criteria_ids=tuple(
+                    str(item["id"])
+                    for item in specification.get("success_criteria", ())
+                ),
+            )
+        except Exception:
+            pass
+    production_goal_repairs = ProductionGoalRepairs(
+        manager=GoalRepairManager(goal_store),
+        project_root=resolved_settings.project_root,
+        capability_snapshot=service.runtime_probe.snapshot,
+        discover_targets=service.discover_targets,
+        adb_path=resolved_settings.adb_path,
+        model_control_script=resolved_settings.mobile_role_control_script,
+        repository_model_enabled=not bool(resolved_settings.mobile_role_endpoint),
+    )
+    resolved_goal_service = goal_service or GoalService(
+        goal_store,
+        mobile_runtime=resolved_mobile_tasks,
+        mobile_archive=resolved_mobile_task_archive,
+        configured_serial=resolved_settings.adb_serial,
+        target_probe=(
+            probe_configured_mobile_target
+            if isinstance(resolved_mobile_tasks, MobileTaskRuntime)
+            else None
+        ),
+        preflight=(
+            GoalPreflight(
+                capability_snapshot=service.runtime_probe.snapshot,
+                discover_targets=service.discover_targets,
+                lease_is_held=device_execution_lease.is_held,
+                runtime_available=lambda: resolved_mobile_tasks is not None,
+                preferred_serial=resolved_settings.adb_serial,
+            ).assess
+            if resolved_mobile_tasks is None
+            or isinstance(resolved_mobile_tasks, MobileTaskRuntime)
+            else None
+        ),
+        repair=(
+            production_goal_repairs.attempt
+            if resolved_mobile_tasks is None
+            or isinstance(resolved_mobile_tasks, MobileTaskRuntime)
+            else None
+        ),
+        specify_goal=(structured_goal_model.specify if structured_goal_model else None),
+        verify_completion=(structured_goal_model.verify if structured_goal_model else None),
+        promote_verified_success=(
+            promote_verified_goal_experience
+            if isinstance(resolved_mobile_tasks, MobileTaskRuntime)
+            else None
+        ),
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -787,6 +912,7 @@ def create_app(
     app.state.soul_integration = resolved_soul_integration
     app.state.mobile_task_runtime = resolved_mobile_tasks
     app.state.mobile_task_archive = resolved_mobile_task_archive
+    app.state.goal_service = resolved_goal_service
     app.state.application_runtime = resolved_application_runtime
     app.state.application_runtime_archive = resolved_application_archive
     app.state.runtime_admin = resolved_runtime_admin
@@ -803,7 +929,7 @@ def create_app(
 
     @app.middleware("http")
     async def require_console_client_for_writes(request: Request, call_next):
-        if request.method == "POST" and request.url.path.startswith("/api/v1/"):
+        if request.method == "POST" and request.url.path.startswith(("/api/v1/", "/api/v2/")):
             if request.headers.get("X-AI-Game-Client") != WRITE_CLIENT_HEADER:
                 return JSONResponse(
                     status_code=403,
@@ -861,6 +987,8 @@ def create_app(
             content={"error": {"code": error.code, "message": message}},
         )
 
+    app.add_exception_handler(GoalError, goal_error_handler)
+
     @app.exception_handler(ApplicationRuntimeError)
     async def handle_application_runtime_error(
         _: Request, error: ApplicationRuntimeError
@@ -906,6 +1034,18 @@ def create_app(
     ) -> JSONResponse:
         # FastAPI's default validation payload can contain rejected input.
         # Every write surface returns a redacted error instead of echoing it.
+        if request.url.path == "/api/v2/goals" or request.url.path.startswith(
+            "/api/v2/goals/"
+        ):
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "error": {
+                        "code": "invalid_goal_request",
+                        "message": "GoalRun 请求无效。",
+                    }
+                },
+            )
         if request.url.path == "/api/v1/executor/actions":
             return JSONResponse(
                 status_code=422,
@@ -1556,6 +1696,7 @@ def create_app(
     # 终态；legacy 重复实现由独立的 cutover 工单移除（§2：不做 payload 嗅探）。
     if gateway is not None:
         app.include_router(create_gateway_router(gateway))
+    app.include_router(create_goal_router(resolved_goal_service))
     app.include_router(router)
     # Week 6: Runtime Lease 管理 API（懒初始化，不产生额外数据库文件）
     app.include_router(create_lease_admin_router(resolved_runtime_admin))

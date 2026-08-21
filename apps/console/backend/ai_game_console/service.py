@@ -91,6 +91,41 @@ class RuntimeProbe:
         return decoded if isinstance(decoded, Mapping) else {}
 
     def _model_capability(self) -> RuntimeCapability:
+        if self.settings.mobile_role_endpoint and self.settings.mobile_role_model:
+            endpoint = self.settings.mobile_role_endpoint.rstrip("/")
+            suffix = "/v1/chat/completions"
+            if not endpoint.endswith(suffix):
+                return RuntimeCapability(
+                    id="model", name="本地手机角色模型", status="not_configured",
+                    configured=False, detail="本地手机角色模型端点格式无效。",
+                    blocker={"code": "model_not_configured", "message": "角色模型尚未配置。"},
+                )
+            catalog_endpoint = endpoint.removesuffix(suffix) + "/v1/models"
+            try:
+                catalog = self.model_transport(
+                    catalog_endpoint,
+                    self.MODEL_PROBE_TIMEOUT_SECONDS,
+                    self.settings.mobile_role_api_key,
+                )
+                models = catalog.get("data", [])
+                ready = isinstance(models, list) and any(
+                    isinstance(item, Mapping)
+                    and item.get("id") == self.settings.mobile_role_model
+                    for item in models
+                )
+            except (OSError, ValueError, json.JSONDecodeError):
+                ready = False
+            return RuntimeCapability(
+                id="model", name="本地手机角色模型",
+                status="ready" if ready else "stopped", configured=True,
+                detail=(
+                    f"本地角色模型已就绪，正在服务 {self.settings.mobile_role_model}。"
+                    if ready else "本地角色模型端点未就绪，或未服务已配置模型。"
+                ),
+                blocker=(None if ready else {
+                    "code": "model_runtime_stopped", "message": "本地角色模型尚未启动。",
+                }),
+            )
         config_path = self.settings.project_root / "config" / "model-runtime.env"
         config = self._read_model_runtime_config(config_path)
         host = config.get("GUI_MODEL_HOST", "").strip()

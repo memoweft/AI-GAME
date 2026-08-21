@@ -885,13 +885,287 @@ class OpenAICompatibleMobileRoleModel:
             ) from None
 
 
-def _physical_intent(action: GuiAction) -> PhysicalIntent:
+@dataclass(slots=True)
+class OpenAICompatibleToolRoleModel:
+    """Structured commander and visual roles over one local tool-call endpoint."""
+
+    endpoint: str
+    model: str
+    evidence: LocalMobileEvidenceStore
+    api_key: str | None = field(default=None, repr=False)
+    timeout_seconds: float = 60.0
+    transport: GuiOwlTransport | None = field(default=None, repr=False)
+
+    def plan(self, context: PlanContext) -> PlanDraft:
+        decoded = self.call_tool(
+            system=(
+                "你是手机任务指挥层。必须调用 record_plan。规划1到16个可观察阶段，"
+                "完整覆盖原始目标；不输出坐标、点击或设备命令。只规划需要在手机上达到的"
+                "可见状态，不要把向用户汇报或结束任务单列为手机阶段。"
+            ),
+            prompt=_planner_prompt(context),
+            observations=(context.observation,),
+            tool_name="record_plan",
+            description="Record an observable plan that preserves the full owner goal",
+            parameters={
+                "type": "object", "additionalProperties": False,
+                "properties": {
+                    "subgoals": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["subgoals"],
+            },
+            max_tokens=1_024,
+        )
+        subgoals = decoded.get("subgoals")
+        if not isinstance(subgoals, list):
+            raise _invalid_role_response()
+        cleaned = tuple(
+            item.strip() for item in subgoals
+            if isinstance(item, str) and item.strip() and not _is_meta_finish_subgoal(item)
+        )
+        if len(cleaned) != len(subgoals) or not 1 <= len(cleaned) <= 16:
+            raise _invalid_role_response()
+        return PlanDraft(cleaned)
+
+    def decide(self, context: DecisionContext) -> ActionDecision:
+        screenshot = self.evidence.load(context.observation.evidence_id)
+        decoded = self.call_tool(
+            system=(
+                "你是手机视觉动作层。必须调用 mobile_use，并且只根据当前截图和当前子目标"
+                "给一个动作。若画面已证明子目标完成，terminate success。系统级返回桌面、"
+                "返回或最近任务应使用 system_button，不要点击导航栏坐标。对可见目标动作"
+                "填写简短 target_description，描述目标文字或语义，不得填写坐标。"
+            ),
+            prompt=_executor_prompt(context),
+            observations=(context.observation,),
+            tool_name="mobile_use",
+            description="Propose exactly one validated atomic Android action",
+            parameters=_MOBILE_USE_TOOL_PARAMETERS,
+            max_tokens=768,
+        )
+        envelope = (
+            '<tool_call>{"name":"mobile_use","arguments":'
+            + json.dumps(decoded, ensure_ascii=False, separators=(",", ":"))
+            + "}</tool_call>"
+        )
+        try:
+            parsed = parse_gui_owl_tool_call(
+                envelope,
+                target_id=context.target_id or f"mobile-task:{context.task_id}",
+                screenshot=screenshot,
+            )
+        except ValueError:
+            raise _invalid_role_response() from None
+        if parsed.kind == "terminate":
+            return ActionDecision(
+                "finish" if parsed.termination_status == "success" else "terminate",
+                reason="structured visual terminal decision",
+            )
+        if parsed.kind == "wait":
+            return ActionDecision(
+                "act", PhysicalIntent("wait", {"seconds": parsed.wait_seconds or 0}),
+                "structured visual wait",
+            )
+        if parsed.action is None:
+            raise _invalid_role_response()
+        target_description = decoded.get("target_description")
+        if target_description is not None and (
+            not isinstance(target_description, str)
+            or not target_description.strip()
+            or len(target_description.strip()) > 200
+        ):
+            raise _invalid_role_response()
+        return ActionDecision(
+            "act", _physical_intent(
+                parsed.action,
+                target_description=(target_description.strip() if target_description else None),
+            ), "structured visual action"
+        )
+
+    def verify(self, context: VerificationContext) -> Verification:
+        decoded = self.call_tool(
+            system=(
+                "你是动作后验证层。必须调用 record_verification。只提供一张动作后画面。"
+                "传输成功不等于结果成功；verdict四选一，不得输出互相矛盾的状态。"
+                "只有画面不可读、严重遮挡或无法可靠判断时才选择 uncertain。"
+            ),
+            prompt=(
+                f"整体目标：{context.goal}\n当前子目标：{context.subgoal.description}\n"
+                f"动作：{context.decision.intent.name if context.decision.intent else context.decision.kind}\n"
+                "根据当前动作后画面选择 satisfied、progress、no_progress 或 uncertain。"
+            ),
+            observations=(context.after,),
+            tool_name="record_verification",
+            description="Record an evidence-bounded verdict over before and after frames",
+            parameters={
+                "type": "object", "additionalProperties": False,
+                "properties": {
+                    "verdict": {"type": "string", "enum": [
+                        "satisfied", "progress", "no_progress", "uncertain",
+                    ]},
+                    "evidence": {"type": "string"},
+                },
+                "required": ["verdict", "evidence"],
+            },
+            max_tokens=768,
+        )
+        verdict = decoded.get("verdict")
+        evidence = decoded.get("evidence")
+        if verdict not in {"satisfied", "progress", "no_progress", "uncertain"} or not isinstance(evidence, str):
+            raise _invalid_role_response()
+        satisfied = verdict == "satisfied"
+        progress = verdict in {"satisfied", "progress"}
+        uncertain = verdict == "uncertain"
+        before = self.evidence.load(context.before.evidence_id)
+        after = self.evidence.load(context.after.evidence_id)
+        if before.width == after.width and before.height == after.height and before.png_bytes == after.png_bytes:
+            progress = satisfied is True
+            if not satisfied:
+                evidence = "no material visual change from BEFORE evidence"
+        return Verification(
+            bool(satisfied), bool(progress), uncertain=bool(uncertain),
+            evidence=evidence.strip()[:8_000],
+        )
+
+    def reflect(self, context: ReflectionContext) -> ReflectionDecision:
+        observation = _latest_attempt_observation(context)
+        decoded = self.call_tool(
+            system=(
+                "你是手机任务反思层。必须调用 record_reflection。根据连续无进展记录改变策略，"
+                "不得原样重复失败动作。"
+            ),
+            prompt=_reflection_prompt(context),
+            observations=(observation,),
+            tool_name="record_reflection",
+            description="Record one bounded recovery strategy",
+            parameters={
+                "type": "object", "additionalProperties": False,
+                "properties": {
+                    "strategy": {"type": "string"},
+                    "terminate": {"type": "boolean"},
+                    "reason": {"type": "string"},
+                    "replacement_subgoals": {
+                        "type": ["array", "null"], "items": {"type": "string"},
+                    },
+                },
+                "required": ["strategy", "terminate", "reason", "replacement_subgoals"],
+            },
+            max_tokens=1_024,
+        )
+        strategy = decoded.get("strategy")
+        terminate = decoded.get("terminate")
+        reason = decoded.get("reason")
+        replacement = decoded.get("replacement_subgoals")
+        if not isinstance(strategy, str) or not strategy.strip() or not isinstance(terminate, bool) or not isinstance(reason, str):
+            raise _invalid_role_response()
+        replacement_tuple = None
+        if replacement is not None:
+            if not isinstance(replacement, list) or not replacement or any(
+                not isinstance(item, str) or not item.strip() for item in replacement
+            ):
+                raise _invalid_role_response()
+            replacement_tuple = tuple(item.strip() for item in replacement)
+        return ReflectionDecision(
+            strategy.strip(), terminate=terminate, reason=reason.strip(),
+            replacement_subgoals=replacement_tuple,
+        )
+
+    def call_tool(
+        self, *, system: str, prompt: str, observations: tuple[Observation, ...],
+        tool_name: str, description: str, parameters: dict[str, Any], max_tokens: int,
+        reasoning_effort: str = "medium",
+        reasoning_budget: int | None = None,
+    ) -> dict[str, Any]:
+        if not self.model.strip():
+            raise MobileTaskAdapterError("mobile_role_not_configured", "本地角色模型名称未配置。")
+        content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+        for observation in observations:
+            screenshot = self.evidence.load(observation.evidence_id)
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": "data:image/png;base64," + base64.b64encode(screenshot.png_bytes).decode("ascii")},
+            })
+        payload = {
+            "model": self.model.strip(), "temperature": 0.0,
+            "reasoning_effort": reasoning_effort,
+            "max_tokens": max_tokens,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": content},
+            ],
+            "tools": [{"type": "function", "function": {
+                "name": tool_name, "description": description, "parameters": parameters,
+            }}],
+            "tool_choice": {"type": "function", "function": {"name": tool_name}},
+        }
+        if reasoning_budget is not None:
+            payload["reasoning_budget"] = reasoning_budget
+            if reasoning_budget == 0:
+                payload["chat_template_kwargs"] = {"enable_thinking": False}
+        headers = {"Accept": "application/json", "Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        try:
+            endpoint = _loopback_chat_completions_endpoint(self.endpoint)
+            response = (
+                self.transport(endpoint, payload, headers, self.timeout_seconds)
+                if self.transport is not None else
+                OpenAICompatibleGuiOwlClient._request(endpoint, payload, headers, self.timeout_seconds)
+            )
+            choices = response.get("choices")
+            if not isinstance(choices, list) or len(choices) != 1:
+                raise _invalid_role_response()
+            message = choices[0].get("message") if isinstance(choices[0], Mapping) else None
+            calls = message.get("tool_calls") if isinstance(message, Mapping) else None
+            if not isinstance(calls, list) or len(calls) != 1 or not isinstance(calls[0], Mapping):
+                raise _invalid_role_response()
+            function = calls[0].get("function")
+            if not isinstance(function, Mapping) or function.get("name") != tool_name:
+                raise _invalid_role_response()
+            arguments = function.get("arguments")
+            decoded = json.loads(arguments) if isinstance(arguments, str) else arguments
+            if not isinstance(decoded, dict):
+                raise _invalid_role_response()
+            return decoded
+        except MobileTaskAdapterError:
+            raise
+        except (ValueError, KeyError, TypeError, json.JSONDecodeError):
+            raise _invalid_role_response() from None
+        except GuiOwlClientError as error:
+            raise MobileTaskAdapterError(error.code, str(error)) from None
+        except (HTTPError, URLError, socket.timeout, TimeoutError, OSError):
+            raise MobileTaskAdapterError("mobile_role_unavailable", "本地角色模型暂时不可用。") from None
+
+
+_MOBILE_USE_TOOL_PARAMETERS: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "action": {"type": "string", "enum": [
+            "click", "long_press", "swipe", "type", "system_button", "wait", "terminate",
+        ]},
+        "coordinate": {"type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2},
+        "coordinate2": {"type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2},
+        "text": {"type": "string"},
+        "button": {"type": "string", "enum": ["Back", "Home", "Menu", "Enter"]},
+        "time": {"type": "number"},
+        "status": {"type": "string", "enum": ["success", "failure"]},
+        "target_description": {"type": "string", "maxLength": 200},
+    },
+    "required": ["action"],
+}
+
+
+def _physical_intent(
+    action: GuiAction, *, target_description: str | None = None
+) -> PhysicalIntent:
+    target = ({"target_description": target_description} if target_description else {})
     if action.action == "tap":
-        return PhysicalIntent("tap", {"x": action.x, "y": action.y})
+        return PhysicalIntent("tap", {"x": action.x, "y": action.y, **target})
     if action.action == "long_press":
         return PhysicalIntent(
             "long_press",
-            {"x": action.x, "y": action.y, "duration_ms": action.duration_ms},
+            {"x": action.x, "y": action.y, "duration_ms": action.duration_ms, **target},
         )
     if action.action == "swipe":
         return PhysicalIntent(
@@ -902,6 +1176,7 @@ def _physical_intent(action: GuiAction) -> PhysicalIntent:
                 "end_x": action.end_x,
                 "end_y": action.end_y,
                 "duration_ms": action.duration_ms,
+                **target,
             },
         )
     if action.action == "text":
@@ -957,6 +1232,7 @@ def _executor_prompt(context: DecisionContext) -> str:
         f"Consecutive no-progress attempts: {context.consecutive_no_progress}\n"
         f"Owner updates: {_owner_updates(context.owner_inputs)}\n"
         f"Verified Skill Memory: {_skill_memory(context.skill_memory)}\n\n"
+        f"Scene-conditioned Experience: {_experience_hints(context.experience_hints)}\n\n"
         f"Recent attempts (text only):\n{history}"
         "\nDo not blindly repeat a recent non-idempotent action fingerprint "
         "unless the current screenshot provides new visible justification."
@@ -1112,6 +1388,26 @@ def _skill_memory(memory: Any) -> str:
         return "None"
     procedure = " -> ".join(memory.procedure)
     return f"v{memory.version}; procedure={procedure}; strategy={memory.strategy}"
+
+
+def _experience_hints(hints: tuple[Any, ...]) -> str:
+    if not hints:
+        return "None"
+    rendered = []
+    for item in hints[:8]:
+        if item.kind == "negative":
+            instruction = f"avoid {item.semantic_action}"
+        elif item.kind == "recovery":
+            instruction = f"recovery {item.recovery_action or item.semantic_action}"
+        else:
+            instruction = f"prefer {item.semantic_action}"
+        rendered.append(
+            f"{item.candidate_id}:{item.kind}:{instruction}; "
+            f"expect={item.expected_next_scene or 'unknown'}; confidence={item.confidence:.2f}"
+        )
+    return " | ".join(rendered) + (
+        " | Current screenshot always outranks experience; re-ground every target."
+    )
 
 
 def _latest_attempt_observation(context: ReflectionContext) -> Observation:

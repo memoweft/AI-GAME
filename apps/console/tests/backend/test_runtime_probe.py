@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from dataclasses import replace
 
 from ai_game_console.config import Settings
 from ai_game_console.discovery import AdbTargetDiscovery
@@ -101,3 +102,25 @@ def test_runtime_probe_reports_not_configured_without_model_runtime_config(
     assert model.status == "not_configured"
     assert model.configured is False
     assert called is False
+
+
+def test_runtime_probe_prefers_configured_mobile_role_binding(tmp_path: Path) -> None:
+    settings = replace(
+        build_settings(tmp_path),
+        mobile_role_endpoint="http://127.0.0.1:8080/v1/chat/completions",
+        mobile_role_model="qwen-role",
+        mobile_role_api_key="local-role-key",
+    )
+    calls = []
+
+    def transport(url, timeout, api_key):
+        calls.append((url, timeout, api_key))
+        return {"data": [{"id": "qwen-role"}]}
+
+    model = model_capability(RuntimeProbe(
+        settings, AdbTargetDiscovery(env={"PATH": ""}), model_transport=transport,
+    ).snapshot())
+
+    assert model.status == "ready"
+    assert model.name == "本地手机角色模型"
+    assert calls == [("http://127.0.0.1:8080/v1/models", 0.5, "local-role-key")]

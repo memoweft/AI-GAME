@@ -8,11 +8,13 @@ from fastapi.testclient import TestClient
 
 from ai_game_console.api import create_app
 from ai_game_console.discovery import AdbTargetDiscovery
+from ai_game_console.goal_runtime import StructuredGoalModel
 from ai_game_console.mobile_agent.domain import IdempotencyConflict, TaskNotFound
 from ai_game_console.mobile_agent import MobileTaskRuntime
 from ai_game_console.mobile_task_adapter import (
     MobileTaskAndroidDriver,
     OpenAICompatibleMobileRoleModel,
+    OpenAICompatibleToolRoleModel,
 )
 from ai_game_console.mobile_task_profiles import resolve_mobile_skill_scope
 
@@ -379,4 +381,32 @@ def test_production_composition_supports_target_selection_without_a_global_seria
     assert runtime._max_reflections == 64
     assert runtime._scope_resolver is resolve_mobile_skill_scope
     assert runtime._store.database_path == settings.data_dir / "mobile-tasks.db"
+    runtime.shutdown()
+
+
+def test_production_composition_prefers_structured_mobile_role_binding(
+    tmp_path: Path,
+) -> None:
+    settings = replace(
+        build_settings(tmp_path),
+        gui_executor_enabled=True,
+        adb_path=str(tmp_path / "adb.exe"),
+        mobile_role_endpoint="http://127.0.0.1:8080/v1/chat/completions",
+        mobile_role_model="qwen-role",
+        mobile_role_api_key="local-key",
+    )
+
+    app = create_app(
+        settings=settings,
+        adb_discovery=AdbTargetDiscovery(env={"PATH": ""}),
+    )
+    runtime = app.state.mobile_task_runtime
+
+    assert isinstance(runtime, MobileTaskRuntime)
+    assert isinstance(runtime._model, OpenAICompatibleToolRoleModel)
+    assert isinstance(app.state.goal_service.specify_goal.__self__, StructuredGoalModel)
+    assert isinstance(app.state.goal_service.verify_completion.__self__, StructuredGoalModel)
+    assert runtime._model.endpoint == "http://127.0.0.1:8080/v1/chat/completions"
+    assert runtime._model.model == "qwen-role"
+    assert "local-key" not in repr(runtime._model)
     runtime.shutdown()

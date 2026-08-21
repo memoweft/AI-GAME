@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import json
 import threading
 import time
 from collections import deque
@@ -1004,7 +1005,7 @@ def test_schema_v1_explicit_skill_memory_migrates_into_legacy_scope(
             "SELECT version FROM mobile_agent_schema WHERE singleton = 1"
         ).fetchone()[0]
 
-    assert version == 2
+    assert version == 3
     assert migrated_seed.skill_id == "old-skill"
     assert migrated_seed.skill_scope_id == "legacy:old-skill"
     assert migrated_prefixed_seed.skill_id == "legacy:old-skill"
@@ -1013,6 +1014,66 @@ def test_schema_v1_explicit_skill_memory_migrates_into_legacy_scope(
     assert migrated_model.plan_contexts[0].skill_memory.skill_id == "legacy:old-skill"
     assert migrated_model.plan_contexts[0].skill_memory.version == 1
     assert followup.skill_memory_version == 2
+
+
+def test_v2_compat_task_promotes_memory_only_after_goal_verification(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "mobile.db"
+
+    def resolve_scope(goal: str, target_id: str | None) -> str:
+        del goal, target_id
+        return "settings/battery"
+
+    runtime = MobileTaskRuntime(
+        database,
+        driver=RecordingDriver(),
+        model=MemoryAwareModel(),
+        scope_resolver=resolve_scope,
+    )
+    finished = wait_terminal(
+        runtime,
+        runtime.start(
+            "打开设置查看电池后回桌面",
+            "goal:compat:start",
+            execution_origin="v2_goal_compat",
+            promote_success_memory=False,
+        ).task_id,
+    )
+    promoted_version = runtime.promote_goal_verified_memory(
+        finished.task_id, goal_id="goal-verified-1", completion_revision=2
+    )
+    replayed_version = runtime.promote_goal_verified_memory(
+        finished.task_id, goal_id="goal-verified-1", completion_revision=2
+    )
+    promoted = runtime.inspect(finished.task_id)
+    runtime.shutdown(timeout=1)
+
+    assert finished.status == "completed"
+    assert finished.skill_scope_id == "auto:settings/battery"
+    assert finished.skill_memory_version == 0
+    assert promoted_version == 1
+    assert replayed_version == 1
+    assert promoted.skill_memory_version == 1
+
+    with sqlite3.connect(database) as connection:
+        origin, promote = connection.execute(
+            "SELECT execution_origin, promote_success_memory FROM mobile_tasks "
+            "WHERE task_id = ?",
+            (finished.task_id,),
+        ).fetchone()
+        memory_rows = connection.execute(
+            "SELECT memory_json FROM mobile_skill_memories WHERE source_task_id = ?",
+            (finished.task_id,),
+        ).fetchall()
+
+    assert origin == "v2_goal_compat"
+    assert promote == 0
+    assert len(memory_rows) == 1
+    assert json.loads(memory_rows[0][0])["goal_verification"] == {
+        "completion_revision": 2,
+        "goal_id": "goal-verified-1",
+    }
 
 
 def test_shutdown_times_out_deterministically_then_leaves_unexecuted_tasks_recoverable(

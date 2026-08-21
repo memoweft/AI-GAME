@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import json
 from pathlib import Path
 
 import pytest
@@ -142,6 +143,32 @@ def test_settings_honor_project_and_data_overrides(tmp_path: Path) -> None:
     assert settings.frontend_dist == (
         project_root.resolve() / "apps" / "console" / "frontend" / "dist"
     )
+
+
+def test_settings_load_explicit_loopback_mobile_role_binding_without_echoing_key(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    config_dir = project_root / "config"
+    config_dir.mkdir(parents=True)
+    binding = tmp_path / "binding.json"
+    binding.write_text(json.dumps({
+        "host": "127.0.0.1", "port": 8080, "alias": "qwen-role",
+        "api_keys": ["SENTINEL_LOCAL_KEY"],
+    }), encoding="utf-8")
+    (config_dir / "mobile-role-runtime.env").write_text(
+        f"AI_GAME_MOBILE_ROLE_CONFIG_PATH={binding}\n"
+        f"AI_GAME_MOBILE_ROLE_CONTROL_SCRIPT={tmp_path / 'control.ps1'}\n",
+        encoding="utf-8",
+    )
+
+    settings = Settings.from_env({"AI_GAME_PROJECT_ROOT": str(project_root)})
+
+    assert settings.mobile_role_endpoint == "http://127.0.0.1:8080/v1/chat/completions"
+    assert settings.mobile_role_model == "qwen-role"
+    assert settings.mobile_role_api_key == "SENTINEL_LOCAL_KEY"
+    assert settings.mobile_role_control_script == str(tmp_path / "control.ps1")
+    assert "SENTINEL" not in repr(settings)
 
 
 @pytest.mark.parametrize(

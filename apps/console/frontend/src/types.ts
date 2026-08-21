@@ -786,3 +786,100 @@ export interface GatewaySseData {
   type: string;
   payload: Record<string, unknown>;
 }
+
+// Universal GoalRun v2 (U1/U2 compatibility facade).
+export type GoalExecutionStatus =
+  | 'ACCEPTED'
+  | 'PREFLIGHT'
+  | 'PLANNING'
+  | 'RUNNING'
+  | 'VERIFYING'
+  | 'RECOVERING'
+  | 'WAITING_CONFIGURATION'
+  | 'WAITING_EXTERNAL'
+  | 'CANDIDATE_COMPLETE'
+  | 'COMPLETED'
+  | 'PARTIAL'
+  | 'FAILED'
+  | 'CANCELLED'
+  | 'UNCERTAIN';
+
+export interface GoalEnvironmentFact {
+  capability: string;
+  state: string;
+  detail: string;
+}
+
+export interface GoalTargetOption {
+  target_id: string;
+  name: string;
+  connection: string;
+}
+
+export interface GoalSuccessCriterion {
+  id: string;
+  description: string;
+  evidence_requirement: string;
+  source_quote: string;
+}
+
+export interface GoalCriterionAssessment {
+  criterion_id: string;
+  satisfied: boolean;
+  subgoal_indices: number[];
+  attempt_sequences: number[];
+  evidence: string;
+}
+
+export interface GoalCompletionAssessment {
+  revision: number;
+  specification_revision: number;
+  source_task_id: string;
+  verdict: 'verified' | 'partial' | 'uncertain';
+  criteria: GoalCriterionAssessment[];
+  verified_facts: string[];
+  result_summary: string;
+  created_at: string;
+}
+
+export interface GoalRun {
+  id: string;
+  original_goal: string;
+  goal_specification: {
+    revision: number;
+    original_goal: string;
+    normalized_intent: Record<string, unknown>;
+    success_criteria: GoalSuccessCriterion[];
+  };
+  execution_status: GoalExecutionStatus | string;
+  control_state: string;
+  active_stage: string | null;
+  binding: {
+    kind: string;
+    state: string;
+    task_id: string | null;
+    target_id: string | null;
+    completion_gate: string;
+  };
+  environment_state: {
+    state: string;
+    facts: GoalEnvironmentFact[];
+    selected_target_id: string | null;
+    target_options: GoalTargetOption[];
+  };
+  waiting_reason: { code: string; message: string } | null;
+  error: { code: string; message: string } | null;
+  result_summary: string | null;
+  completion_assessment: GoalCompletionAssessment | null;
+  completion_history: GoalCompletionAssessment[];
+  verified_facts: string[];
+  uncompleted_items: string[];
+  created_at: string;
+  updated_at: string;
+  terminal_at: string | null;
+}
+
+export interface GoalRunListResponse {
+  items: GoalRun[];
+  count: number;
+}

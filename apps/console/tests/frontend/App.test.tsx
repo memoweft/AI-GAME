@@ -6,6 +6,8 @@ import App from '../../frontend/src/App';
 
 afterEach(() => {
   cleanup();
+  window.localStorage.clear();
+  window.history.replaceState(null, '', '#');
   vi.restoreAllMocks();
 });
 
@@ -94,6 +96,7 @@ function installApiMock() {
     calls.push({ url, init });
     if (url.endsWith('/targets') && method === 'GET') return json({ items: targets, count: targets.length });
     if (url.endsWith('/runtime') && method === 'GET') return json(runtime);
+    if (url.endsWith('/api/v2/goals?limit=100') && method === 'GET') return json({ items: [], count: 0 });
     if (url.endsWith('/tasks?limit=100') && method === 'GET') return json({ items: [], count: 0 });
     if (url.endsWith('/application-instances?limit=100') && method === 'GET') return json({ items: [], count: 0 });
     if (url.endsWith('/application-profiles/soul-reply-v1/scheduler') && method === 'GET') return json({
@@ -115,18 +118,17 @@ function installApiMock() {
 }
 
 describe('控制台统一入口', () => {
-  it('默认就是一句话开始，一级导航仅保留任务、Soul、设备和设置', async () => {
+  it('默认是唯一目标入口，运行时工作区只保留在高级诊断', async () => {
     const { calls } = installApiMock();
     render(<App />);
 
-    expect(await screen.findByRole('region', { name: '一句话开始' })).toBeInTheDocument();
+    expect(await screen.findByRole('region', { name: '目标中心' })).toBeInTheDocument();
     const nav = screen.getByRole('navigation', { name: '主导航' });
     expect(within(nav).getAllByRole('button').map((button) => button.textContent?.trim())).toEqual([
-      '一句话开始',
-      '网关任务',
-      'Soul',
+      '目标',
       '设备',
       '设置',
+      '高级',
     ]);
     expect(within(nav).queryByText('总览')).not.toBeInTheDocument();
     expect(within(nav).queryByText('活动记录')).not.toBeInTheDocument();
@@ -134,20 +136,22 @@ describe('控制台统一入口', () => {
     expect(within(nav).queryByText('游戏学习')).not.toBeInTheDocument();
     expect(document.body).not.toHaveTextContent(/mode|profile|transition|reward|skill_id/i);
 
-    await waitFor(() => expect(calls.some((call) => call.url.endsWith('/tasks?limit=100'))).toBe(true));
+    await waitFor(() => expect(calls.some((call) => call.url.endsWith('/api/v2/goals?limit=100'))).toBe(true));
+    expect(calls.some((call) => call.url.endsWith('/tasks?limit=100'))).toBe(false);
     expect(calls.some((call) => call.url.includes('/chat/'))).toBe(false);
     expect(calls.some((call) => call.url.includes('/learning/'))).toBe(false);
     expect(calls.some((call) => call.url.endsWith('/overview'))).toBe(false);
     expect(calls.some((call) => call.url.includes('/events?'))).toBe(false);
   });
 
-  it('Soul 作为应用入口在控制台内打开，仍不使用 iframe', async () => {
+  it('Soul 作为兼容诊断保留且不再占用一级产品入口', async () => {
     const user = userEvent.setup();
     installApiMock();
     render(<App />);
 
-    await screen.findByRole('region', { name: '一句话开始' });
-    await user.click(screen.getByRole('button', { name: 'Soul' }));
+    await screen.findByRole('region', { name: '目标中心' });
+    await user.click(screen.getByRole('button', { name: '高级' }));
+    await user.click(screen.getByRole('tab', { name: 'Soul' }));
     expect(await screen.findByRole('region', { name: 'Soul 应用' })).toBeInTheDocument();
     expect(screen.getByText('Soul 是 AI Game 可以长期运行的一项应用功能。')).toBeInTheDocument();
     expect(screen.queryByText(/dating-copilot/)).not.toBeInTheDocument();
@@ -159,7 +163,7 @@ describe('控制台统一入口', () => {
     installApiMock();
     render(<App />);
 
-    await screen.findByRole('region', { name: '一句话开始' });
+    await screen.findByRole('region', { name: '目标中心' });
     await user.click(screen.getByRole('button', { name: '设备' }));
     expect(await screen.findByRole('heading', { name: '设备与连接' })).toBeInTheDocument();
     expect(screen.getByText('Android 模拟器')).toBeInTheDocument();
@@ -180,7 +184,7 @@ describe('控制台统一入口', () => {
     installApiMock();
     render(<App />);
 
-    await screen.findByRole('region', { name: '一句话开始' });
+    await screen.findByRole('region', { name: '目标中心' });
     await user.click(screen.getByRole('button', { name: '设置' }));
     expect(await screen.findByText('本地 GUI 模型')).toBeInTheDocument();
     expect(screen.getByText('ADB 执行器')).toBeInTheDocument();

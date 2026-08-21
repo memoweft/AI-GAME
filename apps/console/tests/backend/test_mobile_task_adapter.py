@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+import json
 import os
 from pathlib import Path
 import time
@@ -31,6 +32,7 @@ from ai_game_console.mobile_task_adapter import (
     MobileTaskAdapterError,
     MobileTaskAndroidDriver,
     OpenAICompatibleMobileRoleModel,
+    OpenAICompatibleToolRoleModel,
 )
 
 
@@ -912,3 +914,79 @@ def test_role_model_repairs_a_pre_action_format_error_without_executing_device(
     assert "previous response did not match" in prompts[1]
     assert "simple current-screen confirmation" in system_prompts[0]
     assert "one subgoal" in system_prompts[0]
+
+
+def test_tool_role_model_uses_forced_tools_for_all_four_roles(tmp_path: Path) -> None:
+    evidence = LocalMobileEvidenceStore(tmp_path / "evidence")
+    frame = evidence.record("task-1", AndroidScreenshot(PNG, width=100, height=200))
+    calls = []
+
+    def transport(endpoint, payload, headers, timeout):
+        del endpoint, headers, timeout
+        tool = payload["tools"][0]["function"]["name"]
+        calls.append((tool, payload))
+        arguments = {
+            "record_plan": {"subgoals": ["打开设置", "查看电池", "返回桌面"]},
+            "mobile_use": {"action": "system_button", "button": "Home"},
+            "record_verification": {
+                "verdict": "progress",
+                "evidence": "model claimed progress",
+            },
+            "record_reflection": {
+                "strategy": "改用系统 Home", "terminate": False,
+                "reason": "坐标点击无进展", "replacement_subgoals": None,
+            },
+        }[tool]
+        return {"choices": [{"message": {"tool_calls": [{"function": {
+            "name": tool, "arguments": json.dumps(arguments),
+        }}]}}]}
+
+    model = OpenAICompatibleToolRoleModel(
+        endpoint="http://127.0.0.1:8080/v1/chat/completions",
+        model="qwen-role", evidence=evidence, transport=transport,
+    )
+    subgoal = Subgoal(2, "返回桌面", "active")
+    plan = model.plan(PlanContext("task-1", "查看电池后返回桌面", None, 0, (), frame, None))
+    decision = model.decide(DecisionContext(
+        "task-1", "查看电池后返回桌面", None, 1, subgoal, 0, (), frame,
+        "initial", 0, (), None,
+    ))
+    verification = model.verify(VerificationContext(
+        "task-1", "查看电池后返回桌面", subgoal, decision, frame,
+        TransportReceipt("accepted"), frame,
+    ))
+    reflection = model.reflect(ReflectionContext(
+        "task-1", "查看电池后返回桌面", subgoal, 0, (), "initial", 3,
+        (ActionAttempt(
+            "attempt-1", 1, 1, 2, 0, decision, frame,
+            TransportReceipt("accepted"), frame, verification,
+            "2026-08-21T00:00:00Z", "2026-08-21T00:00:01Z",
+        ),), None,
+    ))
+
+    assert plan.subgoals == ("打开设置", "查看电池", "返回桌面")
+    assert decision.intent == PhysicalIntent("keyevent", {"keycode": "KEYCODE_HOME"})
+    assert verification.progress is False
+    assert verification.evidence == "no material visual change from BEFORE evidence"
+    assert reflection.strategy == "改用系统 Home"
+    assert [item[0] for item in calls] == [
+        "record_plan", "mobile_use", "record_verification", "record_reflection",
+    ]
+    assert all(item[1]["tool_choice"]["function"]["name"] == item[0] for item in calls)
+    mobile_parameters = calls[1][1]["tools"][0]["function"]["parameters"]
+    assert mobile_parameters["properties"]["target_description"]["maxLength"] == 200
+
+
+def test_tool_role_model_rejects_text_fallback_without_a_tool_call(tmp_path: Path) -> None:
+    evidence = LocalMobileEvidenceStore(tmp_path / "evidence")
+    frame = evidence.record("task-1", AndroidScreenshot(PNG, width=100, height=200))
+    model = OpenAICompatibleToolRoleModel(
+        endpoint="http://127.0.0.1:8080/v1/chat/completions",
+        model="qwen-role", evidence=evidence,
+        transport=lambda *args: {"choices": [{"message": {"content": "looks ready"}}]},
+    )
+
+    with pytest.raises(MobileTaskAdapterError) as raised:
+        model.plan(PlanContext("task-1", "目标", None, 0, (), frame, None))
+
+    assert raised.value.code == "mobile_role_invalid_response"

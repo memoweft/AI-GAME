@@ -30,6 +30,7 @@ import { StatusBadge } from './components/StatusBadge';
 import { CloudModelSettings } from './components/CloudModelSettings';
 import { MobileTaskWorkspace } from './components/MobileTaskWorkspace';
 import { SoulWorkspace } from './components/SoulWorkspace';
+import { GoalWorkspace } from './components/GoalWorkspace';
 import { compactId, formatDateTime } from './format';
 import { capabilityRole, executorCapability, modelCapability } from './compat';
 import {
@@ -42,7 +43,8 @@ import type {
   Target,
 } from './types';
 
-type PageId = 'agent' | 'gateway' | 'soul' | 'targets' | 'settings';
+type PageId = 'goal' | 'targets' | 'settings' | 'advanced';
+type DiagnosticId = 'mobile' | 'gateway' | 'soul';
 type ResourceKey = 'targets' | 'runtime';
 
 interface NavItem {
@@ -53,11 +55,10 @@ interface NavItem {
 }
 
 const NAV_ITEMS: NavItem[] = [
-  { id: 'agent', label: '一句话开始', description: '说出目标，让手机智能体替你完成', icon: ListTodo },
-  { id: 'gateway', label: '网关任务', description: '创建任务、实时跟踪进度并远程控制', icon: Activity },
-  { id: 'soul', label: 'Soul', description: 'AI Game 中可长期运行的一项应用功能', icon: Heart },
+  { id: 'goal', label: '目标', description: '说出结果，AI Game 自动检查环境并继续执行', icon: ListTodo },
   { id: 'targets', label: '设备', description: '查看模拟器、真机和平板连接', icon: MonitorSmartphone },
   { id: 'settings', label: '设置', description: '模型、执行器与连接配置', icon: Settings },
+  { id: 'advanced', label: '高级', description: '兼容运行时与迁移诊断', icon: MonitorCog },
 ];
 
 function toMessage(error: unknown): string {
@@ -76,7 +77,7 @@ function isExecutionReady(runtime: RuntimeInfo | null): boolean {
 }
 
 export default function App() {
-  const [page, setPage] = useState<PageId>('agent');
+  const [page, setPage] = useState<PageId>('goal');
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [targets, setTargets] = useState<Target[]>([]);
   const [runtime, setRuntime] = useState<RuntimeInfo | null>(null);
@@ -109,6 +110,10 @@ export default function App() {
   useEffect(() => {
     void loadAll('initial');
   }, [loadAll]);
+
+  useEffect(() => {
+    if (window.location.hash.startsWith('#diagnostics/')) setPage('advanced');
+  }, []);
 
   useEffect(() => {
     if (!toast) return;
@@ -179,13 +184,12 @@ export default function App() {
         </header>
 
         <main className="page-content">
-          {page === 'agent' && <MobileTaskWorkspace targets={targets} />}
-          {page === 'gateway' && <GatewayTaskWorkspace />}
-          {page === 'soul' && <SoulWorkspace />}
+          {page === 'goal' && <GoalWorkspace />}
           {page === 'targets' && (
             <TargetsPage targets={targets} loading={loading} error={errors.targets} onRetry={() => void loadAll()} onTargets={setTargets} onToast={setToast} onRefresh={() => void loadAll()} />
           )}
           {page === 'settings' && <SettingsPage runtime={effectiveRuntime} loading={loading} error={errors.runtime} onRetry={() => void loadAll()} onRuntimeChanged={() => loadAll()} />}
+          {page === 'advanced' && <AdvancedDiagnostics targets={targets} />}
         </main>
       </div>
 
@@ -200,6 +204,18 @@ export default function App() {
       )}
     </div>
   );
+}
+
+function AdvancedDiagnostics({ targets }: { targets: Target[] }) {
+  const hashValue = window.location.hash.replace('#diagnostics/', '') as DiagnosticId;
+  const [diagnostic, setDiagnostic] = useState<DiagnosticId>(
+    ['mobile', 'gateway', 'soul'].includes(hashValue) ? hashValue : 'mobile',
+  );
+  const select = (next: DiagnosticId) => {
+    setDiagnostic(next);
+    window.history.replaceState(null, '', `#diagnostics/${next}`);
+  };
+  return <div className="page-stack advanced-diagnostics"><section className="panel advanced-warning"><AlertTriangle size={20} /><div><strong>兼容诊断</strong><p>这些是迁移期间保留的内部运行时视图，不是普通目标的创建入口。</p></div></section><div className="advanced-tabs" role="tablist" aria-label="兼容诊断"><button role="tab" aria-selected={diagnostic === 'mobile'} onClick={() => select('mobile')}><ListTodo size={16} /> MobileTask</button><button role="tab" aria-selected={diagnostic === 'gateway'} onClick={() => select('gateway')}><Activity size={16} /> Gateway</button><button role="tab" aria-selected={diagnostic === 'soul'} onClick={() => select('soul')}><Heart size={16} /> Soul</button></div>{diagnostic === 'mobile' && <MobileTaskWorkspace targets={targets} />}{diagnostic === 'gateway' && <GatewayTaskWorkspace />}{diagnostic === 'soul' && <SoulWorkspace />}</div>;
 }
 
 function PanelHeader({ title, description, action }: { title: string; description: string; action?: React.ReactNode }) {

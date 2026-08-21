@@ -7,10 +7,12 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from typing import Any
 
 from .domain import (
     ActionDecision,
     DecisionContext,
+    ExperienceHint,
     InputRevision,
     MobileTaskState,
     Observation,
@@ -57,6 +59,7 @@ class MobileTaskRuntime:
         max_attempts: int = 64,
         queue_capacity: int = 32,
         scope_resolver: SkillScopeResolver | None = None,
+        experience: Any | None = None,
     ) -> None:
         if max_reflections < 1:
             raise ValueError("max_reflections must be positive")
@@ -70,6 +73,8 @@ class MobileTaskRuntime:
         self._max_reflections = max_reflections
         self._max_attempts = max_attempts
         self._scope_resolver = scope_resolver
+        self._experience = experience
+        self._attempt_experience: dict[str, Any] = {}
         self._queue: queue.Queue[object] = queue.Queue(maxsize=queue_capacity)
         self._slots = threading.BoundedSemaphore(queue_capacity)
         self._admission_lock = threading.Lock()
@@ -99,19 +104,48 @@ class MobileTaskRuntime:
         client_request_id: str,
         target_id: str | None = None,
         skill_id: str | None = None,
+        execution_origin: str = "direct_v1",
+        promote_success_memory: bool = True,
+        goal_id: str | None = None,
+        goal_spec_revision: int | None = None,
+        frozen_criteria_ids: tuple[str, ...] = (),
     ) -> MobileTaskState:
         goal = _required_text(goal, "goal", 16_000)
         request_id = _required_text(client_request_id, "client_request_id", 512)
         target_id = _optional_text(target_id, "target_id", 1_000)
         skill_id = _optional_text(skill_id, "skill_id", 1_000)
-        digest = _digest(
-            "start",
-            {"goal": goal, "target_id": target_id, "skill_id": skill_id},
-        )
+        execution_origin = _required_text(execution_origin, "execution_origin", 128)
+        goal_id = _optional_text(goal_id, "goal_id", 512)
+        if not isinstance(promote_success_memory, bool):
+            raise ValueError("promote_success_memory must be a boolean")
+        digest_payload: dict[str, object] = {
+            "goal": goal,
+            "target_id": target_id,
+            "skill_id": skill_id,
+        }
+        # Preserve the exact historical v1 digest so an idempotent retry made
+        # after upgrading does not conflict with its pre-U1 request record.
+        if execution_origin != "direct_v1" or not promote_success_memory:
+            digest_payload.update(
+                execution_origin=execution_origin,
+                promote_success_memory=promote_success_memory,
+            )
+        if goal_id is not None:
+            digest_payload.update(
+                goal_id=goal_id,
+                goal_spec_revision=goal_spec_revision,
+                frozen_criteria_ids=frozen_criteria_ids,
+            )
+        digest = _digest("start", digest_payload)
         with self._admission_lock:
             self._ensure_mutable()
             existing = self._store.existing_request(request_id, digest)
             if existing is not None:
+                self._begin_experience(
+                    existing, goal_id=goal_id,
+                    goal_spec_revision=goal_spec_revision,
+                    frozen_criteria_ids=frozen_criteria_ids,
+                )
                 return existing
             if not self._slots.acquire(blocking=False):
                 raise TaskQueueFull("mobile task queue is full")
@@ -128,12 +162,19 @@ class MobileTaskRuntime:
                     target_id=target_id,
                     skill_id=skill_id,
                     skill_scope_id=skill_scope_id,
+                    execution_origin=execution_origin,
+                    promote_success_memory=promote_success_memory,
                     client_request_id=request_id,
                     request_digest=digest,
                 )
                 if not created:
                     self._slots.release()
                     return state
+                self._begin_experience(
+                    state, goal_id=goal_id,
+                    goal_spec_revision=goal_spec_revision,
+                    frozen_criteria_ids=frozen_criteria_ids,
+                )
                 self._queue.put_nowait(task_id)
                 return state
             except Exception:
@@ -170,6 +211,33 @@ class MobileTaskRuntime:
 
     def inspect(self, task_id: str) -> MobileTaskState:
         return self._store.inspect(_required_text(task_id, "task_id", 512))
+
+    def promote_goal_verified_memory(
+        self, task_id: str, *, goal_id: str, completion_revision: int
+    ) -> int:
+        return self._store.promote_goal_verified_memory(
+            _required_text(task_id, "task_id", 512),
+            goal_id=_required_text(goal_id, "goal_id", 512),
+            completion_revision=completion_revision,
+        )
+
+    def promote_goal_verified_experience(
+        self, task_id: str, *, goal_id: str, completion_revision: int,
+        goal_spec_revision: int | None = None,
+        frozen_criteria_ids: tuple[str, ...] = (),
+    ) -> Any | None:
+        if self._experience is None:
+            return None
+        state = self.inspect(_required_text(task_id, "task_id", 512))
+        self._begin_experience(
+            state, goal_id=goal_id, goal_spec_revision=goal_spec_revision,
+            frozen_criteria_ids=frozen_criteria_ids,
+        )
+        self._experience.sync_mobile_task(state)
+        return self._experience.confirm_goal_completion(
+            state.task_id, goal_id=_required_text(goal_id, "goal_id", 512),
+            completion_revision=completion_revision,
+        )
 
     def list(self, limit: int = 100) -> list[MobileTaskState]:
         if not 1 <= limit <= 500:
@@ -384,6 +452,9 @@ class MobileTaskRuntime:
         if self._shutdown_requested.is_set():
             self._store.release_for_shutdown(task_id, worker_token=worker_token)
             return
+        experience_packet = self._retrieve_experience(
+            task_id=task_id, objective=subgoal.description, observation=before
+        )
         decision = self._model.decide(
             DecisionContext(
                 task_id=task_id,
@@ -398,6 +469,7 @@ class MobileTaskRuntime:
                 consecutive_no_progress=state.no_progress_count,
                 recent_attempts=state.attempts[-8:],
                 skill_memory=self._store.skill_memory(state.skill_scope_id),
+                experience_hints=_experience_hints(experience_packet),
             )
         )
         if self._shutdown_requested.is_set():
@@ -417,6 +489,8 @@ class MobileTaskRuntime:
         if result == "closed":
             self._finish_if_cancelled(task_id, worker_token)
             return
+        if experience_packet is not None:
+            self._attempt_experience[attempt_id] = experience_packet
         verification_owner_inputs = _applied_inputs_through_revision(
             self._store.inspect(task_id), state.input_revision
         )
@@ -424,7 +498,7 @@ class MobileTaskRuntime:
             self._store.release_for_shutdown(task_id, worker_token=worker_token)
             return
         if decision.kind == "terminate":
-            self._store.finish_attempt(
+            self._finish_attempt(
                 attempt_id=attempt_id,
                 task_id=task_id,
                 worker_token=worker_token,
@@ -498,7 +572,7 @@ class MobileTaskRuntime:
                 and _error_code(exc, "completion_verification_failed")
                 == "mobile_role_invalid_response"
             ):
-                self._store.finish_attempt(
+                self._finish_attempt(
                     attempt_id=attempt_id,
                     task_id=task_id,
                     worker_token=worker_token,
@@ -511,7 +585,7 @@ class MobileTaskRuntime:
                     ),
                 )
                 return
-            self._store.finish_attempt(
+            self._finish_attempt(
                 attempt_id=attempt_id,
                 task_id=task_id,
                 worker_token=worker_token,
@@ -525,7 +599,7 @@ class MobileTaskRuntime:
                 ),
             )
             return
-        self._store.finish_attempt(
+        self._finish_attempt(
             attempt_id=attempt_id,
             task_id=task_id,
             worker_token=worker_token,
@@ -560,7 +634,7 @@ class MobileTaskRuntime:
                 receipt = session.execute(decision.intent)  # type: ignore[arg-type]
             except Exception as exc:
                 receipt = TransportReceipt("uncertain", detail="transport raised")
-                self._store.finish_attempt(
+                self._finish_attempt(
                     attempt_id=attempt_id,
                     task_id=task_id,
                     worker_token=worker_token,
@@ -577,7 +651,7 @@ class MobileTaskRuntime:
                 )
                 return
         if receipt.status == "uncertain":
-            self._store.finish_attempt(
+            self._finish_attempt(
                 attempt_id=attempt_id,
                 task_id=task_id,
                 worker_token=worker_token,
@@ -597,7 +671,7 @@ class MobileTaskRuntime:
             )
             return
         if receipt.status != "accepted":
-            self._store.finish_attempt(
+            self._finish_attempt(
                 attempt_id=attempt_id,
                 task_id=task_id,
                 worker_token=worker_token,
@@ -611,7 +685,7 @@ class MobileTaskRuntime:
         try:
             after = session.observe()
         except Exception as exc:
-            self._store.finish_attempt(
+            self._finish_attempt(
                 attempt_id=attempt_id,
                 task_id=task_id,
                 worker_token=worker_token,
@@ -642,7 +716,7 @@ class MobileTaskRuntime:
                 )
             )
         except Exception as exc:
-            self._store.finish_attempt(
+            self._finish_attempt(
                 attempt_id=attempt_id,
                 task_id=task_id,
                 worker_token=worker_token,
@@ -658,7 +732,7 @@ class MobileTaskRuntime:
                 ),
             )
             return
-        self._store.finish_attempt(
+        self._finish_attempt(
             attempt_id=attempt_id,
             task_id=task_id,
             worker_token=worker_token,
@@ -671,6 +745,64 @@ class MobileTaskRuntime:
         state = self._store.inspect(task_id)
         if state.cancel_requested and not state.terminal:
             self._store.finish_stopped(task_id, worker_token=worker_token)
+
+    def _finish_attempt(self, **kwargs: Any) -> MobileTaskState | None:
+        state = self._store.finish_attempt(**kwargs)
+        attempt_id = str(kwargs["attempt_id"])
+        packet = self._attempt_experience.pop(attempt_id, None)
+        if state is None or self._experience is None:
+            return state
+        attempt = next((item for item in state.attempts if item.attempt_id == attempt_id), None)
+        if attempt is None or state.plan is None:
+            return state
+        objective = next(
+            (item.description for item in state.plan.subgoals
+             if item.index == attempt.subgoal_index),
+            state.goal,
+        )
+        try:
+            self._experience.record_mobile_attempt(
+                source_task_id=state.task_id, objective=objective,
+                attempt=attempt, retrieval=packet,
+            )
+        except Exception:
+            # Learning is additive evidence. A ledger outage cannot rewrite or
+            # block the physical owner's already-persisted task truth.
+            pass
+        return state
+
+    def _begin_experience(
+        self, state: MobileTaskState, *, goal_id: str | None,
+        goal_spec_revision: int | None, frozen_criteria_ids: tuple[str, ...]
+    ) -> None:
+        if (
+            self._experience is None or goal_id is None
+            or goal_spec_revision is None or goal_spec_revision < 1
+            or not frozen_criteria_ids
+        ):
+            return
+        try:
+            self._experience.begin_mobile_episode_for_task(
+                goal_run_id=goal_id, source_task_id=state.task_id,
+                goal_spec_revision=goal_spec_revision,
+                frozen_criteria_ids=frozen_criteria_ids,
+                skill_scope_id=state.skill_scope_id,
+                target_id=state.target_id,
+            )
+        except Exception:
+            pass
+
+    def _retrieve_experience(
+        self, *, task_id: str, objective: str, observation: Observation
+    ) -> Any | None:
+        if self._experience is None:
+            return None
+        try:
+            return self._experience.retrieve(
+                source_task_id=task_id, objective=objective, observation=observation
+            )
+        except Exception:
+            return None
 
     def _resolve_skill_scope(
         self,
@@ -713,6 +845,25 @@ def _applied_inputs_through_revision(
         if owner_input.lifecycle == "applied"
         and owner_input.revision <= input_revision
     )
+
+
+def _experience_hints(packet: Any | None) -> tuple[ExperienceHint, ...]:
+    if packet is None:
+        return ()
+    hints: list[ExperienceHint] = []
+    for item in getattr(packet, "items", ()):
+        hints.append(ExperienceHint(
+            candidate_id=str(getattr(item, "candidate_id")),
+            kind=getattr(item, "kind"),
+            semantic_action=str(getattr(item, "semantic_action")),
+            expected_next_scene=getattr(item, "expected_next_scene", None),
+            recovery_action=getattr(item, "recovery_action", None),
+            confidence=float(getattr(item, "confidence", 0.0)),
+            provenance_transition_ids=tuple(
+                getattr(item, "provenance_transition_ids", ())
+            ),
+        ))
+    return tuple(hints)
 
 
 def _required_text(value: str, name: str, maximum: int) -> str:

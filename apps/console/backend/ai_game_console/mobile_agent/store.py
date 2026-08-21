@@ -31,7 +31,7 @@ from .domain import (
 
 _ACTIVE = {"queued", "planning", "running", "stopping"}
 _TERMINAL = {"completed", "failed", "stopped", "uncertain"}
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 _LEGACY_SCOPE_PREFIX = "legacy:"
 _AUTOMATIC_SCOPE_PREFIX = "auto:"
 
@@ -59,7 +59,7 @@ class _SQLiteTaskStore:
                         version INTEGER NOT NULL
                     );
                     INSERT OR IGNORE INTO mobile_agent_schema(singleton, version)
-                    VALUES (1, 2);
+                    VALUES (1, 3);
 
                     CREATE TABLE IF NOT EXISTS mobile_tasks (
                         task_id TEXT PRIMARY KEY,
@@ -85,6 +85,9 @@ class _SQLiteTaskStore:
                         detail TEXT,
                         error_code TEXT,
                         skill_memory_version INTEGER NOT NULL DEFAULT 0,
+                        execution_origin TEXT NOT NULL DEFAULT 'direct_v1',
+                        promote_success_memory INTEGER NOT NULL DEFAULT 1
+                            CHECK (promote_success_memory IN (0, 1)),
                         worker_token TEXT,
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL,
@@ -179,6 +182,9 @@ class _SQLiteTaskStore:
                 if stored_version == 1:
                     self._migrate_skill_scope_v2(connection)
                     stored_version = 2
+                if stored_version == 2:
+                    self._migrate_goal_compat_v3(connection)
+                    stored_version = 3
                 if stored_version != _SCHEMA_VERSION:
                     raise RuntimeError("unsupported mobile-agent database schema")
             self._initialized = True
@@ -228,6 +234,26 @@ class _SQLiteTaskStore:
         )
         connection.execute(
             "UPDATE mobile_agent_schema SET version = 2 WHERE singleton = 1"
+        )
+
+    @staticmethod
+    def _migrate_goal_compat_v3(connection: sqlite3.Connection) -> None:
+        columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(mobile_tasks)").fetchall()
+        }
+        if "execution_origin" not in columns:
+            connection.execute(
+                "ALTER TABLE mobile_tasks ADD COLUMN execution_origin "
+                "TEXT NOT NULL DEFAULT 'direct_v1'"
+            )
+        if "promote_success_memory" not in columns:
+            connection.execute(
+                "ALTER TABLE mobile_tasks ADD COLUMN promote_success_memory "
+                "INTEGER NOT NULL DEFAULT 1"
+            )
+        connection.execute(
+            "UPDATE mobile_agent_schema SET version = 3 WHERE singleton = 1"
         )
 
     def recover_active(self) -> list[str]:
@@ -304,6 +330,8 @@ class _SQLiteTaskStore:
         target_id: str | None,
         skill_id: str | None,
         skill_scope_id: str | None,
+        execution_origin: str,
+        promote_success_memory: bool,
         client_request_id: str,
         request_digest: str,
     ) -> tuple[MobileTaskState, bool]:
@@ -317,10 +345,21 @@ class _SQLiteTaskStore:
                 """
                 INSERT INTO mobile_tasks (
                     task_id, goal, target_id, skill_id, skill_scope_id,
+                    execution_origin, promote_success_memory,
                     status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, 'queued', ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)
                 """,
-                (task_id, goal, target_id, skill_id, skill_scope_id, now, now),
+                (
+                    task_id,
+                    goal,
+                    target_id,
+                    skill_id,
+                    skill_scope_id,
+                    execution_origin,
+                    int(promote_success_memory),
+                    now,
+                    now,
+                ),
             )
             self._insert_request(
                 connection, client_request_id, "start", request_digest, task_id, now
@@ -1084,6 +1123,75 @@ class _SQLiteTaskStore:
             ).fetchone()
         return _skill_memory_from_row(row) if row is not None else None
 
+    def promote_goal_verified_memory(
+        self, task_id: str, *, goal_id: str, completion_revision: int
+    ) -> int:
+        """Promote quarantined v2 success only after GoalRun verification."""
+        self.initialize()
+        now = _utc_now()
+        with self._connection(write=True) as connection:
+            task = self._task_row(connection, task_id)
+            if (
+                str(task["status"]) != "completed"
+                or str(task["execution_origin"]) != "v2_goal_compat"
+                or bool(task["promote_success_memory"])
+            ):
+                raise TaskStateConflict("task is not a quarantined completed v2 goal")
+            existing = connection.execute(
+                "SELECT version FROM mobile_skill_memories WHERE source_task_id = ?",
+                (task_id,),
+            ).fetchone()
+            if existing is not None:
+                return int(existing["version"])
+            skill_scope_id = task["skill_scope_id"]
+            if skill_scope_id is None:
+                return 0
+            descriptions = self._plan_descriptions(
+                connection, task_id, int(task["plan_revision"])
+            )
+            evidence_rows = connection.execute(
+                "SELECT sequence, verification_json FROM mobile_task_attempts "
+                "WHERE task_id = ? AND phase = 'finalized' ORDER BY sequence",
+                (task_id,),
+            ).fetchall()
+            evidence = tuple(
+                decoded["evidence"]
+                for item in evidence_rows
+                if (decoded := json.loads(item["verification_json"]))["satisfied"]
+                and decoded.get("state_effect", "applied") == "applied"
+                and decoded["evidence"]
+            )
+            version = int(connection.execute(
+                "SELECT COALESCE(MAX(version), 0) + 1 AS version "
+                "FROM mobile_skill_memories WHERE skill_id = ?",
+                (skill_scope_id,),
+            ).fetchone()["version"])
+            memory = {
+                "procedure": descriptions,
+                "strategy": str(task["strategy"]),
+                "evidence": evidence,
+                "goal_verification": {
+                    "goal_id": goal_id,
+                    "completion_revision": completion_revision,
+                },
+            }
+            connection.execute(
+                "INSERT INTO mobile_skill_memories(skill_id, version, source_task_id, "
+                "memory_json, created_at) VALUES (?, ?, ?, ?, ?)",
+                (skill_scope_id, version, task_id, _json(memory), now),
+            )
+            connection.execute(
+                "UPDATE mobile_tasks SET skill_memory_version = ?, updated_at = ? "
+                "WHERE task_id = ?",
+                (version, now, task_id),
+            )
+            self._event(connection, task_id, "goal_verified_memory_promoted", {
+                "goal_id": goal_id,
+                "completion_revision": completion_revision,
+                "skill_memory_version": version,
+            }, now)
+            return version
+
     def _advance_verified(
         self,
         connection: sqlite3.Connection,
@@ -1115,7 +1223,7 @@ class _SQLiteTaskStore:
             return self._get_state(connection, task_id)
         memory_version = 0
         skill_scope_id = task["skill_scope_id"]
-        if skill_scope_id is not None:
+        if skill_scope_id is not None and bool(task["promote_success_memory"]):
             version_row = connection.execute(
                 "SELECT COALESCE(MAX(version), 0) AS version FROM mobile_skill_memories WHERE skill_id = ?",
                 (skill_scope_id,),
@@ -1169,7 +1277,12 @@ class _SQLiteTaskStore:
             connection,
             task_id,
             "task_completed",
-            {"skill_memory_version": memory_version, "verification_satisfied": True},
+            {
+                "skill_memory_version": memory_version,
+                "verification_satisfied": True,
+                "success_memory_promoted": memory_version > 0,
+                "execution_origin": str(task["execution_origin"]),
+            },
             now,
         )
         return self._get_state(connection, task_id)
