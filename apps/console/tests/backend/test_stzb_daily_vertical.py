@@ -31,7 +31,11 @@ from ai_game_console.mobile_agent import Observation, PlanContext
 from ai_game_console.mobile_task_adapter import (
     LocalMobileEvidenceStore,
     OpenAICompatibleToolRoleModel,
+    _executor_prompt,
     _planner_prompt,
+    _reflection_prompt,
+    _stzb_daily_verdict_guard,
+    _stzb_daily_verification_instruction,
 )
 from ai_game_console.execution import AndroidScreenshot
 
@@ -201,7 +205,91 @@ def test_stzb_planner_requires_discovery_and_final_reread() -> None:
     )
     assert "complete daily checklist" in prompt
     assert "finally reopen and visibly reread" in prompt
+    assert "quick task strip with one tracked objective is navigation only" in prompt
+    assert "independent full daily-task page" in prompt
+    assert "Do not reinterpret main-story, reputation, or generic affairs" in prompt
+    assert "leave the exhausted task surface" in prompt
+    assert "visibly labeled activity/daily entry" in prompt
     assert "Do not invent task-specific coordinates" in prompt
+
+
+def test_stzb_executor_keeps_verified_quick_strip_boundary_in_session() -> None:
+    intent = SimpleNamespace(
+        name="tap",
+        arguments={"x": 45, "y": 40, "target_description": "左上角任务卷轴"},
+    )
+    attempt = SimpleNamespace(
+        sequence=9,
+        decision=SimpleNamespace(intent=intent, kind="act"),
+        before=Observation("before-9", "fresh Android frame 1280x720"),
+        transport=SimpleNamespace(status="accepted"),
+        verification=SimpleNamespace(
+            satisfied=False,
+            progress=True,
+            evidence="只打开了左侧单条追踪任务和武将行，不是完整每日清单",
+        ),
+    )
+    context = SimpleNamespace(
+        goal="帮我把率土之滨今天的每日任务做完",
+        subgoal=SimpleNamespace(description="显示完整每日任务清单及状态"),
+        strategy="inspect visible task affordances",
+        consecutive_no_progress=0,
+        owner_inputs=(),
+        skill_memory=None,
+        experience_hints=(),
+        recent_attempts=(attempt,),
+    )
+    prompt = _executor_prompt(context)
+    assert "target=左上角任务卷轴" in prompt
+    assert "verifier=只打开了左侧单条追踪任务和武将行" in prompt
+    assert "only a quick task strip, never the complete daily checklist" in prompt
+    assert "do not repeat it while the strip is visible" in prompt
+
+    reflection = _reflection_prompt(SimpleNamespace(
+        **context.__dict__,
+        input_revision=0,
+    ))
+    assert "tap:左上角任务卷轴" in reflection
+    assert "Exhausting the visible tabs of one task surface is not permission" in reflection
+    assert "visible Back/Close control" in reflection
+
+    verification = _stzb_daily_verification_instruction(
+        context.goal, context.subgoal.description
+    )
+    assert "可以算 progress" in verification
+    assert "绝不能算 satisfied" in verification
+
+
+def test_stzb_verdict_guard_rejects_main_quest_page_as_daily_identity() -> None:
+    verdict, evidence = _stzb_daily_verdict_guard(
+        "帮我把率土之滨今天的每日任务做完",
+        "进入并完整查看今日每日任务清单页面",
+        "satisfied",
+        (
+            "画面顶部有名望/主要事宜/事务标签，右侧列出占领土地、升级仓库等"
+            "多条任务及进度，符合完整每日任务清单要求。"
+        ),
+    )
+    assert verdict == "progress"
+    assert "no visible daily/today/activity category identity" in evidence
+
+    verified, unchanged = _stzb_daily_verdict_guard(
+        "帮我把率土之滨今天的每日任务做完",
+        "进入并完整查看今日每日任务清单页面",
+        "satisfied",
+        "当前页签为“每日任务”，可见多个条目及各自完成状态。",
+    )
+    assert verified == "satisfied"
+    assert unchanged == "当前页签为“每日任务”，可见多个条目及各自完成状态。"
+
+    negative_check, negative_evidence = _stzb_daily_verdict_guard(
+        "帮我把率土之滨今天的每日任务做完",
+        "确认顶部三个标签均非每日任务，判定当前界面不是今日每日任务页",
+        "satisfied",
+        "可见标签只有名望、主要事宜、事务，未见每日身份。",
+    )
+    assert negative_check == "satisfied"
+    assert negative_evidence == "可见标签只有名望、主要事宜、事务，未见每日身份。"
 
 
 def test_resettable_stzb_matrix_meets_u5_learning_thresholds() -> None:
@@ -249,6 +337,52 @@ def test_checklist_visual_extraction_never_competes_with_active_phone_worker() -
         )),)),
     )
     assert state["state"] == "NOT_DISCOVERED"
+    assert calls == []
+
+
+def test_uncertain_goal_projection_does_not_retry_checklist_visual_extraction() -> None:
+    calls = []
+    specification = {
+        "normalized_intent": {"goal_family": STZB_DAILY_GOAL_FAMILY},
+        "success_criteria": [],
+    }
+
+    class ChecklistStore:
+        def state(self, goal_id):
+            return {
+                "goal_id": goal_id,
+                "state": "NOT_DISCOVERED",
+                "final_verified": False,
+            }
+
+    record = GoalRecord(
+        "goal-1", "率土每日任务", "UNCERTAIN", "AUTOMATED", None, None,
+        "mobile_task_compat", "BOUND", "task-1", "adb:emulator-5554",
+        None, None, None, "2026-08-21T00:00:00Z", "2026-08-21T00:00:00Z",
+        "2026-08-21T00:01:00Z",
+    )
+    store = SimpleNamespace(
+        sync_mobile_projection=lambda goal_id, source: record,
+        completion=lambda goal_id: None,
+        specification=lambda goal_id: specification,
+    )
+    service = GoalService(
+        store,
+        mobile_runtime=None,
+        mobile_archive=SimpleNamespace(inspect=lambda task_id: SimpleNamespace(
+            status="uncertain",
+            attempts=(SimpleNamespace(after=Observation(
+                "frame-1", "fresh Android frame 1280x720"
+            )),),
+        )),
+        configured_serial=None,
+        daily_checklist_store=ChecklistStore(),
+        inspect_daily_checklist=lambda goal, observations: calls.append(
+            (goal, observations)
+        ),
+    )
+
+    assert service._project(record) == record
     assert calls == []
 
 

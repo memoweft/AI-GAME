@@ -386,3 +386,45 @@ standalone TypeScript and production Vite build. The normal console and Qwen
 launchers serve current source. This is current-source/local-device evidence,
 not a packaged deployment or a production STZB claim. U2's rendered-browser
 composer gate remains unavailable and PARTIAL.
+
+## 12. U5 continuation capability — 2026-08-21
+
+Current source now rejects false STZB daily identity at both prompt and
+deterministic-verdict layers. The map quick strip and the independent task
+surface (`名望 / 主要事宜 / 事务`) are not a complete daily checklist. Negative
+confirmation of that fact is allowed, while a positive daily-list verdict must
+cite a visible daily/today/activity label. Semantic action targets and recent
+verifier evidence are retained in role history; malformed forced-tool responses
+have bounded repair; reflection retains the unfinished plan tail and can return
+from an exhausted task surface to main navigation.
+
+The STZB daily family now freezes a deterministic three-criterion specification
+without depending on a free-form model response: complete current-day checklist
+discovery, per-item completed-or-blocked evidence, and an independent reread of
+the same list. Goal list/detail reads no longer invoke checklist vision on
+failed/stopped/uncertain records; the ten-goal list returned in 158 ms on the
+restarted current source. Experience orientation is `unknown` until the first
+real frame rather than falsely defaulting to portrait.
+
+Real MuMu evidence reached `精彩活动` and visibly identified two daily-labelled
+cards: `登录奖励` with `每天登录领取丰厚奖励`, and `心愿征程` with
+`每日招募可获额外心愿积分`. This establishes a real semantic route and explicit
+daily identity only; it is not evidence of complete checklist coverage.
+GoalRun `c2189755-ce26-4c9f-95af-6626e7159ce5` then produced four verified
+actions that returned to main navigation and rejected the chapter, main-affairs,
+and affairs pages without executing their occupation/warehouse tasks. Its
+recovery ended `FAILED` on model unavailability with no uncertain replay. A
+second GoalRun `853eb57a-c295-4681-a147-c7b74efd7ac9` failed during planning
+after 180 seconds and performed zero actions.
+
+The machine-local Qwen3.8-27B launcher explicitly disables prompt caching and
+uses a 512-token vision budget. One persisted-frame verification correctly read
+both daily cards in 40.96 seconds; the next identical request timed out at
+180.04 seconds, and non-consecutive-token warnings remain. Therefore the visual
+runtime stability gate is still red. U5 remains `PARTIAL`: no complete daily
+checklist has been frozen, no feasible checklist has been completed and
+independently reread, no real comparable cold/warm pair exists, and there is no
+deployment or external-outcome evidence. Focused verification passed 53 tests;
+the final current-source regression passed 786 backend tests and 57 frontend
+tests, plus TypeScript and the production Vite build. U6 is not permitted to
+start.

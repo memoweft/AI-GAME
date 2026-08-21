@@ -947,6 +947,8 @@ class OpenAICompatibleToolRoleModel:
             description="Propose exactly one validated atomic Android action",
             parameters=_MOBILE_USE_TOOL_PARAMETERS,
             max_tokens=768,
+            reasoning_effort="low",
+            reasoning_budget=0,
         )
         envelope = (
             '<tool_call>{"name":"mobile_use","arguments":'
@@ -998,6 +1000,7 @@ class OpenAICompatibleToolRoleModel:
                 f"整体目标：{context.goal}\n当前子目标：{context.subgoal.description}\n"
                 f"动作：{context.decision.intent.name if context.decision.intent else context.decision.kind}\n"
                 "根据当前动作后画面选择 satisfied、progress、no_progress 或 uncertain。"
+                f"{_stzb_daily_verification_instruction(context.goal, context.subgoal.description)}"
             ),
             observations=(context.after,),
             tool_name="record_verification",
@@ -1013,11 +1016,16 @@ class OpenAICompatibleToolRoleModel:
                 "required": ["verdict", "evidence"],
             },
             max_tokens=768,
+            reasoning_effort="low",
+            reasoning_budget=0,
         )
         verdict = decoded.get("verdict")
         evidence = decoded.get("evidence")
         if verdict not in {"satisfied", "progress", "no_progress", "uncertain"} or not isinstance(evidence, str):
             raise _invalid_role_response()
+        verdict, evidence = _stzb_daily_verdict_guard(
+            context.goal, context.subgoal.description, verdict, evidence
+        )
         satisfied = verdict == "satisfied"
         progress = verdict in {"satisfied", "progress"}
         uncertain = verdict == "uncertain"
@@ -1115,36 +1123,54 @@ class OpenAICompatibleToolRoleModel:
         headers = {"Accept": "application/json", "Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
-        try:
-            endpoint = _loopback_chat_completions_endpoint(self.endpoint)
-            response = (
-                self.transport(endpoint, payload, headers, self.timeout_seconds)
-                if self.transport is not None else
-                OpenAICompatibleGuiOwlClient._request(endpoint, payload, headers, self.timeout_seconds)
-            )
-            choices = response.get("choices")
-            if not isinstance(choices, list) or len(choices) != 1:
-                raise _invalid_role_response()
-            message = choices[0].get("message") if isinstance(choices[0], Mapping) else None
-            calls = message.get("tool_calls") if isinstance(message, Mapping) else None
-            if not isinstance(calls, list) or len(calls) != 1 or not isinstance(calls[0], Mapping):
-                raise _invalid_role_response()
-            function = calls[0].get("function")
-            if not isinstance(function, Mapping) or function.get("name") != tool_name:
-                raise _invalid_role_response()
-            arguments = function.get("arguments")
-            decoded = json.loads(arguments) if isinstance(arguments, str) else arguments
-            if not isinstance(decoded, dict):
-                raise _invalid_role_response()
-            return decoded
-        except MobileTaskAdapterError:
-            raise
-        except (ValueError, KeyError, TypeError, json.JSONDecodeError):
-            raise _invalid_role_response() from None
-        except GuiOwlClientError as error:
-            raise MobileTaskAdapterError(error.code, str(error)) from None
-        except (HTTPError, URLError, socket.timeout, TimeoutError, OSError):
-            raise MobileTaskAdapterError("mobile_role_unavailable", "本地角色模型暂时不可用。") from None
+        endpoint = _loopback_chat_completions_endpoint(self.endpoint)
+        for repair_index in range(3):
+            if repair_index:
+                content[0]["text"] = (
+                    prompt
+                    + "\n\nYour previous response was not one valid forced tool call. "
+                    + f"Call {tool_name} exactly once with arguments matching its schema. "
+                    + "Do not explain, use Markdown, or return plain text."
+                )
+            try:
+                response = (
+                    self.transport(endpoint, payload, headers, self.timeout_seconds)
+                    if self.transport is not None else
+                    OpenAICompatibleGuiOwlClient._request(
+                        endpoint, payload, headers, self.timeout_seconds
+                    )
+                )
+                choices = response.get("choices")
+                if not isinstance(choices, list) or len(choices) != 1:
+                    continue
+                message = (
+                    choices[0].get("message")
+                    if isinstance(choices[0], Mapping) else None
+                )
+                calls = message.get("tool_calls") if isinstance(message, Mapping) else None
+                if (
+                    not isinstance(calls, list) or len(calls) != 1
+                    or not isinstance(calls[0], Mapping)
+                ):
+                    continue
+                function = calls[0].get("function")
+                if not isinstance(function, Mapping) or function.get("name") != tool_name:
+                    continue
+                arguments = function.get("arguments")
+                decoded = json.loads(arguments) if isinstance(arguments, str) else arguments
+                if isinstance(decoded, dict):
+                    return decoded
+            except (ValueError, KeyError, TypeError, json.JSONDecodeError):
+                continue
+            except MobileTaskAdapterError:
+                raise
+            except GuiOwlClientError as error:
+                raise MobileTaskAdapterError(error.code, str(error)) from None
+            except (HTTPError, URLError, socket.timeout, TimeoutError, OSError):
+                raise MobileTaskAdapterError(
+                    "mobile_role_unavailable", "本地角色模型暂时不可用。"
+                ) from None
+        raise _invalid_role_response()
 
 
 _MOBILE_USE_TOOL_PARAMETERS: dict[str, Any] = {
@@ -1203,6 +1229,15 @@ def _planner_prompt(context: PlanContext) -> str:
             "\nSTZB daily vNext requirements: first reach and visibly inspect today's "
             "complete daily checklist; then complete every currently incomplete item "
             "that is available; finally reopen and visibly reread the complete checklist. "
+            "A map-side quick task strip with one tracked objective is navigation only, "
+            "not that checklist: plan a separate observable stage for reaching an "
+            "independent full daily-task page that shows multiple items and their states. "
+            "Do not reinterpret main-story, reputation, or generic affairs items as daily "
+            "tasks. Plan item execution only after the screenshot visibly identifies a "
+            "daily/today/activity category; otherwise plan an availability check and an "
+            "observable fallback: leave the exhausted task surface, inspect the current "
+            "main navigation for a visibly labeled activity/daily entry, and only then "
+            "use an honest partial stop if no visible route remains. "
             "Do not reduce the goal to launching the game, opening one panel, or claiming "
             "one reward. Do not invent task-specific coordinates. If an item needs elapsed "
             "time or an unavailable external condition, preserve it as remaining instead "
@@ -1244,7 +1279,18 @@ def _executor_prompt(context: DecisionContext) -> str:
             if verification is not None and verification.progress
             else "no_progress"
         )
-        recent.append(f"attempt {attempt.sequence}: {action}; {transport}; {result}")
+        target = ""
+        if intent is not None and intent.name in {"tap", "long_press"}:
+            description = intent.arguments.get("target_description")
+            if isinstance(description, str) and description.strip():
+                target = f"; target={description.strip()[:160]}"
+        evidence = (
+            f"; verifier={verification.evidence.strip()[:280]}"
+            if verification is not None and verification.evidence.strip() else ""
+        )
+        recent.append(
+            f"attempt {attempt.sequence}: {action}{target}; {transport}; {result}{evidence}"
+        )
     history = "\n".join(recent) if recent else "None"
     return (
         "Generate exactly one atomic next move from the current screenshot.\n\n"
@@ -1256,6 +1302,7 @@ def _executor_prompt(context: DecisionContext) -> str:
         f"Verified Skill Memory: {_skill_memory(context.skill_memory)}\n\n"
         f"Scene-conditioned Experience: {_experience_hints(context.experience_hints)}\n\n"
         f"Recent attempts (text only):\n{history}"
+        f"{_stzb_daily_executor_instruction(context.goal, context.subgoal.description)}"
         "\nDo not blindly repeat a recent non-idempotent action fingerprint "
         "unless the current screenshot provides new visible justification."
     )
@@ -1376,6 +1423,10 @@ def _reflection_prompt(context: ReflectionContext) -> str:
     for attempt in context.recent_attempts[-3:]:
         intent = attempt.decision.intent
         action = intent.name if intent is not None else attempt.decision.kind
+        if intent is not None and intent.name in {"tap", "long_press"}:
+            target = intent.arguments.get("target_description")
+            if isinstance(target, str) and target.strip():
+                action = f"{action}:{target.strip()[:160]}"
         evidence = attempt.verification.evidence if attempt.verification is not None else ""
         summaries.append(f"attempt {attempt.sequence}: {action}; {evidence[:240]}")
     return (
@@ -1386,6 +1437,86 @@ def _reflection_prompt(context: ReflectionContext) -> str:
         f"Owner updates: {_owner_updates(context.owner_inputs)}\n"
         f"Verified Skill Memory: {_skill_memory(context.skill_memory)}\n"
         "Recent attempts:\n" + "\n".join(summaries)
+        + _stzb_daily_reflection_instruction(context.goal, context.subgoal.description)
+    )
+
+
+def _stzb_daily_executor_instruction(goal: str, subgoal: str) -> str:
+    if normalize_goal_family(goal) != STZB_DAILY_GOAL_FAMILY:
+        return ""
+    return (
+        "\n\nSTZB daily visual boundary: a map screen with one tracked objective, "
+        "progress such as 1/4, or commander/party rows is only a quick task "
+        "strip, never the complete daily checklist. If the global task ribbon "
+        "has already only toggled that strip, do not repeat it while the strip "
+        "is visible. Re-ground one different affordance that is visibly part of "
+        "the strip or its task row (for example a visible disclosure/detail "
+        "control), and target the visible control itself rather than an estimated "
+        "location. Current screenshot evidence outranks this guidance."
+    )
+
+
+def _stzb_daily_verification_instruction(goal: str, subgoal: str) -> str:
+    if normalize_goal_family(goal) != STZB_DAILY_GOAL_FAMILY:
+        return ""
+    return (
+        " 率土每日边界：地图上的单条追踪任务、1/4 等进度或武将/队伍行只是快捷任务条。"
+        "它可以算 progress，但对于要求完整每日清单、全部条目或完成状态的子目标绝不能算"
+        " satisfied。只有独立任务页面明确显示多项每日任务及各自状态时才可 satisfied。"
+        "“名望”“主要事宜”“事务”等通用分类本身不是每日身份；必须有当前画面可见的"
+        "每日、日常、今日或活跃栏目/页签/标题。"
+    )
+
+
+def _stzb_daily_verdict_guard(
+    goal: str, subgoal: str, verdict: str, evidence: str,
+) -> tuple[str, str]:
+    """Require a visible daily-category identity before checklist satisfaction."""
+
+    if (
+        normalize_goal_family(goal) != STZB_DAILY_GOAL_FAMILY
+        or verdict != "satisfied"
+        or not re.search(r"(?:每日|日常|今日|活跃)", subgoal, re.IGNORECASE)
+        or re.search(
+            r"(?:不是|并非|均非|非每日|未出现|未见|不存在|缺少).{0,16}"
+            r"(?:每日|日常|今日|活跃)?",
+            subgoal,
+            re.IGNORECASE,
+        )
+    ):
+        return verdict, evidence
+    daily_identity = re.search(
+        r"(?:标题|页签|标签|栏目|入口|页面名|页面标题)"
+        r"(?:为|是|显示|写有|标注|名为)?[\s\"“”'「」]{0,3}"
+        r"(?:每日|日常|今日|活跃)"
+        r"|(?:每日|日常|今日|活跃)(?:任务|活跃度)?"
+        r"[\s\"“”'「」]{0,3}(?:标题|页签|标签|栏目|入口)",
+        evidence,
+        re.IGNORECASE,
+    )
+    if daily_identity is not None:
+        return verdict, evidence
+    return (
+        "progress",
+        evidence.strip()[:7_600]
+        + " [STZB daily guard: no visible daily/today/activity category identity]",
+    )
+
+
+def _stzb_daily_reflection_instruction(goal: str, subgoal: str) -> str:
+    if normalize_goal_family(goal) != STZB_DAILY_GOAL_FAMILY:
+        return ""
+    return (
+        "\nSTZB daily recovery boundary: do not relabel the map quick task strip "
+        "as the complete checklist and do not repeat the global task ribbon after "
+        "it has only toggled that strip. Try a different currently visible semantic "
+        "affordance, without coordinates. Exhausting the visible tabs of one task "
+        "surface is not permission to terminate the whole goal when a visible Back/Close "
+        "control can return to a previously observed navigation surface. In that case, "
+        "insert recovery outcomes that return to the main navigation and inspect a "
+        "currently visible activity/daily entry, while preserving the original tail. "
+        "Terminate honestly only after no visible alternate navigation surface remains; "
+        "never invent a hidden page or loop."
     )
 
 

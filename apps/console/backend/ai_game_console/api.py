@@ -638,7 +638,12 @@ def create_app(
                 endpoint=mobile_role_endpoint,
                 model=mobile_role_model,
                 api_key=mobile_role_api_key,
-                timeout_seconds=max(resolved_settings.chat_request_timeout_seconds, 120.0),
+                # The local 27B multimodal role can spend more than two minutes
+                # encoding a dense 1280x720 game frame. Keep the request
+                # bounded, but leave enough headroom for one definitive result
+                # so the runtime does not turn slow inference into an unknown
+                # action outcome.
+                timeout_seconds=max(resolved_settings.chat_request_timeout_seconds, 180.0),
                 evidence=mobile_evidence,
             )
             if resolved_settings.mobile_role_endpoint

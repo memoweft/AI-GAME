@@ -408,5 +408,6 @@ def test_production_composition_prefers_structured_mobile_role_binding(
     assert isinstance(app.state.goal_service.verify_completion.__self__, StructuredGoalModel)
     assert runtime._model.endpoint == "http://127.0.0.1:8080/v1/chat/completions"
     assert runtime._model.model == "qwen-role"
+    assert runtime._model.timeout_seconds == 180.0
     assert "local-key" not in repr(runtime._model)
     runtime.shutdown()

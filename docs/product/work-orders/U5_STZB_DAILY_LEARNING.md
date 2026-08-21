@@ -117,3 +117,60 @@ The complete evidence package in `../07_ACCEPTANCE_AND_EVIDENCE.md` passes and w
 U6 is not allowed to start under the ordinary roadmap advancement rule. The
 next work is a U5 continuation focused on robust complete-list discovery and a
 fresh legitimate daily state.
+
+## 2026-08-21 CONTINUATION EVIDENCE
+
+- The role prompts and a deterministic verdict guard now distinguish the
+  map-side quick task strip, chapter/reputation/affairs pages, and a page with
+  explicit daily/today/activity identity. A generic `名望 / 主要事宜 / 事务`
+  page cannot satisfy a daily-list subgoal; a negative confirmation that such
+  a page is not daily remains satisfiable.
+- Executor history now carries semantic target descriptions and verifier
+  evidence. Reflection preserves the unfinished plan tail and is explicitly
+  directed back to visible main-navigation activity/daily surfaces after one
+  task surface is exhausted. Malformed forced-tool responses receive at most
+  two bounded repair attempts; network timeout remains terminal and is not
+  replayed.
+- Known STZB daily goals freeze a deterministic three-criterion contract before
+  binding: discover the complete current-day checklist, complete or honestly
+  block every frozen item, and independently reread the same checklist. Other
+  goal families continue to use model-generated specifications.
+- Goal list/detail projection no longer starts checklist vision extraction for
+  failed, stopped, or uncertain runs. Checklist extraction is restricted to
+  the candidate-completion gate or its explicit completion retry. The observed
+  ten-goal list latency returned from repeated timeout to 158 ms after the
+  current-source restart.
+- Experience orientation begins as `unknown` until a real frame establishes
+  dimensions; the old hard-coded portrait claim is no longer emitted for the
+  landscape MuMu game session.
+- Current-source MuMu navigation reached the independent `精彩活动` surface. A
+  fresh persisted frame visibly showed `登录奖励 / 每天登录领取丰厚奖励` and
+  `心愿征程 / 每日招募可获额外心愿积分`. This proves a real route to daily-labelled
+  activity cards, not a complete daily-task checklist.
+- GoalRun `c2189755-ce26-4c9f-95af-6626e7159ce5` bound task
+  `7c80e9c1-b9c7-4b82-8fea-bea0df26cf84`. Four verified actions returned to
+  main navigation and rejected the chapter, `主要事宜`, and `事务 0/15` pages as
+  non-daily. It executed no occupation or warehouse-upgrade progression. The
+  recovery request then ended `FAILED` with `mobile_role_unavailable`; no
+  unknown action was replayed.
+- A second current-source GoalRun
+  `853eb57a-c295-4681-a147-c7b74efd7ac9` bound task
+  `ed2c9f30-7cc9-4d40-8aba-480fc2582dda` and failed during initial planning
+  after the bounded 180-second role timeout, with zero device actions.
+- The machine-local Qwen launcher now explicitly passes `--no-cache-prompt`
+  when configured false and fixes the dynamic vision budget at 512 tokens. A
+  same-frame quality check completed in 40.96 seconds and correctly read both
+  daily-labelled cards; the immediately following identical request timed out
+  at 180.04 seconds. The server still logged non-consecutive-token warnings, so
+  this is evidence of unresolved latency variance, not a stable runtime gate.
+
+Focused automated verification passed 53 tests for mobile composition, tool
+roles, goal specification, STZB guards/checklist behavior, experience
+orientation, and the affected API path. The final current-source regression
+passed 786 backend tests and 57 frontend tests; standalone TypeScript checking
+and the production Vite build also passed.
+
+The work order remains `PARTIAL`. The next U5 continuation must first stabilize
+the selected local visual role under repeated dense-frame calls, then discover
+and freeze one legitimate complete current-day checklist before any daily-item
+execution or cold/warm claim. U6 remains disallowed.

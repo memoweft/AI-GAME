@@ -991,3 +991,46 @@ def test_tool_role_model_rejects_text_fallback_without_a_tool_call(tmp_path: Pat
         model.plan(PlanContext("task-1", "目标", None, 0, (), frame, None))
 
     assert raised.value.code == "mobile_role_invalid_response"
+
+
+def test_tool_role_model_repairs_one_malformed_forced_tool_response(
+    tmp_path: Path,
+) -> None:
+    evidence = LocalMobileEvidenceStore(tmp_path / "evidence")
+    before = evidence.record(
+        "task-1", AndroidScreenshot(PNG + b"before", width=100, height=200)
+    )
+    after = evidence.record(
+        "task-1", AndroidScreenshot(PNG + b"after", width=100, height=200)
+    )
+    replies = deque([
+        {"choices": [{"message": {"content": "plain text is invalid"}}]},
+        {"choices": [{"message": {"tool_calls": [{"function": {
+            "name": "record_verification",
+            "arguments": json.dumps({
+                "verdict": "progress", "evidence": "完整任务页面已打开",
+            }, ensure_ascii=False),
+        }}]}}]},
+    ])
+    prompts: list[str] = []
+
+    def transport(endpoint, payload, headers, timeout):
+        del endpoint, headers, timeout
+        prompts.append(payload["messages"][1]["content"][0]["text"])
+        return replies.popleft()
+
+    model = OpenAICompatibleToolRoleModel(
+        endpoint="http://127.0.0.1:8080/v1/chat/completions",
+        model="qwen-role", evidence=evidence, transport=transport,
+    )
+    result = model.verify(VerificationContext(
+        "task-1", "率土每日任务", Subgoal(0, "进入完整任务页面", "active"),
+        ActionDecision("act", PhysicalIntent("tap", {
+            "x": 42, "y": 63, "target_description": "任务入口",
+        })),
+        before, TransportReceipt("accepted"), after,
+    ))
+    assert result.progress is True
+    assert result.evidence == "完整任务页面已打开"
+    assert len(prompts) == 2
+    assert "Call record_verification exactly once" in prompts[1]

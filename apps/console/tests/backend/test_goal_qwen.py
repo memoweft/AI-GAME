@@ -105,3 +105,30 @@ def test_structured_goal_model_forces_specification_and_completion_tools(
     completion_content = calls[1]["messages"][1]["content"]
     assert sum(item["type"] == "image_url" for item in completion_content) == 0
     assert frame.evidence_id in completion_content[0]["text"]
+
+
+def test_stzb_daily_specification_is_frozen_without_model_availability(
+    tmp_path: Path,
+) -> None:
+    evidence = LocalMobileEvidenceStore(tmp_path / "evidence")
+    calls = []
+    role_model = OpenAICompatibleToolRoleModel(
+        endpoint="http://127.0.0.1:8080/v1/chat/completions",
+        model="qwen3.8-27b",
+        evidence=evidence,
+        transport=lambda *args: calls.append(args),
+    )
+    original = "在率土之滨完成今天所有可见的每日任务，并以完整清单复查为准"
+
+    specification = StructuredGoalModel(role_model).specify(original)
+
+    assert specification.normalized_intent["goal_family"] == "stzb/daily/vnext"
+    assert tuple(item.criterion_id for item in specification.success_criteria) == (
+        "complete_daily_checklist_discovered",
+        "all_feasible_daily_items_completed",
+        "daily_checklist_independently_reread",
+    )
+    assert all(
+        item.source_quote == original for item in specification.success_criteria
+    )
+    assert calls == []

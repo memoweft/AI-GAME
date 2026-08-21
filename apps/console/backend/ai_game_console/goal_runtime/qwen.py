@@ -5,6 +5,7 @@ import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from ..goal_families import STZB_DAILY_GOAL_FAMILY, normalize_goal_family
 from ..mobile_agent.domain import Observation
 from ..mobile_task_adapter import OpenAICompatibleToolRoleModel
 from .domain import (
@@ -28,6 +29,41 @@ class StructuredGoalModel:
         self._role_model = role_model
 
     def specify(self, original_goal: str) -> GoalSpecificationDraft:
+        if normalize_goal_family(original_goal) == STZB_DAILY_GOAL_FAMILY:
+            # U5 owns a stricter contract than a generic free-form extraction:
+            # discover the complete current-day checklist, prove each visible
+            # outcome, then independently reread that same frozen checklist.
+            # Freezing this known family deterministically prevents a malformed
+            # tool response from weakening or blocking the owner contract.
+            return GoalSpecificationDraft(
+                normalized_intent(
+                    original_goal,
+                    {
+                        "classification": "finite_phone_goal",
+                        "outcome": original_goal,
+                    },
+                ),
+                (
+                    SuccessCriterion(
+                        "complete_daily_checklist_discovered",
+                        "发现并冻结当天完整的每日任务清单及全部条目。",
+                        "新鲜设备画面必须显示每日/今日身份、完整列表覆盖和可区分的全部条目。",
+                        original_goal,
+                    ),
+                    SuccessCriterion(
+                        "all_feasible_daily_items_completed",
+                        "完成清单中当前可完成的每一项；受外部条件阻塞的项目必须明确列出。",
+                        "每个冻结条目均需有可见完成证据，或有明确且诚实的阻塞证据。",
+                        original_goal,
+                    ),
+                    SuccessCriterion(
+                        "daily_checklist_independently_reread",
+                        "从不同的新鲜画面重新读取同一清单并确认最终状态。",
+                        "最终画面须与冻结清单日期及条目集合一致，且无未完成或不确定项目。",
+                        original_goal,
+                    ),
+                ),
+            )
         decoded = self._role_model.call_tool(
             system=(
                 "你是独立目标规格层。必须调用 record_goal_specification。原始目标不可修改。"

@@ -78,7 +78,8 @@ Historical reports are retained when they prove a useful fact, for example a tes
 
 ```text
 Current active work order: none (U5 delivered PARTIAL)
-Next planned work order: U5_STZB_DAILY_LEARNING continuation
+Next planned work order: U5_STZB_DAILY_LEARNING continuation (stabilize repeated
+Qwen dense-frame inference, then freeze one real complete daily checklist)
 ```
 
 U1 completed against its specified gates. U2 remains PARTIAL only because its

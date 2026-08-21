@@ -117,6 +117,20 @@ def test_append_only_episode_transition_signal_and_restart(tmp_path: Path) -> No
     }
 
 
+def test_mobile_episode_does_not_claim_orientation_before_first_frame(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    episode = service.begin_mobile_episode_for_task(
+        goal_run_id="goal-1", source_task_id="task-1", goal_spec_revision=1,
+        frozen_criteria_ids=("daily",),
+        skill_scope_id="auto:stzb/daily/vnext",
+        target_id="adb:127.0.0.1:16384",
+    )
+    assert episode is not None
+    assert episode.scope.orientation == "unknown"
+
+
 def test_uncertain_never_becomes_candidate(tmp_path: Path) -> None:
     service = _service(tmp_path)
     service.begin_mobile_episode(

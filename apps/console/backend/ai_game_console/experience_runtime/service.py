@@ -69,7 +69,11 @@ class ExperienceService:
                 goal_family=normalized,
                 ui_version="unknown",
                 device_class=(target_id or "android").split(":", 1)[0],
-                orientation="portrait",
+                # The task is admitted before its first screenshot. Preserve
+                # that uncertainty instead of recording a false portrait fact;
+                # the scene compatibility key still binds the observed frame
+                # dimensions before any candidate can be retrieved.
+                orientation="unknown",
             ),
         )
 

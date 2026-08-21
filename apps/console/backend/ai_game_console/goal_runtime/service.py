@@ -114,7 +114,9 @@ class GoalService:
         if not specification["success_criteria"]:
             raise GoalStateConflict("GoalRun 尚未冻结成功标准。")
         source = self.mobile_archive.inspect(record.bound_task_id)
-        checklist = self._reconcile_daily_checklist(record, specification, source)
+        checklist = self._reconcile_daily_checklist(
+            record, specification, source
+        )
         try:
             proposed = self.verify_completion(record.original_goal, specification, source)
             assessment = _validated_completion(specification, source, proposed)
@@ -346,7 +348,15 @@ class GoalService:
             )
             return projected
         specification = self.store.specification(record.id)
-        checklist = self._reconcile_daily_checklist(record, specification, source)
+        checklist = self.daily_checklist(record.id)
+        if projected.execution_status == "CANDIDATE_COMPLETE":
+            # Checklist extraction is a completion-gate operation, not a read
+            # projection side effect. Failed, stopped, and uncertain runs must
+            # remain cheap to inspect and must not silently retry a visual
+            # model request every time list/detail is read.
+            checklist = self._reconcile_daily_checklist(
+                record, specification, source
+            )
         if (
             projected.execution_status == "CANDIDATE_COMPLETE"
             and self.specify_goal is not None

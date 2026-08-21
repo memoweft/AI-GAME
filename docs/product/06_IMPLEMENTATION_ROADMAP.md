@@ -157,9 +157,12 @@ Passing U5 proves one learning vertical, not general game mastery.
 
 **Status**: `PARTIAL` — the family binding, dynamic checklist gate, controlled
 fixtures, current-source runtime, and real MuMu attempts exist. A real run
-opened the task side panel and preserved truthful incomplete evidence, but did
-not discover, freeze, execute, and independently reverify the complete daily
-checklist. U6 remains blocked by the ordinary advancement rule.
+now separates the chapter/reputation/affairs pages from explicit daily identity
+and reached real daily-labelled activity cards, while preserving truthful
+incomplete evidence. It still did not discover, freeze, execute, and
+independently reverify the complete daily checklist. Repeated dense-frame Qwen
+calls also retain an unresolved 40.96-second-to-timeout latency tail. U6 remains
+blocked by the ordinary advancement rule.
 
 ### U6 — Canonical Kernel autonomous worker canary
 
