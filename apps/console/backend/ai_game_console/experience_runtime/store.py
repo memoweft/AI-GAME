@@ -502,6 +502,24 @@ class SQLiteExperienceStore:
         with self._connection() as owned:
             return self.candidate(candidate_id, connection=owned)
 
+    def candidates(
+        self, scope: ScopeKey, *, status: str | None = None
+    ) -> list[ExperienceCandidate]:
+        with self._connection() as connection:
+            if status is None:
+                rows = connection.execute(
+                    "SELECT * FROM experience_candidates WHERE scope_key = ? "
+                    "ORDER BY created_at, candidate_id",
+                    (_scope_key(scope),),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT * FROM experience_candidates WHERE scope_key = ? AND status = ? "
+                    "ORDER BY created_at, candidate_id",
+                    (_scope_key(scope), status),
+                ).fetchall()
+            return [_candidate(row) for row in rows]
+
     def set_candidate_status(self, candidate_id: str, status: str) -> ExperienceCandidate:
         if status not in {"promoted", "rejected", "deprecated"}:
             raise ValueError("invalid candidate status")

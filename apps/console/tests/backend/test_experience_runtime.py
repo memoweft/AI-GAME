@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sqlite3
 import time
 from types import SimpleNamespace
 import binascii
@@ -34,11 +35,12 @@ def _attempt(
     after_ref: str, after_summary: str, evidence: str,
     satisfied: bool, progress: bool, action: str = "tap",
     target_description: str | None = None,
+    x: int = 80, y: int = 240,
 ) -> ActionAttempt:
     intent = (
         PhysicalIntent("keyevent", {"keycode": 4}) if action == "back"
         else PhysicalIntent("tap", {
-            "x": 80, "y": 240,
+            "x": x, "y": y,
             **({"target_description": target_description} if target_description else {}),
         })
     )
@@ -248,6 +250,107 @@ def test_candidate_reject_deprecate_and_legacy_validation(tmp_path: Path) -> Non
         source_task=SimpleNamespace(task_id="task-old"),
         goal_completion=None,
     ) == "untrusted"
+
+
+def test_repeated_certain_negative_can_activate_before_first_goal_success(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    service.begin_mobile_episode(
+        goal_run_id="goal-cold", source_task_id="task-cold", goal_spec_revision=1,
+        frozen_criteria_ids=("daily_done",), scope=SCOPE,
+    )
+    first = service.record_mobile_attempt(
+        source_task_id="task-cold", objective="open daily tasks",
+        attempt=_attempt(
+            1, before_ref="main-1", before_summary="main city 720x1280",
+            after_ref="main-2", after_summary="main city 720x1280",
+            evidence="no effect", satisfied=False, progress=False,
+        ),
+    )
+    second = service.record_mobile_attempt(
+        source_task_id="task-cold", objective="open daily tasks",
+        attempt=_attempt(
+            2, before_ref="main-3", before_summary="main city 720x1280",
+            after_ref="main-4", after_summary="main city 720x1280",
+            evidence="no effect again", satisfied=False, progress=False,
+        ),
+    )
+    assert first is not None and second is not None
+    candidates = service.store.candidates_for_transition(second.transition_id)
+    assert len(candidates) == 1
+    assert candidates[0].kind == "negative"
+    assert candidates[0].support_count == 2
+    assert candidates[0].status == "promoted"
+    assert candidates[0].semantic_action.endswith("|region=r0c0")
+
+    service.begin_mobile_episode(
+        goal_run_id="goal-warm", source_task_id="task-warm", goal_spec_revision=1,
+        frozen_criteria_ids=("daily_done",), scope=SCOPE,
+    )
+    packet = service.retrieve(
+        source_task_id="task-warm", objective="open daily tasks",
+        observation=Observation("main-warm", "main city 720x1280"),
+    )
+    assert [item.kind for item in packet.items] == ["negative"]
+
+
+def test_negative_experience_is_region_scoped_and_legacy_policy_is_retired(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    service.begin_mobile_episode(
+        goal_run_id="goal-cold", source_task_id="task-cold", goal_spec_revision=1,
+        frozen_criteria_ids=("daily_done",), scope=SCOPE,
+    )
+    for sequence in (1, 2):
+        service.record_mobile_attempt(
+            source_task_id="task-cold", objective="open daily tasks",
+            attempt=_attempt(
+                sequence, before_ref=f"main-{sequence}",
+                before_summary="main city 720x1280",
+                after_ref=f"same-{sequence}", after_summary="main city 720x1280",
+                evidence="no effect", satisfied=False, progress=False,
+                target_description="tasks button",
+            ),
+        )
+    service.begin_mobile_episode(
+        goal_run_id="goal-warm", source_task_id="task-warm", goal_spec_revision=1,
+        frozen_criteria_ids=("daily_done",), scope=SCOPE,
+    )
+    packet = service.retrieve(
+        source_task_id="task-warm", objective="open daily tasks",
+        observation=Observation("main-warm", "main city 720x1280"),
+    )
+    candidate = packet.items[0]
+    assert candidate.semantic_action.endswith("|region=r0c0")
+    service.record_mobile_attempt(
+        source_task_id="task-warm", objective="open daily tasks", retrieval=packet,
+        attempt=_attempt(
+            1, before_ref="main-warm", before_summary="main city 720x1280",
+            after_ref="tasks", after_summary="task list 720x1280",
+            evidence="task list visible", satisfied=True, progress=True,
+            target_description="tasks button", x=640, y=240,
+        ),
+    )
+    refreshed = service.store.candidate(candidate.candidate_id)
+    assert refreshed.failure_count == 0
+    assert refreshed.support_count == 3
+
+    # Simulate the pre-region U5 format and prove that retrieval retires it
+    # without deleting its evidence or silently treating it as safe.
+    with sqlite3.connect(tmp_path / "experience.db") as connection:
+        connection.execute(
+            "UPDATE experience_candidates SET semantic_action = ? WHERE candidate_id = ?",
+            (candidate.semantic_action.split("|region=", 1)[0], candidate.candidate_id),
+        )
+    retired = service.retrieve(
+        source_task_id="task-warm", objective="open daily tasks",
+        observation=Observation("main-again", "main city 720x1280"),
+    )
+    assert retired.empty
+    assert service.store.candidate(candidate.candidate_id).status == "deprecated"
+    assert service.store.policies(SCOPE)[-1].candidate_ids == ()
 
 
 def test_controlled_cold_warm_fixture_meets_action_threshold() -> None:

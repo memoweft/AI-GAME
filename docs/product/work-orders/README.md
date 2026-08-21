@@ -8,7 +8,7 @@ These work orders implement `../06_IMPLEMENTATION_ROADMAP.md` in order.
 | `U2_ONE_SURFACE_AND_PREFLIGHT.md` | PARTIAL | U1 |
 | `U3_QWEN_AND_GOAL_VERIFICATION.md` | DONE | Explicit user advance with U2 rendered-browser deviation retained; confirmed D11/D15 |
 | `U4_EXPERIENCE_LEDGER.md` | DONE | U3 |
-| `U5_STZB_DAILY_LEARNING.md` | NOT_STARTED | U4 |
+| `U5_STZB_DAILY_LEARNING.md` | PARTIAL | U4; real complete daily cold/warm acceptance remains open |
 | `U6_KERNEL_AUTONOMOUS_CANARY.md` | NOT_STARTED | U5 |
 | `U7_REAL_KERNEL_CUTOVER.md` | NOT_STARTED | U6 |
 | `U8_LONG_LIVED_ROUTING.md` | NOT_STARTED | U7, confirmed decision D14 |

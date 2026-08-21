@@ -2,7 +2,7 @@
 
 ## STATUS
 
-`NOT_STARTED`
+`PARTIAL`
 
 ## BUSINESS OUTCOME
 
@@ -70,3 +70,50 @@ The complete evidence package in `../07_ACCEPTANCE_AND_EVIDENCE.md` passes and w
 ## NEXT
 
 `U6_KERNEL_AUTONOMOUS_CANARY.md`.
+
+## 2026-08-21 DELIVERY EVIDENCE
+
+- The universal GoalSpecification normalizes STZB daily wording variants to
+  `stzb/daily/vnext` and binds the compatibility runtime to
+  `auto:stzb/daily/vnext` without changing the legacy v1 resolver.
+- A separate append-only checklist store freezes only a visibly complete first
+  checklist. Final success requires a distinct later frame with the same date
+  label, exact item set, and every item visibly complete. Missing or uncertain
+  items remain incomplete; they do not become verified facts.
+- Checklist inspection runs after MobileTask termination so it cannot starve
+  the single-resident Qwen role server. Candidate frames are restricted to
+  verifier evidence that positively observed the task panel.
+- Reflection recovery steps can no longer erase the original unattempted plan
+  tail. Recovery prompts prohibit coordinates, fixed scripts, and conditional
+  replacement stages.
+- Negative experience can activate before the first full Goal success only
+  from two certain, evidence-referenced failures in the exact scope. It is
+  bound to semantic action plus normalized screen region; legacy over-broad
+  negative policies are deprecated through a new reversible policy revision.
+- The STZB family has an explicit maximum of 64 actions and eight reflections
+  even when the open-development runtime uses larger global budgets.
+- The controlled five-scenario fixture reports 44 cold actions versus 26 warm
+  actions, zero false completions, zero repeated known-wrong actions, complete
+  recovery, zero interventions, stale-policy rollback, and zero cross-scope
+  leakage. This is controlled artifact/test evidence, not real-device success.
+- Current-source runtime used the configured Qwen3.8 27B multimodal server and
+  the authorized MuMu target. One run opened the left task panel after nine
+  actions without step-by-step operator correction. It later failed to expose
+  a complete daily checklist; the run was stopped after repeated exploration.
+  The terminal checklist remained `NOT_DISCOVERED`, so no completion fact or
+  positive complete-goal policy was promoted.
+
+## OPEN GATES
+
+- No real run has frozen the complete current-day daily checklist.
+- No real run has completed every currently feasible item and independently
+  reread the same checklist from a distinct final frame.
+- No comparable real STZB cold/warm pair has both completed, so controlled
+  action reduction cannot be promoted to a real learning claim.
+- Actual-date/resettable-state coverage and supported warm runs with zero
+  step-by-step correction remain unavailable.
+- There is no deployment or external-outcome evidence.
+
+U6 is not allowed to start under the ordinary roadmap advancement rule. The
+next work is a U5 continuation focused on robust complete-list discovery and a
+fresh legitimate daily state.

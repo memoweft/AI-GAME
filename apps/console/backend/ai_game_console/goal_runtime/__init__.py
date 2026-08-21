@@ -13,6 +13,14 @@ from .qwen import StructuredGoalModel
 from .repair import GoalRepairManager, RepairApplyError
 from .service import GoalService
 from .store import SQLiteGoalStore
+from .stzb_daily import (
+    DailyChecklistItem,
+    DailyChecklistSnapshot,
+    SQLiteDailyChecklistStore,
+    STZB_DAILY_GOAL_FAMILY,
+    normalize_goal_family,
+)
+from .stzb_daily_benchmark import DailyFixtureReport, run_stzb_daily_fixture_benchmark
 
 __all__ = [
     "GoalPreflight",
@@ -27,6 +35,13 @@ __all__ = [
     "PreflightResult",
     "ProductionGoalRepairs",
     "SQLiteGoalStore",
+    "DailyChecklistItem",
+    "DailyChecklistSnapshot",
+    "SQLiteDailyChecklistStore",
+    "STZB_DAILY_GOAL_FAMILY",
+    "normalize_goal_family",
+    "DailyFixtureReport",
+    "run_stzb_daily_fixture_benchmark",
     "create_goal_router",
     "goal_error_handler",
 ]

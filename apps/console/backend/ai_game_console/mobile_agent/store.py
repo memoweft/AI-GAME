@@ -923,6 +923,24 @@ class _SQLiteTaskStore:
             plan_revision = int(row["plan_revision"])
             active_index = int(row["active_subgoal_index"])
             if decision.replacement_subgoals is not None:
+                current_plan = connection.execute(
+                    "SELECT subgoals_json FROM mobile_task_plans "
+                    "WHERE task_id = ? AND revision = ?",
+                    (task_id, plan_revision),
+                ).fetchone()
+                original = (
+                    list(json.loads(current_plan["subgoals_json"]))
+                    if current_plan is not None
+                    else []
+                )
+                # Reflection may insert a bounded recovery route, but it may
+                # not silently delete the original plan's unattempted tail.
+                remaining_original = original[active_index + 1:]
+                recovery_capacity = max(0, 64 - len(remaining_original))
+                revised_subgoals = [
+                    *list(decision.replacement_subgoals)[:recovery_capacity],
+                    *remaining_original,
+                ]
                 plan_revision += 1
                 active_index = 0
                 connection.execute(
@@ -930,7 +948,7 @@ class _SQLiteTaskStore:
                     INSERT INTO mobile_task_plans(task_id, revision, subgoals_json, created_at)
                     VALUES (?, ?, ?, ?)
                     """,
-                    (task_id, plan_revision, _json(list(decision.replacement_subgoals)), now),
+                    (task_id, plan_revision, _json(revised_subgoals), now),
                 )
             self._apply_inputs(connection, task_id, expected_input_revision, now)
             self._event(

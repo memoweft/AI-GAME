@@ -130,6 +130,7 @@ def create_goal_router(service: GoalService) -> APIRouter:
 
 def _payload(record: GoalRecord, service: GoalService) -> dict[str, Any]:
     completion = service.store.completion(record.id)
+    daily_checklist = service.daily_checklist(record.id)
     incomplete = []
     if completion is not None:
         incomplete = [
@@ -139,6 +140,11 @@ def _payload(record: GoalRecord, service: GoalService) -> dict[str, Any]:
         ]
     elif record.execution_status == "CANDIDATE_COMPLETE":
         incomplete = ["原始目标尚未经过独立 Goal Completion Verifier 验证"]
+    if daily_checklist is not None:
+        incomplete.extend(
+            str(item.get("title") or item.get("item_id"))
+            for item in daily_checklist.get("remaining_items", ())
+        )
     return {
         "id": record.id,
         "original_goal": record.original_goal,
@@ -165,6 +171,7 @@ def _payload(record: GoalRecord, service: GoalService) -> dict[str, Any]:
         "completion_assessment": completion,
         "completion_history": service.store.completions(record.id),
         "verified_facts": completion["verified_facts"] if completion else [],
+        "daily_checklist": daily_checklist,
         "uncompleted_items": incomplete,
         "created_at": record.created_at,
         "updated_at": record.updated_at,

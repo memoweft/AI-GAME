@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from ..mobile_agent.domain import Observation
@@ -11,6 +12,12 @@ from .domain import (
     GoalCompletionAssessment,
     GoalSpecificationDraft,
     SuccessCriterion,
+)
+from .stzb_daily import (
+    DailyChecklistItem,
+    DailyChecklistSnapshot,
+    checklist_item_id,
+    normalized_intent,
 )
 
 
@@ -62,7 +69,7 @@ class StructuredGoalModel:
             # This extraction task is schema-constrained and does not benefit
             # from consuming the whole response budget in hidden reasoning.
             # The final verifier uses the same stable non-thinking baseline.
-            reasoning_effort="minimal",
+            reasoning_effort="low",
             reasoning_budget=0,
         )
         classification = decoded.get("classification")
@@ -90,9 +97,144 @@ class StructuredGoalModel:
                 str(item.get("source_quote") or "").strip(),
             ))
         return GoalSpecificationDraft(
-            {"classification": classification.strip(), "outcome": outcome.strip()},
+            normalized_intent(
+                original_goal,
+                {"classification": classification.strip(), "outcome": outcome.strip()},
+            ),
             tuple(criteria),
         )
+
+    def inspect_daily_checklist(
+        self, original_goal: str, observations: tuple[Observation, ...]
+    ) -> tuple[DailyChecklistSnapshot, ...]:
+        """Extract only complete, visible daily-list snapshots from persisted frames."""
+
+        if not observations:
+            return ()
+        evidence = [
+            {"image_index": index, "evidence_id": item.evidence_id}
+            for index, item in enumerate(observations)
+        ]
+        decoded = self._role_model.call_tool(
+            system=(
+                "你是率土之滨每日清单观察器。必须调用 record_daily_checklist。"
+                "逐张判断输入画面；只记录确实显示每日/日常任务完整清单的画面。"
+                "coverage_complete 只有在标题、全部条目和列表末端或总完成标记都可见时才为 true。"
+                "不要从旧画面、计划、按钮点击或常识补全条目。每项状态只能依据对应画面。"
+            ),
+            prompt=json.dumps(
+                {
+                    "original_goal": original_goal,
+                    "images": evidence,
+                    "instruction": (
+                        "返回可识别的清单画面。image_index 必须引用输入；date_label 使用画面"
+                        "可见日期/今日标识，无法区分日期则 uncertain 且 coverage_complete=false。"
+                    ),
+                },
+                ensure_ascii=False,
+            ),
+            observations=observations,
+            tool_name="record_daily_checklist",
+            description="Record complete visible STZB daily checklist observations",
+            parameters={
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "snapshots": {
+                        "type": "array",
+                        "maxItems": len(observations),
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {
+                                "image_index": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": len(observations) - 1,
+                                },
+                                "date_label": {"type": "string"},
+                                "coverage_complete": {"type": "boolean"},
+                                "items": {
+                                    "type": "array",
+                                    "maxItems": 64,
+                                    "items": {
+                                        "type": "object",
+                                        "additionalProperties": False,
+                                        "properties": {
+                                            "title": {"type": "string"},
+                                            "status": {
+                                                "type": "string",
+                                                "enum": [
+                                                    "completed",
+                                                    "incomplete",
+                                                    "blocked",
+                                                    "uncertain",
+                                                ],
+                                            },
+                                            "evidence": {"type": "string"},
+                                        },
+                                        "required": ["title", "status", "evidence"],
+                                    },
+                                },
+                            },
+                            "required": [
+                                "image_index",
+                                "date_label",
+                                "coverage_complete",
+                                "items",
+                            ],
+                        },
+                    }
+                },
+                "required": ["snapshots"],
+            },
+            max_tokens=3_072,
+            reasoning_effort="low",
+            reasoning_budget=0,
+        )
+        raw_snapshots = decoded.get("snapshots")
+        if not isinstance(raw_snapshots, list):
+            raise ValueError("invalid daily checklist response")
+        now = datetime.now(UTC)
+        snapshots: list[DailyChecklistSnapshot] = []
+        seen_evidence: set[str] = set()
+        for order, raw in enumerate(raw_snapshots):
+            if not isinstance(raw, dict):
+                raise ValueError("invalid daily checklist snapshot")
+            index = raw.get("image_index")
+            if isinstance(index, bool) or not isinstance(index, int):
+                raise ValueError("invalid daily checklist image index")
+            if index < 0 or index >= len(observations):
+                raise ValueError("daily checklist references an unknown image")
+            evidence_id = observations[index].evidence_id
+            if evidence_id in seen_evidence:
+                raise ValueError("daily checklist repeats one evidence frame")
+            seen_evidence.add(evidence_id)
+            raw_items = raw.get("items")
+            if not isinstance(raw_items, list):
+                raise ValueError("invalid daily checklist items")
+            items = tuple(
+                DailyChecklistItem(
+                    checklist_item_id(str(item.get("title") or "")),
+                    str(item.get("title") or "").strip(),
+                    str(item.get("status") or "uncertain"),  # type: ignore[arg-type]
+                    str(item.get("evidence") or "").strip(),
+                )
+                for item in raw_items
+                if isinstance(item, dict)
+            )
+            if len(items) != len(raw_items):
+                raise ValueError("invalid daily checklist item")
+            snapshots.append(
+                DailyChecklistSnapshot(
+                    evidence_id=evidence_id,
+                    date_label=str(raw.get("date_label") or "").strip(),
+                    coverage_complete=bool(raw.get("coverage_complete")),
+                    items=items,
+                    observed_at=(now + timedelta(microseconds=order)).isoformat(),
+                )
+            )
+        return tuple(snapshots)
 
     def verify(
         self, original_goal: str, specification: dict[str, Any], state: Any
@@ -177,7 +319,7 @@ class StructuredGoalModel:
                 "required": ["verdict", "criteria", "verified_facts", "result_summary"],
             },
             max_tokens=2_048,
-            reasoning_effort="minimal",
+            reasoning_effort="low",
             reasoning_budget=0,
         )
         criteria = tuple(

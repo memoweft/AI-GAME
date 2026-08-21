@@ -29,7 +29,10 @@ class GoalService:
                  verify_completion: Callable[
                      [str, dict[str, Any], Any], GoalCompletionAssessment
                  ] | None = None,
-                 promote_verified_success: Callable[[str, str, int], Any] | None = None) -> None:
+                 promote_verified_success: Callable[[str, str, int], Any] | None = None,
+                 daily_checklist_store: Any | None = None,
+                 inspect_daily_checklist: Callable[[str, tuple[Any, ...]], tuple[Any, ...]]
+                 | None = None) -> None:
         self.store = store
         self.mobile_runtime = mobile_runtime
         self.mobile_archive = mobile_archive
@@ -40,6 +43,8 @@ class GoalService:
         self.specify_goal = specify_goal
         self.verify_completion = verify_completion
         self.promote_verified_success = promote_verified_success
+        self.daily_checklist_store = daily_checklist_store
+        self.inspect_daily_checklist = inspect_daily_checklist
         self._binding_lock = threading.RLock()
 
     def create(self, goal: str, idempotency_key: str) -> GoalRecord:
@@ -109,9 +114,11 @@ class GoalService:
         if not specification["success_criteria"]:
             raise GoalStateConflict("GoalRun 尚未冻结成功标准。")
         source = self.mobile_archive.inspect(record.bound_task_id)
+        checklist = self._reconcile_daily_checklist(record, specification, source)
         try:
             proposed = self.verify_completion(record.original_goal, specification, source)
             assessment = _validated_completion(specification, source, proposed)
+            assessment = _daily_checklist_gate(specification, assessment, checklist)
         except Exception:
             assessment = _uncertain_completion(specification)
         stored = self.store.record_completion(
@@ -275,19 +282,27 @@ class GoalService:
                 return self._project(latest)
             try:
                 specification = self.store.specification(latest.id)
-                state = self.mobile_runtime.start(
-                    latest.original_goal,
-                    f"goal:{latest.id}:start",
-                    target_id=target_id,
-                    skill_id=None,
-                    execution_origin="v2_goal_compat",
-                    promote_success_memory=False,
-                    goal_id=latest.id,
-                    goal_spec_revision=int(specification["revision"]),
-                    frozen_criteria_ids=tuple(
+                start_arguments: dict[str, Any] = {
+                    "target_id": target_id,
+                    "skill_id": None,
+                    "execution_origin": "v2_goal_compat",
+                    "promote_success_memory": False,
+                    "goal_id": latest.id,
+                    "goal_spec_revision": int(specification["revision"]),
+                    "frozen_criteria_ids": tuple(
                         str(item["id"])
                         for item in specification.get("success_criteria", ())
                     ),
+                }
+                family = (specification.get("normalized_intent") or {}).get(
+                    "goal_family"
+                )
+                if family == "stzb/daily/vnext":
+                    start_arguments["skill_scope_override"] = family
+                state = self.mobile_runtime.start(
+                    latest.original_goal,
+                    f"goal:{latest.id}:start",
+                    **start_arguments,
                 )
             except Exception as error:
                 code = getattr(error, "code", "mobile_task_binding_failed")
@@ -331,6 +346,7 @@ class GoalService:
             )
             return projected
         specification = self.store.specification(record.id)
+        checklist = self._reconcile_daily_checklist(record, specification, source)
         if (
             projected.execution_status == "CANDIDATE_COMPLETE"
             and self.specify_goal is not None
@@ -350,6 +366,7 @@ class GoalService:
             try:
                 proposed = self.verify_completion(record.original_goal, specification, source)
                 assessment = _validated_completion(specification, source, proposed)
+                assessment = _daily_checklist_gate(specification, assessment, checklist)
             except Exception:
                 assessment = _uncertain_completion(specification)
             stored = self.store.record_completion(
@@ -361,6 +378,58 @@ class GoalService:
             self._promote_if_verified(record.bound_task_id, record.id, stored)
             projected = self.store.inspect(record.id)
         return projected
+
+    def daily_checklist(self, goal_id: str) -> dict[str, Any] | None:
+        if self.daily_checklist_store is None:
+            return None
+        specification = self.store.specification(goal_id)
+        if (specification.get("normalized_intent") or {}).get("goal_family") != "stzb/daily/vnext":
+            return None
+        return self.daily_checklist_store.state(goal_id)
+
+    def _reconcile_daily_checklist(
+        self, record: GoalRecord, specification: dict[str, Any], source: Any
+    ) -> dict[str, Any] | None:
+        intent = specification.get("normalized_intent") or {}
+        if intent.get("goal_family") != "stzb/daily/vnext":
+            return None
+        if self.daily_checklist_store is None or self.inspect_daily_checklist is None:
+            return {"state": "NOT_AVAILABLE", "final_verified": False,
+                    "remaining_items": [], "deviation": "checklist service unavailable"}
+        source_status = str(_value(source, "status", ""))
+        if source_status not in {"completed", "failed", "stopped", "uncertain"}:
+            # The inspected deployment has one resident Qwen slot. Checklist
+            # extraction must never compete with the physical owner's next
+            # action or post-action verification request.
+            return self.daily_checklist_store.state(record.id)
+        scanned = self.daily_checklist_store.evidence_ids(record.id)
+        observations = []
+        non_candidates = []
+        for attempt in _value(source, "attempts", ()):
+            after = _value(attempt, "after")
+            evidence_id = str(_value(after, "evidence_id", "")) if after is not None else ""
+            if not evidence_id or evidence_id in scanned:
+                continue
+            verification = _value(attempt, "verification")
+            evidence = str(_value(verification, "evidence", ""))
+            if _looks_like_daily_checklist_evidence(evidence):
+                observations.append(after)
+            else:
+                non_candidates.append(evidence_id)
+        if non_candidates:
+            self.daily_checklist_store.mark_scanned(record.id, tuple(non_candidates))
+        for observation in observations:
+            batch = (observation,)
+            try:
+                snapshots = self.inspect_daily_checklist(record.original_goal, batch)
+            except Exception:
+                break
+            for snapshot in snapshots:
+                self.daily_checklist_store.record(record.id, snapshot)
+            self.daily_checklist_store.mark_scanned(
+                record.id, tuple(str(_value(item, "evidence_id", "")) for item in batch)
+            )
+        return self.daily_checklist_store.state(record.id)
 
     def _promote_if_verified(
         self, task_id: str | None, goal_id: str, completion: dict[str, Any]
@@ -426,6 +495,88 @@ def _validated_completion(
         criteria=proposed.criteria,
         verified_facts=proposed.verified_facts if verdict == "verified" else (),
         result_summary=proposed.result_summary,
+    )
+
+
+def _daily_checklist_gate(
+    specification: dict[str, Any], proposed: GoalCompletionAssessment,
+    checklist: dict[str, Any] | None,
+) -> GoalCompletionAssessment:
+    intent = specification.get("normalized_intent") or {}
+    if intent.get("goal_family") != "stzb/daily/vnext":
+        return proposed
+    if checklist is not None and checklist.get("final_verified") is True:
+        return proposed
+    if checklist is None or checklist.get("state") in {"NOT_AVAILABLE", "NOT_DISCOVERED"}:
+        evidence = "没有持久化覆盖完整的今日每日任务清单及独立最终复查画面。"
+    elif checklist.get("deviation"):
+        evidence = f"最终清单与冻结清单不一致：{checklist['deviation']}。"
+    else:
+        remaining = [
+            str(item.get("title") or item.get("item_id"))
+            for item in checklist.get("remaining_items", ())
+        ]
+        evidence = "最终清单仍有未完成或不确定项目：" + (
+            "、".join(remaining) if remaining else "缺少不同证据画面的完整最终复查"
+        )
+    gated = []
+    matched = False
+    for item in proposed.criteria:
+        criterion = next(
+            (raw for raw in specification.get("success_criteria", ())
+             if str(raw.get("id")) == item.criterion_id),
+            {},
+        )
+        text = " ".join(
+            str(criterion.get(key) or "")
+            for key in ("description", "source_quote", "evidence_requirement")
+        )
+        if any(token in text for token in ("每日", "日常", "任务", "清单", "today", "daily")):
+            gated.append(CriterionAssessment(item.criterion_id, False, (), (), evidence))
+            matched = True
+        else:
+            gated.append(item)
+    if not matched and gated:
+        item = gated[0]
+        gated[0] = CriterionAssessment(item.criterion_id, False, (), (), evidence)
+    return GoalCompletionAssessment(
+        verdict="partial",
+        criteria=tuple(gated),
+        verified_facts=(),
+        result_summary=evidence,
+    )
+
+
+def _looks_like_daily_checklist_evidence(evidence: str) -> bool:
+    text = evidence.casefold()
+    if any(
+        token in text
+        for token in (
+            "未弹出任务",
+            "未打开任务",
+            "未进入任务",
+            "未见任务列表",
+            "并非任务",
+            "不在任务",
+            "task panel did not",
+            "checklist is not visible",
+        )
+    ):
+        return False
+    return any(
+        token in text
+        for token in (
+            "已展开任务面板",
+            "已打开任务面板",
+            "显示每日任务",
+            "显示日常任务",
+            "每日任务列表显示",
+            "今日任务列表显示",
+            "清单的全部条目",
+            "任务条目及",
+            "daily task",
+            "daily checklist",
+        )
     )
 
 

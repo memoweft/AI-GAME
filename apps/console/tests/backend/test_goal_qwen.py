@@ -98,9 +98,10 @@ def test_structured_goal_model_forces_specification_and_completion_tools(
     assert specification.success_criteria[0].source_quote == "查看当前可见的电池信息"
     assert assessment.verdict == "verified"
     assert assessment.criteria[0].attempt_sequences == (1,)
-    assert [call["tool_choice"]["function"]["name"] for call in calls] == [
+    assert [call["tools"][0]["function"]["name"] for call in calls] == [
         "record_goal_specification", "record_goal_completion",
     ]
+    assert all(call["tool_choice"] == "required" for call in calls)
     completion_content = calls[1]["messages"][1]["content"]
     assert sum(item["type"] == "image_url" for item in completion_content) == 0
     assert frame.evidence_id in completion_content[0]["text"]

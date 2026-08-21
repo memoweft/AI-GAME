@@ -7,6 +7,7 @@ import time
 from collections import deque
 from collections.abc import Iterator, Mapping
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -26,6 +27,22 @@ from ai_game_console.mobile_agent import (
 
 
 TERMINAL = {"completed", "failed", "stopped", "uncertain"}
+
+
+def test_stzb_daily_scope_has_tighter_runaway_budget(tmp_path: Path) -> None:
+    runtime = MobileTaskRuntime(
+        tmp_path / "mobile.db", driver=RecordingDriver(), model=ScriptedModel(),
+        max_reflections=64, max_attempts=2_048,
+    )
+    try:
+        assert runtime._runaway_limits(SimpleNamespace(
+            skill_scope_id="auto:stzb/daily/vnext"
+        )) == (8, 64)
+        assert runtime._runaway_limits(SimpleNamespace(
+            skill_scope_id="auto:generic/unknown/v1"
+        )) == (64, 2_048)
+    finally:
+        runtime.shutdown()
 
 
 def wait_terminal(runtime: MobileTaskRuntime, task_id: str, timeout: float = 2.0):
@@ -213,6 +230,47 @@ def test_verified_subgoals_reflect_after_three_no_progress_and_promote_skill(
     assert persisted.status == "completed"
     assert persisted.skill_memory_version == 1
     assert driver.close_count == 1
+
+
+def test_reflection_recovery_plan_preserves_original_unattempted_tail(
+    tmp_path: Path,
+) -> None:
+    model = ScriptedModel(
+        plans=(PlanDraft(("打开任务入口", "完成全部条目", "最终重新复查清单")),),
+        decisions=(
+            act("wrong-1"), act("wrong-2"), act("wrong-3"),
+            act("recover"), act("open"), act("complete"), act("reread"),
+        ),
+        verifications=(
+            Verification(False, False, evidence="wrong scene 1"),
+            Verification(False, False, evidence="wrong scene 2"),
+            Verification(False, False, evidence="wrong scene 3"),
+            Verification(True, True, evidence="returned"),
+            Verification(True, True, evidence="entry open"),
+            Verification(True, True, evidence="all items complete"),
+            Verification(True, True, evidence="fresh checklist reread"),
+        ),
+        reflections=(ReflectionDecision(
+            "recover then reground",
+            reason="wrong page",
+            replacement_subgoals=("返回正确页面", "重新打开任务入口"),
+        ),),
+    )
+    runtime = MobileTaskRuntime(
+        tmp_path / "mobile.db", driver=RecordingDriver(), model=model
+    )
+
+    finished = wait_terminal(runtime, runtime.start("完成全部每日任务", "preserve-tail").task_id)
+
+    assert finished.status == "completed"
+    assert finished.plan is not None
+    assert [item.description for item in finished.plan.subgoals] == [
+        "返回正确页面",
+        "重新打开任务入口",
+        "完成全部条目",
+        "最终重新复查清单",
+    ]
+    assert all(item.status == "completed" for item in finished.plan.subgoals)
 
 
 def test_transport_acceptance_does_not_complete_without_verification(

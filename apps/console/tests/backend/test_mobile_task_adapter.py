@@ -972,7 +972,8 @@ def test_tool_role_model_uses_forced_tools_for_all_four_roles(tmp_path: Path) ->
     assert [item[0] for item in calls] == [
         "record_plan", "mobile_use", "record_verification", "record_reflection",
     ]
-    assert all(item[1]["tool_choice"]["function"]["name"] == item[0] for item in calls)
+    assert all(item[1]["tools"][0]["function"]["name"] == item[0] for item in calls)
+    assert all(item[1]["tool_choice"] == "required" for item in calls)
     mobile_parameters = calls[1][1]["tools"][0]["function"]["parameters"]
     assert mobile_parameters["properties"]["target_description"]["maxLength"] == 200
 

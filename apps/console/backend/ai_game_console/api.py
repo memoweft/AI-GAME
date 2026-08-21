@@ -57,6 +57,7 @@ from .goal_runtime import (
     GoalService,
     ProductionGoalRepairs,
     SQLiteGoalStore,
+    SQLiteDailyChecklistStore,
     StructuredGoalModel,
     create_goal_router,
     goal_error_handler,
@@ -831,6 +832,13 @@ def create_app(
             promote_verified_goal_experience
             if isinstance(resolved_mobile_tasks, MobileTaskRuntime)
             else None
+        ),
+        daily_checklist_store=SQLiteDailyChecklistStore(
+            resolved_settings.data_dir / "stzb-daily.db"
+        ),
+        inspect_daily_checklist=(
+            structured_goal_model.inspect_daily_checklist
+            if structured_goal_model else None
         ),
     )
 

@@ -155,6 +155,12 @@ used five while both verified complete.
 
 Passing U5 proves one learning vertical, not general game mastery.
 
+**Status**: `PARTIAL` — the family binding, dynamic checklist gate, controlled
+fixtures, current-source runtime, and real MuMu attempts exist. A real run
+opened the task side panel and preserved truthful incomplete evidence, but did
+not discover, freeze, execute, and independently reverify the complete daily
+checklist. U6 remains blocked by the ordinary advancement rule.
+
 ### U6 — Canonical Kernel autonomous worker canary
 
 **Outcome**: Gateway/RuntimeKernel can independently complete one full natural-language settings/battery GoalRun using the same model, device, verification, experience, and control semantics.
@@ -244,7 +250,7 @@ Includes only after earlier exits:
 | U2 One UI + preflight | PARTIAL | Managed preflight/repair and a real settings/battery compatibility run exist; primary-composer visual/reopen proof remains unavailable |
 | U3 Qwen + final verifier | DONE | Frozen criteria, independent evidence-referenced completion, gated learning, real settings/battery completion, and measured Qwen visual default |
 | U4 Experience ledger | DONE | Additive evidence ledger, reversible policies, controlled thresholds, and real attributable 10-to-5-action settings warm run |
-| U5 STZB learning vertical | Not started | None |
+| U5 STZB learning vertical | PARTIAL | Checklist and experience gates exist; real complete daily cold/warm acceptance is still open |
 | U6 Kernel worker canary | Not started | None |
 | U7 Real cutover | Not started | None |
 | U8 Long-lived routing | Not started | None |

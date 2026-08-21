@@ -82,6 +82,11 @@ class ExperienceService:
             episode = self.store.episode_for_task(source_task_id)
         except KeyError:
             return ExperiencePacket(None)
+        self._reconcile_active_negative_policy(episode.scope)
+        # Reconcile candidates created by an older process before querying the
+        # active policy. This is idempotent and preserves append-only evidence.
+        for candidate in self.store.candidates(episode.scope, status="candidate"):
+            self._promote_repeated_local_failure(candidate)
         scene = self._scene(
             episode, observation, semantic_hint=None, confidence=0.55
         )
@@ -175,7 +180,11 @@ class ExperienceService:
             reward_vector_json=_reward(outcome), created_at=_utc_now(),
         ))
         if not uncertain:
-            self._candidate_from_transition(episode, transition, before_scene, after_scene)
+            candidate = self._candidate_from_transition(
+                episode, transition, before_scene, after_scene
+            )
+            if candidate is not None:
+                self._promote_repeated_local_failure(candidate)
         self._attribute_usage(retrieval, transition, signal)
         return transition
 
@@ -436,7 +445,11 @@ class ExperienceService:
         if retrieval is None or retrieval.retrieval_id is None:
             return
         for item in retrieval.items:
-            if _candidate_used(item, transition.semantic_action):
+            used_action = (
+                _grounded_action(transition.semantic_action, transition.grounded_region)
+                if item.kind == "negative" else transition.semantic_action
+            )
+            if _candidate_used(item, used_action):
                 usage_id = str(uuid.uuid4())
                 usage_id = self.store.record_usage(
                     usage_id, retrieval.retrieval_id, item.candidate_id,
@@ -445,7 +458,7 @@ class ExperienceService:
                 )
                 adhered = (
                     not _semantic_action_matches(
-                        item.semantic_action, transition.semantic_action
+                        item.semantic_action, used_action
                     )
                     if item.kind == "negative"
                     else _semantic_action_matches(
@@ -484,11 +497,15 @@ class ExperienceService:
         kind = "positive" if transition.immediate_outcome == "immediate_success" else (
             "recovery" if transition.immediate_outcome == "recovered" else "negative"
         )
+        semantic_action = (
+            _grounded_action(transition.semantic_action, transition.grounded_region)
+            if kind == "negative" else transition.semantic_action
+        )
         return self.store.upsert_candidate(ExperienceCandidate(
             candidate_id=str(uuid.uuid4()), scope=episode.scope, kind=kind,
             objective_matcher=transition.objective,
             scene_matcher=before_scene.semantic_label,
-            semantic_action=transition.semantic_action,
+            semantic_action=semantic_action,
             expected_next_scene=after_scene.semantic_label if after_scene else None,
             recovery_action=transition.semantic_action if kind == "recovery" else None,
             support_count=1, failure_count=0, confidence=2 / 3,
@@ -496,6 +513,94 @@ class ExperienceService:
             compatibility_key=before_scene.compatibility_key,
             status="candidate", created_at=_utc_now(), updated_at=_utc_now(),
         ))
+
+    def _promote_repeated_local_failure(
+        self, candidate: ExperienceCandidate
+    ) -> PolicyRevision | None:
+        """Activate only repeated, certain negative evidence before Goal success.
+
+        Positive action knowledge still requires independent complete-goal
+        coverage. This narrow path prevents a chicken-and-egg failure where a
+        known same-scene bad action cannot be avoided until the whole task has
+        somehow succeeded once.
+        """
+
+        if (
+            candidate.status != "candidate"
+            or candidate.kind != "negative"
+            or _action_region(candidate.semantic_action) is None
+            or candidate.support_count < 2
+            or candidate.failure_count != 0
+            or candidate.confidence < 0.75
+            or len(candidate.provenance_transition_ids) < 2
+        ):
+            return None
+        for transition_id in candidate.provenance_transition_ids:
+            transition = self.store.transition(transition_id)
+            episode = self.store.episode(transition.episode_id)
+            signal = self.store.latest_signal_for_transition(transition_id)
+            if (
+                episode.scope != candidate.scope
+                or not episode.frozen_criteria_ids
+                or transition.immediate_outcome not in {"no_progress", "wrong_scene"}
+                or signal is None
+                or signal.kind not in {"no_progress", "wrong_scene"}
+                or signal.confidence < 1.0
+                or not signal.evidence_refs
+            ):
+                return None
+        promoted = self.store.set_candidate_status(candidate.candidate_id, "promoted")
+        policies = self.store.policies(candidate.scope)
+        active = next((item for item in reversed(policies) if item.status == "active"), None)
+        candidate_ids = tuple(dict.fromkeys((
+            *(active.candidate_ids if active is not None else ()),
+            promoted.candidate_id,
+        )))
+        if active is not None and active.candidate_ids == candidate_ids:
+            return active
+        return self.store.put_policy(PolicyRevision(
+            policy_id=str(uuid.uuid4()), scope=candidate.scope,
+            revision=(policies[-1].revision + 1 if policies else 1),
+            candidate_ids=candidate_ids, status="active", created_at=_utc_now(),
+        ))
+
+    def _reconcile_active_negative_policy(self, scope: ScopeKey) -> None:
+        """Retire unsafe or repeatedly contradicted negative hints.
+
+        Early U5 builds stored only a semantic target, which could turn a bad
+        grounding attempt into the over-broad rule "never tap that target".
+        Negative hints are safe to activate only when they retain their
+        normalized screen region. Repeated attributable failures also retire a
+        hint without deleting its append-only evidence.
+        """
+
+        policies = self.store.policies(scope)
+        active = next((item for item in reversed(policies) if item.status == "active"), None)
+        if active is None:
+            return
+        retained: list[str] = []
+        changed = False
+        for candidate_id in active.candidate_ids:
+            candidate = self.store.candidate(candidate_id)
+            unsafe_negative = candidate.kind == "negative" and (
+                _action_region(candidate.semantic_action) is None
+                or (candidate.failure_count >= 2 and candidate.confidence < 0.5)
+            )
+            if unsafe_negative:
+                if candidate.status == "promoted":
+                    self.store.set_candidate_status(candidate_id, "deprecated")
+                changed = True
+            elif candidate.status == "promoted":
+                retained.append(candidate_id)
+            else:
+                changed = True
+        if changed:
+            self.store.put_policy(PolicyRevision(
+                policy_id=str(uuid.uuid4()), scope=scope,
+                revision=policies[-1].revision + 1,
+                candidate_ids=tuple(retained), status="active",
+                created_at=_utc_now(),
+            ))
 
     def _recovery_source(
         self, episode_id: str, before_scene_id: str, after_scene_id: str | None,
@@ -679,7 +784,25 @@ def _candidate_used(item: RetrievedExperience, semantic_action: str) -> bool:
     )
 
 
+def _grounded_action(semantic_action: str, region: str | None) -> str:
+    return (
+        f"{semantic_action}|region={region}"
+        if region is not None else semantic_action
+    )
+
+
+def _action_region(semantic_action: str) -> str | None:
+    marker = "|region="
+    return semantic_action.rsplit(marker, 1)[1] if marker in semantic_action else None
+
+
 def _semantic_action_matches(left: str, right: str) -> bool:
+    left_region = _action_region(left)
+    right_region = _action_region(right)
+    if left_region is not None and left_region != right_region:
+        return False
+    left = left.split("|region=", 1)[0]
+    right = right.split("|region=", 1)[0]
     left_kind = left.split(":", 1)[0]
     right_kind = right.split(":", 1)[0]
     if left_kind != right_kind:

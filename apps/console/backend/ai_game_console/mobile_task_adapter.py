@@ -26,6 +26,7 @@ from .gui_owl_client import (
     _completion_content,
     _loopback_chat_completions_endpoint,
 )
+from .goal_families import STZB_DAILY_GOAL_FAMILY, normalize_goal_family
 from .mobile_agent import (
     ActionDecision,
     DecisionContext,
@@ -915,6 +916,8 @@ class OpenAICompatibleToolRoleModel:
                 "required": ["subgoals"],
             },
             max_tokens=1_024,
+            reasoning_effort="low",
+            reasoning_budget=0,
         )
         subgoals = decoded.get("subgoals")
         if not isinstance(subgoals, list):
@@ -934,7 +937,9 @@ class OpenAICompatibleToolRoleModel:
                 "你是手机视觉动作层。必须调用 mobile_use，并且只根据当前截图和当前子目标"
                 "给一个动作。若画面已证明子目标完成，terminate success。系统级返回桌面、"
                 "返回或最近任务应使用 system_button，不要点击导航栏坐标。对可见目标动作"
-                "填写简短 target_description，描述目标文字或语义，不得填写坐标。"
+                "填写简短 target_description，描述目标文字或语义，不得填写坐标。点击目标"
+                "应落在当前截图可见的可交互文字或控件主体内，避开装饰边缘；若同一区域"
+                "刚刚无进展，必须依据当前截图重新定位到 visibly different 的可交互子区域。"
             ),
             prompt=_executor_prompt(context),
             observations=(context.observation,),
@@ -1032,7 +1037,9 @@ class OpenAICompatibleToolRoleModel:
         decoded = self.call_tool(
             system=(
                 "你是手机任务反思层。必须调用 record_reflection。根据连续无进展记录改变策略，"
-                "不得原样重复失败动作。"
+                "不得原样重复失败动作。replacement_subgoals 只能写无条件、可从新画面验证的"
+                "结果；禁止坐标、固定点击脚本、‘若/如果/否则’条件步骤。只插入恢复目标，"
+                "不要重写或删除原计划尚未完成的后续目标，运行时会自动接回它们。"
             ),
             prompt=_reflection_prompt(context),
             observations=(observation,),
@@ -1096,7 +1103,10 @@ class OpenAICompatibleToolRoleModel:
             "tools": [{"type": "function", "function": {
                 "name": tool_name, "description": description, "parameters": parameters,
             }}],
-            "tool_choice": {"type": "function", "function": {"name": tool_name}},
+            # Exactly one tool is supplied. The standard string form forces a
+            # tool call and is accepted by both OpenAI-compatible servers and
+            # the inspected llama.cpp build, which rejects the object form.
+            "tool_choice": "required",
         }
         if reasoning_budget is not None:
             payload["reasoning_budget"] = reasoning_budget
@@ -1187,11 +1197,23 @@ def _physical_intent(
 
 
 def _planner_prompt(context: PlanContext) -> str:
+    family_instruction = ""
+    if normalize_goal_family(context.goal) == STZB_DAILY_GOAL_FAMILY:
+        family_instruction = (
+            "\nSTZB daily vNext requirements: first reach and visibly inspect today's "
+            "complete daily checklist; then complete every currently incomplete item "
+            "that is available; finally reopen and visibly reread the complete checklist. "
+            "Do not reduce the goal to launching the game, opening one panel, or claiming "
+            "one reward. Do not invent task-specific coordinates. If an item needs elapsed "
+            "time or an unavailable external condition, preserve it as remaining instead "
+            "of claiming all done.\n"
+        )
     return (
         f"Owner goal: {context.goal}\n"
         f"Owner updates: {_owner_updates(context.owner_inputs)}\n"
         f"Current observation: {context.observation.summary}\n"
         f"Verified Skill Memory: {_skill_memory(context.skill_memory)}"
+        f"{family_instruction}"
     )
 
 

@@ -109,6 +109,7 @@ class MobileTaskRuntime:
         goal_id: str | None = None,
         goal_spec_revision: int | None = None,
         frozen_criteria_ids: tuple[str, ...] = (),
+        skill_scope_override: str | None = None,
     ) -> MobileTaskState:
         goal = _required_text(goal, "goal", 16_000)
         request_id = _required_text(client_request_id, "client_request_id", 512)
@@ -116,6 +117,9 @@ class MobileTaskRuntime:
         skill_id = _optional_text(skill_id, "skill_id", 1_000)
         execution_origin = _required_text(execution_origin, "execution_origin", 128)
         goal_id = _optional_text(goal_id, "goal_id", 512)
+        skill_scope_override = _optional_text(
+            skill_scope_override, "skill_scope_override", 1_000
+        )
         if not isinstance(promote_success_memory, bool):
             raise ValueError("promote_success_memory must be a boolean")
         digest_payload: dict[str, object] = {
@@ -136,6 +140,8 @@ class MobileTaskRuntime:
                 goal_spec_revision=goal_spec_revision,
                 frozen_criteria_ids=frozen_criteria_ids,
             )
+        if skill_scope_override is not None:
+            digest_payload["skill_scope_override"] = skill_scope_override
         digest = _digest("start", digest_payload)
         with self._admission_lock:
             self._ensure_mutable()
@@ -151,10 +157,14 @@ class MobileTaskRuntime:
                 raise TaskQueueFull("mobile task queue is full")
             task_id = str(uuid.uuid4())
             try:
-                skill_scope_id = self._resolve_skill_scope(
-                    goal=goal,
-                    target_id=target_id,
-                    skill_id=skill_id,
+                skill_scope_id = (
+                    _automatic_skill_scope_id(skill_scope_override)
+                    if skill_scope_override is not None
+                    else self._resolve_skill_scope(
+                        goal=goal,
+                        target_id=target_id,
+                        skill_id=skill_id,
+                    )
                 )
                 state, created = self._store.accept_start(
                     task_id=task_id,
@@ -349,8 +359,9 @@ class MobileTaskRuntime:
             if state.plan is None:
                 self._plan(task_id, worker_token, state, session)
                 continue
+            reflection_limit, attempt_limit = self._runaway_limits(state)
             if state.no_progress_count >= 3:
-                if state.reflection_count >= self._max_reflections:
+                if state.reflection_count >= reflection_limit:
                     self._store.fail(
                         task_id,
                         worker_token=worker_token,
@@ -360,7 +371,7 @@ class MobileTaskRuntime:
                     return
                 self._reflect(task_id, worker_token, state)
                 continue
-            if state.attempt_count >= self._max_attempts:
+            if state.attempt_count >= attempt_limit:
                 self._store.fail(
                     task_id,
                     worker_token=worker_token,
@@ -369,6 +380,11 @@ class MobileTaskRuntime:
                 )
                 return
             self._decide_and_apply(task_id, worker_token, state, session)
+
+    def _runaway_limits(self, state: MobileTaskState) -> tuple[int, int]:
+        if state.skill_scope_id == "auto:stzb/daily/vnext":
+            return min(self._max_reflections, 8), min(self._max_attempts, 64)
+        return self._max_reflections, self._max_attempts
 
     def _plan(
         self,

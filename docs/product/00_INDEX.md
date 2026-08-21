@@ -77,8 +77,8 @@ Historical reports are retained when they prove a useful fact, for example a tes
 ## 7. Current execution pointer
 
 ```text
-Current active work order: none (U4 completed)
-Next planned work order: U5_STZB_DAILY_LEARNING
+Current active work order: none (U5 delivered PARTIAL)
+Next planned work order: U5_STZB_DAILY_LEARNING continuation
 ```
 
 U1 completed against its specified gates. U2 remains PARTIAL only because its
@@ -89,4 +89,7 @@ advancement hold without waiving or relabeling the U2 deviation. U3 then passed
 its own automated, current-source, real-device, completion, learning-gate, and
 model-comparison evidence. U4 then completed its additive experience ledger,
 controlled cold/warm thresholds, and attributable real settings/battery warm
-run. U5 is next but is not active until execution continues.
+run. The 2026-08-21 U5 delivery added the STZB daily family, checklist gate,
+bounded learning path, and real-device evidence, but it remains PARTIAL because
+no real daily run froze and independently reverified a complete checklist.
+U6 is therefore not permitted by the ordinary advancement rule.

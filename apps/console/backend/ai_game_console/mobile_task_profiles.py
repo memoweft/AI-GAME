@@ -4,6 +4,7 @@ import hashlib
 import re
 
 
+
 _SPACE = re.compile(r"\s+")
 _STZB_NAMES = ("率土之滨", "率土")
 _SOUL_NAMES = ("soul", "Soul", "SOUL")
