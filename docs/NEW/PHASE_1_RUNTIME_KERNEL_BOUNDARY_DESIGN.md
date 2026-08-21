@@ -1,5 +1,7 @@
 # Phase 1 — Runtime Kernel Boundary Design
 
+> **历史 Foundation 设计，不是当前产品路线图。** 如与当前规范冲突，以 [`docs/product/00_INDEX.md`](../product/00_INDEX.md) 为准。
+
 > 状态：FROZEN DESIGN  
 > 日期：2026-08-10  
 > 实现状态：NOT STARTED  
@@ -412,4 +414,3 @@ Phase 1 不修改前端。冻结目标是：
 ## 12. 状态
 
 `DESIGN FROZEN — IMPLEMENTATION NOT STARTED`
-

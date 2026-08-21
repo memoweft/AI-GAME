@@ -1,5 +1,7 @@
 # Phase 6: Gateway 契约实现计划
 
+> **历史 Foundation 施工计划，不是当前产品路线图。** 当前权威规范见 [`docs/product/00_INDEX.md`](docs/product/00_INDEX.md)。
+
 > 契约依据: `docs/NEW/PHASE_1_GATEWAY_CONTRACT_DESIGN.md` — `DESIGN FROZEN — API NOT MODIFIED`
 > 创建: 2026-08-19 | 前置: Phase 5 完成（全量回归 529 passed）
 

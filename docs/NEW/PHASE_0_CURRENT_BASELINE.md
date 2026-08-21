@@ -1,9 +1,15 @@
 # Phase 0 — 现状与工程基线
 
-> 日期：2026-08-10  
-> 工作区：`F:\AI-GAME`  
-> 依据：`docs/NEW/docs/00_README.md` 至 `20_OPEN_QUESTIONS_AND_NON_GOALS.md`  
-> 状态：`DONE — STOP`  
+> **历史 Foundation 证据，不是当前产品路线图。** 当前权威规范见 [`docs/product/00_INDEX.md`](../product/00_INDEX.md)。
+>
+> 日期：2026-08-10
+>
+> 工作区：`F:\AI-GAME`
+>
+> 历史依据：已被 2026-08-20 vNext 规范替换并删除的旧 `docs/NEW/docs/` 设计包。本文只保留当时现状证据，不再定义产品边界；当前规范见 `docs/product/00_INDEX.md`。
+>
+> 状态：`DONE — STOP`
+>
 > 本文只记录现状与证据，不决定 Phase 1 的迁移切口。
 
 ## 1. 本施工单

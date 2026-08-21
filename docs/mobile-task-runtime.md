@@ -1,5 +1,7 @@
 # Generic Mobile Task Runtime
 
+> **CURRENT COMPATIBILITY ENGINE.** This document describes the existing MobileTask execution path retained during migration. It does not define the vNext product entry or canonical experience contract. See [`product/00_INDEX.md`](product/00_INDEX.md).
+
 ## Product scope
 
 AI-GAME is a general, local phone Operator and generic `ApplicationRuntime`

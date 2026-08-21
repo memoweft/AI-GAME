@@ -1,5 +1,7 @@
 # Phase 5 Week 4: DeviceLeaseManager 实现总结
 
+> **历史 Foundation 施工证据，不是当前产品路线图。** 当前权威规范见 [`docs/product/00_INDEX.md`](docs/product/00_INDEX.md)。
+
 **完成时间**: 2025-01-XX  
 **状态**: ✅ 已完成
 

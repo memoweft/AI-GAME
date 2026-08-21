@@ -6,6 +6,7 @@ models/
 cache/
 logs/
 sessions/
+session.jsonl
 screenshots/
 tmp/
 

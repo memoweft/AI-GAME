@@ -1,12 +1,14 @@
 # Phase 4 — Action / Verify / Commit Spine
 
+> **历史 Foundation 施工证据，不是当前产品路线图。** 当前权威规范见 [`docs/product/00_INDEX.md`](../product/00_INDEX.md)。
+
 > 状态：AUTOMATED ISOLATED SPINE COMPLETE — NO LIVE DEVICE ACTIVATION
 >
 > 日期：2026-08-11
 >
 > Store schema：revision 3
 >
-> 依据：`PHASE_1_DATA_MODEL_DESIGN.md` §7–§12、§18；`07_OBSERVATION_ACTION_VERIFY.md`；`08_RECOVERY_CHECKPOINT_LONG_TASKS.md`
+> 历史依据：`PHASE_1_DATA_MODEL_DESIGN.md` §7–§12、§18；旧设计输入 `docs/NEW/docs/07_OBSERVATION_ACTION_VERIFY.md` 与 `docs/NEW/docs/08_RECOVERY_CHECKPOINT_LONG_TASKS.md` 已从当前工作树删除，可从 Git 证据快照 `135fb9f7ff7dd7174d5ac293966bb1eba84dfbc7` 恢复；这些文件不再是当前产品权威。
 
 ## 1. 目标与边界
 

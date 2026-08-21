@@ -1,5 +1,7 @@
 # Runtime and ownership layout
 
+> **CURRENT DEPLOYMENT LAYOUT.** Paths and ownership facts remain useful until migrated, but the target product and roadmap are defined in [`product/`](product/00_INDEX.md). Separate current databases do not freeze separate user-facing products.
+
 ## Windows console runtime
 
 The console is the current runnable product boundary. It is Windows-native and

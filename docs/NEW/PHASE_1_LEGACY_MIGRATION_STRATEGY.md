@@ -1,5 +1,7 @@
 # Phase 1 — Legacy Migration Strategy
 
+> **历史 Foundation 设计，不是当前产品路线图。** 如与当前规范冲突，以 [`docs/product/00_INDEX.md`](../product/00_INDEX.md) 为准。
+
 > 状态：FROZEN DESIGN（设计冻结，未再修改）  
 > 日期：2026-08-10  
 > 迁移执行状态：EXECUTED PER FROZEN STRATEGY（2026-08-20，Phase 7 完成；行级迁移明确不在范围内，见 §16）

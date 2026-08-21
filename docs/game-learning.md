@@ -1,5 +1,7 @@
 # Bounded game learning
 
+> **LEGACY BOUNDED CAPABILITY.** The `stzb-tutorial-v1` scope and its business-action restrictions apply only to this existing LearningJob API. They do not define the universal GoalRun autonomy policy. The vNext learning contract is [`product/04_AUTONOMY_AND_LEARNING.md`](product/04_AUTONOMY_AND_LEARNING.md).
+
 ## Current conclusion
 
 The primary one-sentence path for Android and game objectives is now

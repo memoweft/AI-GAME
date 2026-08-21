@@ -1,5 +1,7 @@
 # Phase 6 Week 4: SSE 事件流 + 客户端投影 + 控制 UI
 
+> **历史 Foundation 施工证据，不是当前产品路线图。** 当前权威规范见 [`docs/product/00_INDEX.md`](docs/product/00_INDEX.md)。
+
 **日期**: 2026-08-20
 **契约依据**: `docs/NEW/PHASE_1_GATEWAY_CONTRACT_DESIGN.md` §10/§11/§13（DESIGN FROZEN）
 **前置**: Week 3 完成（规范 HTTP API + 错误模型，回归 672 passed）

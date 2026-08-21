@@ -1,5 +1,7 @@
 # General mobile-agent console architecture
 
+> **CURRENT COMPONENT DESCRIPTION, NOT THE vNEXT PRODUCT AUTHORITY.** This document describes the presently implemented console and split workspaces. The target one-goal product architecture is defined by [`product/00_INDEX.md`](product/00_INDEX.md). Statements here that there is no universal router describe a current gap, not a frozen future boundary.
+
 ## Product boundary
 
 AI-GAME is a Windows-native, loopback-only control plane and browser UI for a

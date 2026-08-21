@@ -1,5 +1,7 @@
 # Phase 2 — Runtime Kernel Persistent Spine
 
+> **历史 Foundation 施工证据，不是当前产品路线图。** 当前权威规范见 [`docs/product/00_INDEX.md`](../product/00_INDEX.md)。
+
 执行日期：2026-08-10
 
 状态：`PHASE 2 DONE — STOP`

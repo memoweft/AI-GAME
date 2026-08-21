@@ -1,5 +1,7 @@
 # Phase 6 集成阶段: 契约 §17 全清单验收 + 全量回归
 
+> **历史 Foundation 验收证据，不是当前产品路线图。** 当前权威规范见 [`docs/product/00_INDEX.md`](docs/product/00_INDEX.md)。
+
 **日期**: 2026-08-20
 **契约依据**: `docs/NEW/PHASE_1_GATEWAY_CONTRACT_DESIGN.md` §17（前后端联调验收，DESIGN FROZEN）
 **计划依据**: `PHASE_6_GATEWAY_CONTRACT_PLAN.md` §2 集成阶段

@@ -1,5 +1,7 @@
 # Phase 5 Week 5：Deadline 保护（Lease 绝对截止）
 
+> **历史 Foundation 施工证据，不是当前产品路线图。** 当前权威规范见 [`docs/product/00_INDEX.md`](../product/00_INDEX.md)。
+>
 > 状态：✅ 已完成
 > 日期：2026-08-19
 > 前置：Week 4 设备独占（Lease 基础）已完成；`runtime_device_leases` 表（Schema v4）

@@ -1,5 +1,7 @@
 # Phase 5 Week 6：管理 UI/API（Lease 状态查询与手动干预）
 
+> **历史 Foundation 施工证据，不是当前产品路线图。** 当前权威规范见 [`docs/product/00_INDEX.md`](../product/00_INDEX.md)。
+>
 > 状态：✅ 已完成
 > 日期：2026-08-19
 > 前置：Week 4 设备独占（Lease + 后台清理）、Week 5 Deadline 保护已完成（Schema v5）

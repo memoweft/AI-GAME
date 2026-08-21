@@ -1,5 +1,7 @@
 # Phase 5 — Device Ownership Implementation Plan
 
+> **历史 Foundation 设计，不是当前产品路线图。** 如与当前规范冲突，以 [`docs/product/00_INDEX.md`](../product/00_INDEX.md) 为准。
+
 **状态**: DESIGN DRAFT  
 **日期**: 2026-08-17  
 **依据**: `PHASE_1_DEVICE_OWNERSHIP.md` (FROZEN DESIGN)  

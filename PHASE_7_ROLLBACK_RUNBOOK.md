@@ -1,5 +1,7 @@
 # Phase 7 回滚 Runbook（Legacy 切流）
 
+> **历史 Foundation 回滚手册。** 仅在维护旧切流机制时使用；当前产品路线图见 [`docs/product/00_INDEX.md`](docs/product/00_INDEX.md)。
+>
 > 适用：`AI_GAME_RUNTIME_MODE` 驱动的三阶段切流（LEGACY → DRAINING → KERNEL_ACTIVE）。
 > 原则：**模式切换非破坏性**（不删数据），回滚 = 配置回退 + （如需）快照恢复 + 验证。
 > 配套文档：`PHASE_7_LEGACY_CUTOVER_PLAN.md`（设计与验收）。

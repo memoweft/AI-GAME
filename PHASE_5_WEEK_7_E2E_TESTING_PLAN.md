@@ -1,5 +1,7 @@
 # Phase 5 Week 7: 端到端集成测试计划
 
+> **历史 Foundation 测试记录，不是当前产品路线图。** 当前权威规范见 [`docs/product/00_INDEX.md`](docs/product/00_INDEX.md)。
+
 **目标**: 验证 DeviceExecutionLease 完整生命周期和恢复流程  
 **状态**: ✅ 完成（Day 1-5 全部完成，2026-08-19 收官）  
 **预计时间**: 3-5 天

@@ -1,141 +1,128 @@
-# AI-GAME Domain Context
+# AI-GAME canonical domain context
 
-AI-GAME is a general mobile intelligent-agent console. It accepts a natural-language objective, maintains durable progress, uses a local GUI model to understand and operate the current screen, verifies effects from fresh observations, changes strategy when progress stalls, and reuses evidence-backed experience. Games, content publishing, and Soul dating automation are application capabilities of the same product; no single application defines the product boundary.
+> Product authority: `docs/product/00_INDEX.md`
+>
+> This context replaces the previous module-first domain glossary.
 
-## General mobile-agent work
+AI-GAME is a local-first universal mobile AI operator. A user states an outcome; the platform discovers and configures available capabilities, plans, operates the phone, verifies effects, recovers, learns from evidence, and reports an honest result. Games, social applications, settings, shopping, and other apps are target environments, not separate products.
 
-**MobileTask**:
-A durable user objective executed through one target device. A MobileTask owns progress and recovery across many atomic GUI actions; it is not a chat message, legacy control-plane Run, or LearningJob.
-_Avoid_: Run, turn, workflow instance
+## Product-level terms
 
-**TaskPlan**:
-A revisioned decomposition of a MobileTask into ordered, observable Subgoals. The first implementation may ask the same GUI model to plan, execute, and verify under different role prompts; TaskPlan does not imply several resident Agent processes.
-_Avoid_: Chain of thought, model transcript
+### GoalRun
 
-**Subgoal**:
-One externally observable progress checkpoint within a TaskPlan, such as opening an application section or claiming a reward. A Subgoal is complete only after verification against a fresh observation.
-_Avoid_: Click, action, assumption
+The one user-visible durable execution object. It owns the original goal, revisioned constraints, success criteria, current binding, execution status, orthogonal control state, progress, verified facts, waiting reason, result, and evidence projection.
 
-**TaskState**:
-The durable current goal, plan revision, active Subgoal, completed and remaining Subgoals, retry and reflection counts, current phase, and terminal result of a MobileTask. Chat history alone is not TaskState.
-_Avoid_: Conversation context, action history
+Its `execution_status` includes non-terminal `WAITING_CONFIGURATION`, `WAITING_EXTERNAL`, and `CANDIDATE_COMPLETE` states in addition to active phases and honest terminal outcomes. `CANDIDATE_COMPLETE` means the bound executor ended its generated plan but independent original-goal verification is still pending; it cannot promote successful experience.
 
-**ActionAttempt**:
-One atomic proposed device action together with its before observation, transport receipt, after observation, and verification. Transport acceptance is not action or Subgoal success.
-_Avoid_: Successful click, completed step
+Its separate `control_state` is `AUTOMATED`, `PAUSE_REQUESTED`, `PAUSED`, `TAKEOVER`, or `STOP_REQUESTED`. Pause/takeover fence automation without pretending the business goal succeeded or failed; a settled stop produces terminal `CANCELLED` execution status.
 
-**TaskVerifier**:
-A role that compares admissible before and after observations against the active Subgoal and returns success, failure, or uncertainty with a short evidence-grounded reason. It may use the same configured GUI model under a verifier prompt.
-_Avoid_: Executor acknowledgement, image changed flag
+Avoid using `MobileTask`, `ApplicationInstance`, `LearningJob`, `Run`, `Workflow`, or a chat turn as a synonym. Those are current or internal capability objects.
 
-**Reflection**:
-A bounded, persisted change of strategy after a failed or repeated no-progress verification. Reflection must explain what failed and alter the next approach; appending the same action again is not Reflection.
-_Avoid_: Retry, hidden reasoning, log message
+### GoalSpecification
 
-**SkillMemory**:
-Versioned, application-scoped reusable procedure knowledge distilled only from verified Task or Learning evidence. A SkillMemory provides hints and checkpoints to a future run while the current screen remains authoritative.
-_Avoid_: Macro replay, raw trajectory, model weight
+A versioned structured interpretation of the original goal: goal family, application clues, finite/repeatable/long-lived nature, continuation policy, non-terminal notification milestones, observable success criteria, external outcomes, environment requirements, and unavoidable gates. The original user text remains authoritative. The confirmed long-lived default is continuous-until-explicit-stop; candidate notification alone never pauses or completes it.
 
-**ApplicationProfile**:
-A versioned binding of an application or game to its package, task vocabulary, admissible actions, verifier, skills, and optional long-running policy. `soul-dating` is one ApplicationProfile; it does not redefine MobileTask, ChatMode, Target, or AI-GAME itself.
-_Avoid_: Product mode, hard-coded page
+### CapabilityBindingPlan
 
-## Module boundaries
+The persisted decision that selects orchestrator, visual operator, verifier, device or specialized owner, short/long-lived execution capability, experience scope, fallbacks, and configuration actions. Classification alone may not trigger a physical action.
 
-- The generic Mobile Task Runtime owns TaskState, planning roles, verification, bounded reflection, SkillMemory retrieval, cancellation, and restart recovery.
-- GUI-Owl plus the Android executor remains the local visual-action core. Mobile-Agent is a reference implementation and parts library, not a required runtime dependency.
-- Chat owns user dialogue, mid-turn instruction revisions, and optional delegation to a MobileTask. A Chat Turn is not the durable task itself.
-- Game Learning owns evidence-backed trajectory collection and PolicyMemory promotion. It is reusable by the generic Runtime but remains distinct from ordinary task completion.
-- Targets and device leases remain generic physical resources.
-- Application integrations own application-specific policy and projections. The Soul integration remains an independent long-running application backed by `dating-copilot`; it is not a replacement for generic Chat, Learning, or Targets.
-- Legacy Workflow, Run, and Approval records that have no executor are compatibility data, not evidence that work is executing.
+### Stage
 
-AI-GAME Learning records bounded, evidence-backed attempts to improve reusable GUI policy knowledge. It exists to distinguish collected trajectories, verified outcomes, and promoted policy knowledge from model-weight training or broad game-playing capability.
+One current observable sub-outcome with an evidence-based completion condition. A Stage is not a click, coordinate list, model thought, or arbitrary workflow node.
 
-## Learning work
+### Observation
 
-**LearningProfile**:
-A versioned scope that fixes the permitted application situation, preconditions, action and time budgets, evidence rules, outcome verifier, and policy compatibility domain for learning work.
-_Avoid_: Game preset, universal skill
+A time- and target-bound factual snapshot such as screenshot, package/activity, UI tree, orientation, device state, and obstruction/loading state. A stale Observation cannot authorize a new physical action.
 
-**LearningJob**:
-An operator-visible, durable request to learn under one LearningProfile. A LearningJob owns its processing phase, terminal result, and exactly one bounded LearningEpisode in the first version.
-_Avoid_: Training job, run
+### ActionTransition
 
-**LearningEpisode**:
-One finite attempt to collect a sequence of GUI interactions and decide what, if anything, may be learned from them. Ending an episode does not by itself mean the objective succeeded or policy knowledge changed.
-_Avoid_: Match, gameplay session, training run
+The evidence chain joining a before Scene, one semantic/grounded action, transport fact, after Scene, immediate outcome, and optional recovery. Transport acceptance is never outcome success.
 
-**Transition**:
-One ordered ledger fact connecting an observation, a proposed or transported atomic action, the following observation, and their evidence references. A Transition records what was observed and attempted; it does not infer success from transport acceptance.
-_Avoid_: Step, click log
+### GoalCompletionVerification
 
-**Phase**:
-The current processing position of a LearningJob, independent of its eventual result, verified outcome, and policy state.
-_Avoid_: Result, outcome, status
+An independent comparison of the original goal's frozen success criteria with verified facts and admissible external outcomes. Completion of all Planner-generated Stages is insufficient by itself.
 
-**Result**:
-The terminal learning disposition of a LearningJob: learned, not learned, failed, stopped, or stopped with unresolved physical uncertainty.
-_Avoid_: Phase, outcome
+### EnvironmentGate
 
-## Evidence and outcomes
+A durable `WAITING_EXTERNAL` condition that software cannot currently resolve, such as first-time USB authorization, missing credential, CAPTCHA/biometric confirmation, remote outage, elapsed time, or incoming event. Satisfying the gate resumes the same GoalRun.
 
-**Evidence**:
-Locally retained, integrity-addressed material that can support or refute a claim about a Transition or episode outcome. Evidence is not the claim itself.
-_Avoid_: Proof, success flag
+### ConfigurationGate
 
-**EvidenceGate**:
-The rule that no outcome, reward, or policy promotion may become positive merely because an action was proposed, transported, or followed by a changed image.
-_Avoid_: Transport check
+A durable `WAITING_CONFIGURATION` condition for a required runtime capability that is not ready and cannot yet be repaired or selected automatically. It preserves the same GoalRun and differs from a user pause or an external-world wait.
 
-**TransportAcceptance**:
-Confirmation that the device transport accepted an atomic input request. It says nothing about application-level completion, effect, or correctness.
-_Avoid_: Action success, outcome confirmation
+## Autonomy and learning terms
 
-**OutcomeVerifier**:
-A profile-specific evaluator that classifies an episode only from admissible post-action evidence and explicit uncertainty rules.
-_Avoid_: Success detector, model opinion
+### ExperienceEpisode
 
-**Outcome**:
-The evidence classification of an episode: unknown, confirmed success, confirmed failure, or unconfirmed. Outcome is independent of whether the job failed operationally or produced policy knowledge.
-_Avoid_: Result, reward
+One bounded execution attempt under a GoalSpecification revision, environment/model/policy binding, and frozen criteria. It can end in success, failure, partial, waiting, cancellation, or uncertainty.
 
-**RewardSignal**:
-A bounded learning signal derived from an evidence-gated Outcome and selected Transition facts. It is not a user score, business result, or model-weight update.
-_Avoid_: Win, model loss, ground truth
+### SceneState
 
-## Reusable policy knowledge
+A semantically retrievable representation of one Observation, including application identity, scene, visible anchors, normalized regions, obstruction, device/UI compatibility, and evidence reference. Screenshot hash alone is not a reusable scene.
 
-**TrajectoryDistillation**:
-The deterministic or model-assisted reduction of an evidence-backed Transition ledger into reusable policy knowledge. It does not update model weights.
-_Avoid_: Training, fine-tuning
+### OutcomeSignal
 
-**PolicyMemory**:
-Versioned, profile-scoped reusable knowledge distilled from eligible trajectories. A stored PolicyMemory is immutable; later changes produce a new version.
-_Avoid_: Model, checkpoint, global memory
+An evidence-linked immediate or delayed signal: success, failure, no progress, wrong scene, recovered, task result, later response/no-response, or user approval/rejection. It is independent of transport status.
 
-**PolicyCandidate**:
-A future proposed PolicyMemory or weight-adapter version that is stored for separate evaluation but is not active for subsequent learning episodes. The first LearningJob implementation does not persist candidates.
-_Avoid_: Learned policy, active memory
+### ExperienceCandidate
 
-**Promotion**:
-The evidence-gated state change that makes a new version active for its compatible scope. In the first LearningJob implementation, eligible trajectory distillation and PolicyMemory promotion are one atomic transaction; a future explicit PolicyCandidate still requires separate validation and never activates merely because it exists.
-_Avoid_: Save, publish, candidate creation, unverified auto-learn
+A scoped, evidence-backed proposed positive action rule, known failure rule, or recovery rule. A candidate is not active policy and may be validated, promoted, rejected, deprecated, or superseded.
 
-**PolicyState**:
-The policy disposition of a LearningJob: unchanged, candidate, promoted, or rejected. The first implementation emits unchanged or promoted; candidate and rejected are reserved for future separately persisted candidates. PolicyState is separate from the job Result and episode Outcome.
-_Avoid_: Result, outcome
+### PolicyRevision
 
-## Profile scope and future training
+An immutable set of validated, scene-conditioned experience rules with compatibility, confidence, provenance, active head, and rollback. It is not a model checkpoint or coordinate macro.
 
-**STZBTutorialProfile**:
-The versioned, low-frequency tutorial scope for the `stzb-tutorial-v1` compatibility profile. It is a constrained evidence-collection profile, not a claim of general competence in or endorsement by the game it names.
-_Avoid_: STZB player, game mastery
+### Learning
 
-**TrainingJob**:
-A future, explicitly authorized offline weight-training process that consumes a frozen, reviewed dataset. It is not a LearningJob and never executes device actions.
-_Avoid_: Learning job, episode
+Measurable repeat-run improvement attributable to retrieved experience: better verified completion, fewer wrong/no-effect actions, faster recovery, lower action/time cost, and no increase in false completion. A memory row, prompt reuse, or model claim alone is not learning.
 
-**LoRAAdapter**:
-A future versioned model-weight artifact produced outside a LearningEpisode and loaded only through a separately governed model adapter. It is not PolicyMemory and is absent from the first version.
-_Avoid_: Policy memory, learned trajectory
+## Runtime invariants
+
+- One physical target has one active mutation owner.
+- The user can stop or take over.
+- Revision, control, target, ownership, and current Observation are checked before action.
+- Fresh after evidence is required for effect claims.
+- Verify precedes Commit.
+- Uncertain physical effects are reconciled, not replayed.
+- Recovery is bounded; no-progress cannot click forever.
+- Original Goal coverage is verified independently before completion or successful experience promotion.
+- Current evidence outranks old experience.
+- Experience is isolated by user/account/person/application/goal and compatibility scope.
+
+These are correctness constraints even in `development_open` autonomy. Application-specific keyword bans are optional policy and are not generic Runtime invariants.
+
+## Current implementation terms during migration
+
+### MobileTaskRuntime
+
+The current compatibility engine with the real general Android natural-language loop. It remains active until RuntimeKernel proves an equivalent business GoalRun and rollback.
+
+### RuntimeKernel
+
+The target canonical task/evidence/control runtime. Current code has strong primitives but lacks a default production autonomous worker, complete model-role binding, and normal-launcher business-goal evidence.
+
+### ApplicationRuntime
+
+An internal capability for long-lived observation/policy/owner/verification cycles. Soul is its current production profile; it is not a primary product entry.
+
+### GameLearning
+
+A legacy bounded learning capability and source of transition/policy provenance concepts. Experience learning becomes part of ordinary GoalRun execution; the user should not need to choose a LearningJob.
+
+### SkillMemory / PolicyMemory / Soul reply learning
+
+Existing separate memory mechanisms. They are legacy sources or adapters, not the canonical vNext Experience Service. Their existence does not prove repeat-run improvement.
+
+### Profile
+
+An internal bundle of capability metadata, application knowledge, verifier, owner binding, or optional policy. It is not a product mode and does not have authority to redefine the universal user's goal.
+
+## Model roles
+
+Current target assumption:
+
+- local Qwen3.8 27B: goal orchestration, criteria, planning, routing, reflection, memory reasoning, and language;
+- local GUI-Owl: visual grounding and one atomic phone action;
+- Runtime/hybrid verifiers: factual immediate and final decisions.
+
+Core contracts depend on capabilities, not model names. The confirmed baseline is Qwen3.8 27B for orchestration and GUI-Owl for visual phone actions; a visual-capable Qwen may replace the visual binding only after comparative evidence. See `docs/product/05_MODELS_AND_AUTO_CONFIGURATION.md` and decision D11.

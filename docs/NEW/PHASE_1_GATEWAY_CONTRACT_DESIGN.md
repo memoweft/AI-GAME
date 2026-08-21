@@ -1,5 +1,7 @@
 # Phase 1 — Runtime Gateway Contract Design
 
+> **历史 Foundation 设计，不是当前产品路线图。** 如与当前规范冲突，以 [`docs/product/00_INDEX.md`](../product/00_INDEX.md) 为准。
+
 > 状态：FROZEN DESIGN  
 > 日期：2026-08-10  
 > API 实现状态：NOT STARTED

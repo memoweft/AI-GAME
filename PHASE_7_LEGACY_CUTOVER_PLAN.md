@@ -1,5 +1,7 @@
 # PHASE_7 实施计划（Legacy 迁移）
 
+> **历史 Foundation 切流计划，不是当前产品路线图。** 当前权威规范见 [`docs/product/00_INDEX.md`](docs/product/00_INDEX.md)。
+>
 > 目标：三阶段平滑切换，零停机迁移（对齐 `RUNTIME_KERNEL_ROADMAP_STATUS.md` Phase 7）。
 > 前置：Phase 6 已完成（Gateway 契约 + SSE + 客户端投影 + 控制 UI，§17 全清单 10/10，2026-08-20）。
 > 本文档为 Phase 7 的实施计划与验收基线；每步配自动化测试并保持全量回归绿。

@@ -1,5 +1,7 @@
 # Game-learning HTTP contract v1
 
+> **V1 COMPATIBILITY CONTRACT.** This remains authoritative for existing `/api/v1/learning/*` behavior only. Its bounded STZB profile is not a platform-wide restriction and is not the vNext universal goal contract. See [`../docs/product/00_INDEX.md`](../docs/product/00_INDEX.md).
+
 This contract defines the loopback control-plane adapter for bounded game learning. It extends, but does not weaken, the local-host and write-header rules in [`control-plane-v1.md`](./control-plane-v1.md).
 
 GameLearning is a retained advanced/experimental Interface, not a first-level

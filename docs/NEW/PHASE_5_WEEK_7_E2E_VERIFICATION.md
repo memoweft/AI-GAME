@@ -1,5 +1,7 @@
 # Phase 5 Week 7: 端到端集成测试报告
 
+> **历史 Foundation 验证证据，不是当前产品路线图。** 当前权威规范见 [`docs/product/00_INDEX.md`](../product/00_INDEX.md)。
+
 **状态**: ✅ 完成（2026-08-18 ~ 2026-08-19，Day 1-5）  
 **关联计划**: `PHASE_5_WEEK_7_E2E_TESTING_PLAN.md`（仓库根目录）  
 **关联实现**: `docs/NEW/PHASE_5_DEVICE_OWNERSHIP_IMPL.md`（Week 4 DeviceLeaseManager 设计）

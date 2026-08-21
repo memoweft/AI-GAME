@@ -1,5 +1,7 @@
 # Phase 1 — Data Model Design
 
+> **历史 Foundation 设计，不是当前产品路线图。** 如与当前规范冲突，以 [`docs/product/00_INDEX.md`](../product/00_INDEX.md) 为准。
+
 > 状态：FROZEN DESIGN  
 > 日期：2026-08-10  
 > 数据库实现：NOT STARTED  
@@ -464,4 +466,3 @@ Task 1 ── * ClientMessage
 ## 20. 状态
 
 `DESIGN FROZEN — DATABASE NOT CREATED`
-

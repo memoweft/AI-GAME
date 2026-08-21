@@ -1,5 +1,7 @@
 # Phase 4 Recovery Path Verification
 
+> **历史 Foundation 验证证据，不是当前产品路线图。** 当前权威规范见 [`docs/product/00_INDEX.md`](../product/00_INDEX.md)。
+
 **Status**: Completed  
 **Date**: 2026-08-17  
 **Tests**: 4 new recovery scenarios + 35 existing kernel tests passing

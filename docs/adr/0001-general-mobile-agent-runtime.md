@@ -1,5 +1,7 @@
 # ADR 0001: Keep AI-GAME general through ApplicationRuntime Profiles
 
+> **PARTIALLY SUPERSEDED PRODUCT INFORMATION ARCHITECTURE.** The ownership and adapter findings in this ADR remain historical/current implementation constraints. Any decision exposing four separate primary product entries is superseded by [`../product/00_INDEX.md`](../product/00_INDEX.md); Profiles are internal capabilities under the universal GoalRun.
+
 ## Status
 
 Accepted on 2026-08-10; updated to reflect the landed ApplicationRuntime and

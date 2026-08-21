@@ -1,5 +1,7 @@
 # Phase 7 集成阶段：Legacy 切流验收 + 全量回归
 
+> **历史 Foundation 验收证据，不是当前产品路线图。** 当前权威规范见 [`docs/product/00_INDEX.md`](docs/product/00_INDEX.md)。
+
 **日期**: 2026-08-20
 **计划依据**: `PHASE_7_LEGACY_CUTOVER_PLAN.md`（§2 设计、§3 分周、§6 验收标准）
 **回滚依据**: `PHASE_7_ROLLBACK_RUNBOOK.md`

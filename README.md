@@ -1,5 +1,9 @@
 # AI-GAME
 
+> **产品规范入口**：当前唯一权威产品定义、目标架构、实施路线、验收规则与 AI 施工单位于 [`docs/product/00_INDEX.md`](docs/product/00_INDEX.md)。本 README 主要描述当前已经实现的组件和使用方式；如与 `docs/product/` 冲突，以新规范为准。
+>
+> **截至 2026-08-20 的审计阶段**：历史 Runtime Kernel Foundation Phase 0-7 已形成代码和测试底座，但 Universal Agent Track U1-U9 尚未实施。审计时没有 universal goal router，默认运行路径仍是 Legacy MobileTask；不要把旧路线图的“全部完成”解释为通用手机 AI 平台已经完成。运行模式会变化，实施前必须重新核对 [`docs/product/02_CURRENT_STATE.md`](docs/product/02_CURRENT_STATE.md)，不能只信本段快照。
+
 AI-GAME 是一个通用的本机手机智能体平台。`ApplicationRuntime` 为应用 Profile 提供持久实例、顺序 observation/policy/owner/verification 周期、revision fence、no-replay 恢复和经验门控；默认用户路径仍是“一句话开始”（MobileTask），用于提交跨多个原子 GUI 动作的长时间目标。
 
 `F:\dating-copilot` 保持独立，并且是 Soul **唯一的设备执行与物理 ledger owner**。AI-GAME 通过 `profile_id=soul-reply-v1` 负责长期应用编排、本地视觉、云端临时回复和学习 lineage；它只通过 loopback owner Interface 请求 observation、reserve、dispatch、inspect 和 managed scheduler desired state，不复制项目代码、数据库或 ADB 控制逻辑。
@@ -11,7 +15,7 @@ Soul 只是 AI-GAME 支持的一个应用，不是产品本身。Mobile-Agent �
 - 在“一句话开始”中提交通用 Android MobileTask，查看持久计划、子目标、动作尝试、验证、Reflection 与技能版本；
 - 执行中追加的指令会递增 `input_revision`；过时的模型决策不能跨过最后的设备下发 fence，但已经下发的原子动作无法撤回；
 - 同一本地 GUI-Owl endpoint 顺序完成规划、单动作提案、BEFORE 单图摘要、AFTER 单图摘要、零图片的摘要对比验证和有界 Reflection，不启动常驻角色 Agent，也不在一次模型请求中传两张图；
-- 连续 3 次无可见进展会持久化 Reflection 并改变策略；尺寸与 PNG 字节完全相同的 BEFORE/AFTER 画面只会在 Verifier **未确认 Subgoal 已满足**时把伪进展压成 `progress=false`，不会单独构成失败证据；若同一静态终态已经由可见事实确认满足，则保留 `satisfied=true / progress=true`；只有全部 Subgoal 被新鲜证据验证后才能完成任务并推进版本化 SkillMemory；
+- 连续 3 次无可见进展会持久化 Reflection 并改变策略；尺寸与 PNG 字节完全相同的 BEFORE/AFTER 画面只会在 Verifier **未确认 Subgoal 已满足**时把伪进展压成 `progress=false`，不会单独构成失败证据；若同一静态终态已经由可见事实确认满足，则保留 `satisfied=true / progress=true`；当前实现会在 Planner 生成的全部 Subgoal 被验证后把任务标成完成并推进 SkillMemory，但尚无独立验证器把这些 Subgoal 与原始用户目标逐项核对，因此存在已记录的假完成/错误记忆缺陷，详见 [`docs/product/02_CURRENT_STATE.md`](docs/product/02_CURRENT_STATE.md)；
 - 默认一句话入口会在内部推导稳定的自动技能作用域，普通用户无需填写 `skill_id`；显式旧 `skill_id` 仍兼容，但与自动作用域隔离；
 - MobileTask 使用一个内部队列 worker，并在整个任务会话期间持有 `DeviceExecutionLease`；Chat、Game Learning 与 MobileTask 不会在同一进程内交错操作同一个设备；
 - 正常关闭会拒绝新写入、等待已下发动作完成结算，并把未下发工作留在安全检查点；重启恢复按固定优先级处理：未收口物理 `act` 意图先终结为 `uncertain / restart_open_intent` 且永不重放，否则已接受停止的任务成为 `stopped`，其余安全活动检查点才回到 `queued`；
@@ -22,7 +26,7 @@ Soul 只是 AI-GAME 支持的一个应用，不是产品本身。Mobile-Agent �
 - 选择“云端对话 + 本地执行”：云端模型生成用户回复和设备目标，本地 GUI-Owl 根据当前截图连续执行点击、长按、滑动、普通文本输入、系统返回/主页、等待和结束；
 - 每一步都执行“新截图 → 本地模型提出一个动作 → ADB 传输 → 动作后新截图”，回复状态和设备执行状态分别显示；
 - 当前测试模式不逐步弹审批，也不根据页面内容设置敏感类别 hard-stop；账号凭据、验证码/生物识别、实名/身份核验、付款、CAPTCHA、系统权限、法律确认或无法可靠判断的页面都不会自动触发暂停；
-- 设备循环没有固定动作步数上限，只在用户主动停止、设备/ADB 或模型异常，或者本地模型返回 `terminate` 时结束；
+- 当前设备循环没有固定动作步数上限，只在用户主动停止、设备/ADB 或模型异常，或者本地模型返回 `terminate` 时结束；这是现状缺口，vNext 要求加入有界的动作、时间和恢复预算，不能把无限循环当作目标能力；
 - 若兼容旧版 GUI-Owl 的 `interact` 输出，控制台只记录一次重定向并要求模型根据新画面继续规划，不会转为人工暂停；
 - 发现并展示当前 Android ADB 目标、连接类型、能力、模型/执行器状态、智能任务进度和活动事件；
 - 通过 Soul Application 创建或恢复 `soul-reply-v1` 长期实例，追加语气要求、暂停、恢复或停止；dating-copilot managed scheduler 负责全天匹配和匹配后即时开场，ApplicationRuntime 负责普通回复与延迟学习；原始截图只交给本地视觉，云端只接收文字 transcript 与结构化本地视觉事实，最终发送仍由 dating-copilot 在同轮 conversation revision 下复核和执行；

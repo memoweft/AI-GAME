@@ -1,5 +1,7 @@
 # Phase 7 切流演练：真机 Legacy → Draining → Kernel_Active → 回滚
 
+> **历史 Foundation 本机演练证据，不是生产部署记录，也不是当前产品路线图。** 当前权威规范见 [`docs/product/00_INDEX.md`](docs/product/00_INDEX.md)。
+
 **日期**: 2026-08-20
 **计划依据**: `PHASE_7_ROLLBACK_RUNBOOK.md`（§0 事实速查、§1 切流前、§2 回滚决策点、§3 配置回退、§4 数据回滚、§5 验证清单）
 **前置**: Phase 7 Week 1–3 + 集成（708 passed，`PHASE_7_INTEGRATION_ACCEPTANCE.md`）、Kernel Lease 接线 + 场景 10 真机冒烟（718 passed）
