@@ -9,6 +9,7 @@ TaskStatus = Literal[
     "queued",
     "planning",
     "running",
+    "paused",
     "stopping",
     "completed",
     "failed",
@@ -19,6 +20,7 @@ SubgoalStatus = Literal["pending", "active", "completed"]
 InputLifecycle = Literal["accepted", "applied"]
 DecisionKind = Literal["act", "finish", "terminate"]
 TransportStatus = Literal["not_sent", "accepted", "rejected", "uncertain"]
+ProgressDirectiveKind = Literal["replace_plan", "fail"]
 
 
 class MobileTaskError(RuntimeError):
@@ -293,6 +295,8 @@ class VerificationContext:
     after: Observation
     input_revision: int = 0
     owner_inputs: tuple[InputRevision, ...] = ()
+    plan_revision: int = 0
+    recent_attempts: tuple[ActionAttempt, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -306,6 +310,40 @@ class ReflectionContext:
     consecutive_no_progress: int
     recent_attempts: tuple[ActionAttempt, ...]
     skill_memory: SkillMemory | None
+
+
+@dataclass(frozen=True, slots=True)
+class TaskProgressDirective:
+    kind: ProgressDirectiveKind
+    reason: str
+    plan: PlanDraft | None = None
+    error_code: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.reason.strip():
+            raise ValueError("task progress directive reason must not be blank")
+        if self.kind == "replace_plan" and self.plan is None:
+            raise ValueError("replace_plan directive requires a PlanDraft")
+        if self.kind == "fail" and not (self.error_code or "").strip():
+            raise ValueError("fail directive requires an error code")
+        if self.kind == "replace_plan" and self.error_code is not None:
+            raise ValueError("replace_plan directive cannot carry an error code")
+        if self.kind == "fail" and self.plan is not None:
+            raise ValueError("fail directive cannot carry a plan")
+
+
+class TaskProgressController(Protocol):
+    """Serial, evidence-only progress hook; it never owns device dispatch."""
+
+    def bind(self, task_id: str, goal_run_id: str, goal: str) -> None: ...
+
+    def after_attempt(
+        self, state: MobileTaskState, attempt: ActionAttempt,
+    ) -> None: ...
+
+    def before_subgoal(
+        self, state: MobileTaskState, subgoal: Subgoal,
+    ) -> TaskProgressDirective | None: ...
 
 
 class TaskSession(Protocol):

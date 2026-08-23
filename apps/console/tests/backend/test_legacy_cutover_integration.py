@@ -28,6 +28,17 @@ _NOW = "2026-07-17T00:00:00.000000+00:00"
 
 def _build_app(tmp_path: Path, *, runtime_mode: str, **kwargs):
     settings = replace(build_settings(tmp_path), runtime_mode=runtime_mode)
+    if runtime_mode == "kernel_active":
+        adb_path = tmp_path / "adb.exe"
+        adb_path.write_bytes(b"test-adb")
+        settings = replace(
+            settings,
+            gui_executor_enabled=True,
+            adb_path=str(adb_path),
+            adb_serial="emulator-5554",
+            mobile_role_endpoint="http://127.0.0.1:9/v1/chat/completions",
+            mobile_role_model="test-model",
+        )
     return create_app(
         settings=settings,
         adb_discovery=AdbTargetDiscovery(env={"PATH": ""}),
@@ -107,7 +118,7 @@ def test_cutover_and_rollback_sequence(tmp_path: Path) -> None:
     def app_for(mode: str):
         return _build_app(tmp_path, runtime_mode=mode, mobile_task_runtime=FakeMobileTaskRuntime())
 
-    def post_task(client: TestClient) -> int:
+    def post_legacy_task(client: TestClient) -> int:
         return client.post(
             "/api/v1/tasks",
             headers=WRITE_HEADERS,
@@ -115,22 +126,32 @@ def test_cutover_and_rollback_sequence(tmp_path: Path) -> None:
         ).status_code
 
     with TestClient(app_for("legacy")) as client:
-        assert post_task(client) == 202
+        assert post_legacy_task(client) == 202
         assert client.get("/api/v1/runtime/mode").json()["mode"] == "legacy"
 
     with TestClient(app_for("draining")) as client:
-        assert post_task(client) == 403
+        assert post_legacy_task(client) == 403
         view = client.get("/api/v1/runtime/mode").json()
         assert view["draining"] is True
         assert view["legacy_writable"] is False
 
     with TestClient(app_for("kernel_active")) as client:
-        assert post_task(client) == 403
+        # The canonical /tasks path is now Gateway-owned.  A Legacy-only
+        # payload is rejected by that explicit contract, while direct Legacy
+        # physical writes are fenced.
+        assert post_legacy_task(client) == 400
+        direct = client.post(
+            "/api/v1/executor/actions",
+            headers=WRITE_HEADERS,
+            json={"target_id": "device-1", "action": "home"},
+        )
+        assert direct.status_code == 403
+        assert direct.json()["error"]["code"] == "LEGACY_DEVICE_WRITE_DISABLED"
         view = client.get("/api/v1/runtime/mode").json()
         assert view["kernel_active"] is True
         assert view["legacy_writable"] is False
 
     # 回滚：切回 legacy 后恢复可写（运维设 AI_GAME_RUNTIME_MODE=legacy 并重启）。
     with TestClient(app_for("legacy")) as client:
-        assert post_task(client) == 202
+        assert post_legacy_task(client) == 202
         assert client.get("/api/v1/runtime/mode").json()["mode"] == "legacy"

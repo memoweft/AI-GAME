@@ -1,5 +1,16 @@
 # Gameplay readiness boundary
 
+> **NON-CANONICAL DESIGN / ACCEPTANCE CANDIDATE.** This document preserves a
+> candidate future real-time gameplay evaluation. It is not current product or
+> execution authority. Canonical acceptance lives in
+> [`product/00_INDEX.md`](product/00_INDEX.md) and
+> [`product/07_ACCEPTANCE_AND_EVIDENCE.md`](product/07_ACCEPTANCE_AND_EVIDENCE.md).
+
+> [constraint-source: PRODUCT_SPEC; ref: `product/00_INDEX.md` section 1]
+> The G1-G4 candidates below do not activate, block, or change any U0-U9 work
+> order unless an authorized product decision later adopts them into the
+> canonical package.
+
 本文定义 AI-GAME 从当前 Android 离散 GUI 自动化走向“类王者荣耀简单游玩”的未来验收线。这里的“类王者荣耀”只描述双摇杆/技能按钮式移动战斗交互，不表示已适配、已认证或已通过任何具体商业游戏。
 
 > 当前结论：尚未达到游戏实时控制就绪。现有实现可以在“截图 → 一个动作 → 动作后截图”的无固定步数、串行闭环里导航普通 Android 页面，但没有高频本地控制、多点触控、连续视觉状态估计或 3–5 分钟游戏耐久证据。以下目标架构和验收项都是未来要求，不是当前能力声明。
@@ -21,7 +32,7 @@
 
 ## 当前基线：离散截图—动作闭环
 
-当前一级游戏路径是 MobileTaskRuntime。它持久化 TaskState、TaskPlan 和
+迁移期兼容游戏路径是 MobileTaskRuntime。它持久化 TaskState、TaskPlan 和
 Subgoal，接受任务中途 Input，并顺序调用同一个本地 GUI-Owl-compatible
 endpoint 承担 Planner、Executor、BEFORE 摘要、AFTER 摘要、Verifier 和
 Reflection。每个物理 intent 在下发前先持久化，最多调用一次 Windows ADB

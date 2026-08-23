@@ -597,6 +597,68 @@ class _SQLiteTaskStore:
             )
             return "stored"
 
+    def replace_plan_if_current(
+        self,
+        *,
+        task_id: str,
+        worker_token: str,
+        expected_plan_revision: int,
+        expected_active_subgoal_index: int,
+        draft: PlanDraft,
+        reason: str,
+    ) -> Literal["stored", "stale", "closed"]:
+        """Replace remaining semantic work before any next intent is persisted."""
+
+        now = _utc_now()
+        with self._connection(write=True) as connection:
+            row = self._task_row(connection, task_id)
+            if not self._worker_can_continue(row, worker_token):
+                return "closed"
+            if (
+                int(row["plan_revision"]) != expected_plan_revision
+                or int(row["active_subgoal_index"]) != expected_active_subgoal_index
+            ):
+                self._event(
+                    connection,
+                    task_id,
+                    "progress_replan_stale",
+                    {
+                        "expected_plan_revision": expected_plan_revision,
+                        "expected_active_subgoal_index": expected_active_subgoal_index,
+                    },
+                    now,
+                )
+                return "stale"
+            revision = expected_plan_revision + 1
+            connection.execute(
+                """
+                INSERT INTO mobile_task_plans(task_id, revision, subgoals_json, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (task_id, revision, _json(list(draft.subgoals)), now),
+            )
+            connection.execute(
+                """
+                UPDATE mobile_tasks
+                SET plan_revision = ?, active_subgoal_index = 0,
+                    no_progress_count = 0, detail = NULL, error_code = NULL,
+                    updated_at = ? WHERE task_id = ?
+                """,
+                (revision, now, task_id),
+            )
+            self._event(
+                connection,
+                task_id,
+                "progress_plan_replaced",
+                {
+                    "plan_revision": revision,
+                    "subgoal_count": len(draft.subgoals),
+                    "reason": reason[:1_000],
+                },
+                now,
+            )
+            return "stored"
+
     def finish_attempt(
         self,
         *,

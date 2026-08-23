@@ -2,11 +2,19 @@
 
 ## Status
 
-Accepted by product direction on 2026-08-20. Implementation is planned in Universal Agent Track U1-U9.
+Accepted by product direction on 2026-08-20. The decision remains accepted;
+implementation-status text below is a decision-time snapshot. Current progress
+is maintained in `../product/02_CURRENT_STATE.md` and
+`../product/06_IMPLEMENTATION_ROADMAP.md`.
 
 ## Context
 
-AI-GAME currently exposes separate MobileTask, ApplicationRuntime/Soul, GameLearning, Chat, Gateway, device, and settings concepts. The existing MobileTask loop can operate Android from natural language, while other domains provide useful long-lived, learning, or contract primitives. A normal user should not need to identify which internal module applies before stating a purpose.
+At decision time, AI-GAME exposed separate MobileTask,
+ApplicationRuntime/Soul, GameLearning, Chat, Gateway, device, and settings
+concepts. The existing MobileTask loop could operate Android from natural
+language, while other domains provided useful long-lived, learning, or contract
+primitives. A normal user should not need to identify which internal module
+applies before stating a purpose.
 
 The desired product is a universal local phone operator: the user gives an outcome; the platform discovers and configures capabilities, plans, acts, verifies, recovers, learns, and continues.
 

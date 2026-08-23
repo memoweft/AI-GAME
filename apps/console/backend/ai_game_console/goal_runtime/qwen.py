@@ -5,7 +5,11 @@ import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from ..goal_families import STZB_DAILY_GOAL_FAMILY, normalize_goal_family
+from ..goal_families import (
+    STZB_DAILY_GOAL_FAMILY,
+    is_stzb_discovery_only_goal,
+    normalize_goal_family,
+)
 from ..mobile_agent.domain import Observation
 from ..mobile_task_adapter import OpenAICompatibleToolRoleModel
 from .domain import (
@@ -35,14 +39,34 @@ class StructuredGoalModel:
             # outcome, then independently reread that same frozen checklist.
             # Freezing this known family deterministically prevents a malformed
             # tool response from weakening or blocking the owner contract.
-            return GoalSpecificationDraft(
-                normalized_intent(
+            intent = normalized_intent(
                     original_goal,
                     {
                         "classification": "finite_phone_goal",
                         "outcome": original_goal,
                     },
-                ),
+                )
+            if is_stzb_discovery_only_goal(original_goal):
+                intent["execution_policy"] = "discovery_only"
+                return GoalSpecificationDraft(
+                    intent,
+                    (
+                        SuccessCriterion(
+                            "complete_daily_checklist_discovered",
+                            "发现并冻结当天完整的每日任务目标集及全部可见条目。",
+                            "新鲜设备画面必须证明每日/今日身份、全部可见入口与列表边界覆盖。",
+                            original_goal,
+                        ),
+                        SuccessCriterion(
+                            "daily_items_preserved_without_execution",
+                            "原样记录每个条目的当前状态，且不执行、领取或完成任何清单条目。",
+                            "动作证据只能用于导航和读取；不得出现面向清单条目的执行或领取动作。",
+                            original_goal,
+                        ),
+                    ),
+                )
+            return GoalSpecificationDraft(
+                intent,
                 (
                     SuccessCriterion(
                         "complete_daily_checklist_discovered",
@@ -143,7 +167,7 @@ class StructuredGoalModel:
     def inspect_daily_checklist(
         self, original_goal: str, observations: tuple[Observation, ...]
     ) -> tuple[DailyChecklistSnapshot, ...]:
-        """Extract only complete, visible daily-list snapshots from persisted frames."""
+        """Extract evidence-bounded daily-list or paginated-surface snapshots."""
 
         if not observations:
             return ()
@@ -154,8 +178,12 @@ class StructuredGoalModel:
         decoded = self._role_model.call_tool(
             system=(
                 "你是率土之滨每日清单观察器。必须调用 record_daily_checklist。"
-                "逐张判断输入画面；只记录确实显示每日/日常任务完整清单的画面。"
+                "逐张判断输入画面；记录确实显示每日/日常条目的完整清单或分页表面。"
                 "coverage_complete 只有在标题、全部条目和列表末端或总完成标记都可见时才为 true。"
+                "横向活动轮播单帧必须为 false，并用 coverage_start/coverage_end 标明滚动条或"
+                "边界箭头是否证明已到该表面的起点/终点；只记录卡片上明确写有每日/每天/今日"
+                "周期证据的条目。新版任务-事务只有同时可见巡察、每日刷新或今日周期证据时才"
+                "使用 migrated_affairs，事务标签本身不够。多帧合并由确定性存储层完成。"
                 "不要从旧画面、计划、按钮点击或常识补全条目。每项状态只能依据对应画面。"
             ),
             prompt=json.dumps(
@@ -165,6 +193,8 @@ class StructuredGoalModel:
                     "instruction": (
                         "返回可识别的清单画面。image_index 必须引用输入；date_label 使用画面"
                         "可见日期/今日标识，无法区分日期则 uncertain 且 coverage_complete=false。"
+                        "对于带明确每日/每天文案但无日历日期的活动轮播，date_label 统一写"
+                        "current-daily-cycle，surface_id 写 activity_carousel。"
                     ),
                 },
                 ensure_ascii=False,
@@ -190,6 +220,17 @@ class StructuredGoalModel:
                                 },
                                 "date_label": {"type": "string"},
                                 "coverage_complete": {"type": "boolean"},
+                                "surface_id": {
+                                    "type": "string",
+                                    "enum": [
+                                        "single_daily_list",
+                                        "activity_carousel",
+                                        "migrated_affairs",
+                                        "other",
+                                    ],
+                                },
+                                "coverage_start": {"type": "boolean"},
+                                "coverage_end": {"type": "boolean"},
                                 "items": {
                                     "type": "array",
                                     "maxItems": 64,
@@ -217,6 +258,9 @@ class StructuredGoalModel:
                                 "image_index",
                                 "date_label",
                                 "coverage_complete",
+                                "surface_id",
+                                "coverage_start",
+                                "coverage_end",
                                 "items",
                             ],
                         },
@@ -268,6 +312,9 @@ class StructuredGoalModel:
                     coverage_complete=bool(raw.get("coverage_complete")),
                     items=items,
                     observed_at=(now + timedelta(microseconds=order)).isoformat(),
+                    surface_id=str(raw.get("surface_id") or "other").strip(),
+                    coverage_start=bool(raw.get("coverage_start")),
+                    coverage_end=bool(raw.get("coverage_end")),
                 )
             )
         return tuple(snapshots)

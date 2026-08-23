@@ -12,7 +12,10 @@ import sqlite3
 from pathlib import Path
 
 from ai_game_console.legacy_cutover import (
+    append_mode_journal,
     drain_gate_satisfied,
+    exercise_snapshot_restore,
+    sqlite_logical_digest,
     snapshot_legacy_mobile_tasks,
 )
 from ai_game_console.mobile_agent.store import _SQLiteTaskStore
@@ -141,3 +144,48 @@ def test_snapshot_restore_returns_db_to_prestore_state(tmp_path: Path) -> None:
         ("t-queued", "queued"),
         ("t-running", "running"),
     ]
+
+
+def test_controlled_restore_exercise_performs_real_sqlite_restore(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "mobile-tasks.db"
+    store = _SQLiteTaskStore(source)
+    store.initialize()
+    _insert_task(source, "t-completed", "completed")
+    snapshot = snapshot_legacy_mobile_tasks(source, tmp_path / "backups")
+
+    result = exercise_snapshot_restore(snapshot, tmp_path / "controlled")
+
+    restored = Path(result["restored_copy"])
+    assert restored.exists()
+    assert restored != source
+    assert result["integrity"] == "ok"
+    assert result["logical_sha256"] == sqlite_logical_digest(snapshot)
+    with sqlite3.connect(restored) as connection:
+        assert connection.execute(
+            "SELECT task_id, status FROM mobile_tasks"
+        ).fetchall() == [("t-completed", "completed")]
+
+
+def test_mode_journal_is_append_only(tmp_path: Path) -> None:
+    journal = tmp_path / "logs" / "runtime-mode.jsonl"
+    append_mode_journal(
+        journal,
+        mode="draining",
+        event="runtime_started",
+        details={"active": 0},
+    )
+    first_size = journal.stat().st_size
+    append_mode_journal(
+        journal,
+        mode="kernel_active",
+        event="runtime_started",
+        details={"binding": "runtime_kernel"},
+    )
+
+    lines = journal.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    assert journal.stat().st_size > first_size
+    assert '"mode": "draining"' in lines[0]
+    assert '"mode": "kernel_active"' in lines[1]

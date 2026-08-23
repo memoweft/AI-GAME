@@ -358,25 +358,34 @@ class SQLiteGoalStore:
             event_type="goal_binding_failed",
         )
 
-    def bind_task(self, goal_id: str, task_id: str, target_id: str) -> None:
+    def bind_task(
+        self,
+        goal_id: str,
+        task_id: str,
+        target_id: str,
+        *,
+        binding_kind: str = "mobile_task_compat",
+    ) -> None:
         now = _now()
         with self._lock, self._connection(write=True) as connection:
             record = self._get(connection, goal_id)
             if record.bound_task_id is not None and record.bound_task_id != task_id:
                 raise GoalIdempotencyConflict("GoalRun 已绑定到另一兼容任务。")
             connection.execute(
-                "UPDATE goal_runs SET bound_task_id = ?, target_id = ?, "
+                "UPDATE goal_runs SET bound_task_id = ?, target_id = ?, binding_kind = ?, "
                 "binding_state = 'BOUND', execution_status = 'ACCEPTED', "
                 "waiting_reason_json = NULL, error_json = NULL, updated_at = ? "
                 "WHERE goal_id = ?",
-                (task_id, target_id, now, goal_id),
+                (task_id, target_id, binding_kind, now, goal_id),
             )
             if record.bound_task_id is None:
                 self._event(
                     connection,
                     goal_id,
-                    "compatibility_task_bound",
-                    {"binding_kind": "mobile_task_compat", "task_id": task_id,
+                    "kernel_task_bound"
+                    if binding_kind in {"runtime_kernel", "runtime_kernel_canary"}
+                    else "compatibility_task_bound",
+                    {"binding_kind": binding_kind, "task_id": task_id,
                      "target_id": target_id, "completion_gate": "pending_u3"},
                     now,
                 )
@@ -450,6 +459,7 @@ class SQLiteGoalStore:
             "queued": ("ACCEPTED", "AUTOMATED", False),
             "planning": ("PLANNING", "AUTOMATED", False),
             "running": ("RUNNING", "AUTOMATED", False),
+            "paused": ("RUNNING", "PAUSED", False),
             "stopping": ("RUNNING", "STOP_REQUESTED", False),
             "completed": ("CANDIDATE_COMPLETE", "AUTOMATED", False),
             "failed": ("FAILED", "AUTOMATED", True),
@@ -472,7 +482,7 @@ class SQLiteGoalStore:
                     connection,
                     goal_id,
                     "compatibility_event",
-                    {"source": "mobile_task", "source_sequence": sequence,
+                    {"source": record.binding_kind, "source_sequence": sequence,
                      "source_event_type": str(_value(source_event, "event_type", "unknown"))},
                     str(_value(source_event, "created_at", now)),
                 )

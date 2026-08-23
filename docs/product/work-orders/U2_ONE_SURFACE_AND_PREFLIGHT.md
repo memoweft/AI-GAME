@@ -8,7 +8,7 @@
 
 The user starts a phone goal from one primary composer. The platform inspects model and device readiness, automatically selects the sole compatible idle target, performs safe reversible local repair, or asks one plain external-gate question.
 
-## CURRENT FACTS
+## BASELINE FACTS AT ACTIVATION
 
 - Current navigation exposes multiple product/runtime surfaces.
 - MobileTask requires a selected Target, although the UI preselects one ready target in some cases.
@@ -140,5 +140,7 @@ Open U2 gate:
 
 Therefore U2 remains `PARTIAL`. The real-device and managed-repair gates are now
 green, but the required real primary-composer visual/reopen gate is unavailable.
-Formal U3 has not been activated; Qwen work is recorded only as a user-directed,
-bounded compatibility canary.
+At this U2 closeout snapshot, formal U3 had not been activated and Qwen work was
+recorded only as a user-directed, bounded compatibility canary. U3 was later
+activated and completed; its current status is recorded in
+`../06_IMPLEMENTATION_ROADMAP.md`.

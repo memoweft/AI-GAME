@@ -17,6 +17,7 @@ from .stzb_daily import (
     DailyChecklistItem,
     DailyChecklistSnapshot,
     SQLiteDailyChecklistStore,
+    StzbDailyProgressController,
     STZB_DAILY_GOAL_FAMILY,
     normalize_goal_family,
 )
@@ -38,6 +39,7 @@ __all__ = [
     "DailyChecklistItem",
     "DailyChecklistSnapshot",
     "SQLiteDailyChecklistStore",
+    "StzbDailyProgressController",
     "STZB_DAILY_GOAL_FAMILY",
     "normalize_goal_family",
     "DailyFixtureReport",

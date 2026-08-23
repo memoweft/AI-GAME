@@ -15,13 +15,17 @@ from .domain import (
 )
 from .preflight import PreflightResult
 from .store import SQLiteGoalStore
+from .stzb_daily import looks_like_daily_checklist_evidence
 
 
 class GoalService:
-    """Owns GoalRun truth while MobileTask remains a compatibility executor."""
+    """Own GoalRun truth across compatibility, canary, and active Kernel paths."""
 
     def __init__(self, store: SQLiteGoalStore, *, mobile_runtime: Any | None,
                  mobile_archive: Any, configured_serial: str | None,
+                 kernel_runtime: Any | None = None,
+                 kernel_canary_enabled: bool = False,
+                 kernel_binding_kind: str | None = None,
                  target_probe: Callable[[], tuple[bool, str, str]] | None = None,
                  preflight: Callable[[], PreflightResult] | None = None,
                  repair: Callable[[str, PreflightResult], bool] | None = None,
@@ -36,6 +40,11 @@ class GoalService:
         self.store = store
         self.mobile_runtime = mobile_runtime
         self.mobile_archive = mobile_archive
+        self.kernel_runtime = kernel_runtime
+        self.kernel_binding_kind = (
+            kernel_binding_kind
+            or ("runtime_kernel_canary" if kernel_canary_enabled else None)
+        )
         self.configured_serial = configured_serial.strip() if configured_serial else None
         self.target_probe = target_probe
         self.preflight = preflight
@@ -59,8 +68,9 @@ class GoalService:
 
     def send_message(self, goal_id: str, content: str, idempotency_key: str) -> GoalRecord:
         record = self.inspect(goal_id)
-        if record.bound_task_id is None or self.mobile_runtime is None:
-            raise GoalStateConflict("GoalRun 尚未绑定可接收消息的兼容任务。")
+        runtime = self._runtime_for(record)
+        if record.bound_task_id is None or runtime is None:
+            raise GoalStateConflict("GoalRun 尚未绑定可接收消息的执行任务。")
         if record.execution_status in {"FAILED", "CANCELLED", "UNCERTAIN"}:
             raise GoalStateConflict("GoalRun 已终结，不能再追加消息。")
         revision, _ = self.store.add_message(
@@ -69,7 +79,7 @@ class GoalService:
         # The source runtime owns the second idempotency fence. Reissuing with
         # the same derived key closes a crash window between our durable record
         # and its acknowledgement without duplicating the owner input.
-        self.mobile_runtime.send(
+        runtime.send(
             record.bound_task_id,
             content,
             f"goal:{goal_id}:message:{revision}",
@@ -77,19 +87,31 @@ class GoalService:
         return self.inspect(goal_id)
 
     def control(self, goal_id: str, action: str, idempotency_key: str) -> GoalRecord:
-        if action != "stop":
-            raise GoalControlUnsupported(
-                f"mobile_task_compat 当前不支持 {action}；仅支持 stop。"
-            )
         record = self.inspect(goal_id)
-        if record.bound_task_id is None or self.mobile_runtime is None:
-            raise GoalStateConflict("GoalRun 当前没有可停止的兼容任务。")
+        runtime = self._runtime_for(record)
+        supported = {"stop", "pause", "resume", "takeover"} if (
+            self._is_kernel_binding(record)
+        ) else {"stop"}
+        if action not in supported:
+            raise GoalControlUnsupported(
+                f"{record.binding_kind} 当前不支持 {action}。"
+            )
+        if record.bound_task_id is None or runtime is None:
+            raise GoalStateConflict("GoalRun 当前没有可控制的执行任务。")
         self.store.record_control(
             goal_id, action=action, idempotency_key=idempotency_key
         )
-        state = self.mobile_runtime.stop(
-            record.bound_task_id, f"goal:{goal_id}:stop:{idempotency_key}"
-        )
+        try:
+            if self._is_kernel_binding(record):
+                state = runtime.control(record.bound_task_id, action)
+            else:
+                state = runtime.stop(
+                    record.bound_task_id, f"goal:{goal_id}:stop:{idempotency_key}"
+                )
+        except (ValueError, RuntimeError) as error:
+            raise GoalStateConflict(
+                f"GoalRun 当前状态不允许执行 {action}。"
+            ) from error
         return self._project(self.store.inspect(goal_id), state=state)
 
     def events(self, goal_id: str, *, after: int, limit: int):
@@ -113,7 +135,7 @@ class GoalService:
         specification = self.store.specification(goal_id)
         if not specification["success_criteria"]:
             raise GoalStateConflict("GoalRun 尚未冻结成功标准。")
-        source = self.mobile_archive.inspect(record.bound_task_id)
+        source = self._archive_for(record).inspect(record.bound_task_id)
         checklist = self._reconcile_daily_checklist(
             record, specification, source
         )
@@ -251,7 +273,10 @@ class GoalService:
                 message="尚未配置默认 Android 目标；U1 不会自行猜测设备。",
             )
             return self.store.inspect(record.id)
-        if self.mobile_runtime is None:
+        selected_runtime = (
+            self.kernel_runtime if self.kernel_binding_kind else self.mobile_runtime
+        )
+        if selected_runtime is None:
             self.store.mark_waiting_configuration(
                 record.id,
                 code="mobile_task_runtime_not_configured",
@@ -301,7 +326,21 @@ class GoalService:
                 )
                 if family == "stzb/daily/vnext":
                     start_arguments["skill_scope_override"] = family
-                state = self.mobile_runtime.start(
+                    register = getattr(
+                        self.daily_checklist_store,
+                        "register_multi_surface_goal",
+                        None,
+                    )
+                    if callable(register):
+                        register(latest.id)
+                runtime = (
+                    self.kernel_runtime
+                    if self.kernel_binding_kind
+                    else self.mobile_runtime
+                )
+                if runtime is None:
+                    raise GoalStateConflict("执行运行时尚未配置。")
+                state = runtime.start(
                     latest.original_goal,
                     f"goal:{latest.id}:start",
                     **start_arguments,
@@ -326,6 +365,11 @@ class GoalService:
                 latest.id,
                 task_id,
                 target_id or f"adb:{target_label}",
+                binding_kind=(
+                    self.kernel_binding_kind
+                    if self.kernel_binding_kind
+                    else "mobile_task_compat"
+                ),
             )
             return self._project(self.store.inspect(latest.id), state=state)
 
@@ -333,7 +377,7 @@ class GoalService:
         if record.bound_task_id is None:
             return record
         try:
-            source = state if state is not None else self.mobile_archive.inspect(record.bound_task_id)
+            source = state if state is not None else self._archive_for(record).inspect(record.bound_task_id)
         except Exception as error:
             # A durable binding remains truth even when its source archive is
             # temporarily unreadable. Do not turn an observation outage into a
@@ -388,6 +432,24 @@ class GoalService:
             self._promote_if_verified(record.bound_task_id, record.id, stored)
             projected = self.store.inspect(record.id)
         return projected
+
+    def _runtime_for(self, record: GoalRecord) -> Any | None:
+        return (
+            self.kernel_runtime
+            if self._is_kernel_binding(record)
+            else self.mobile_runtime
+        )
+
+    def _archive_for(self, record: GoalRecord) -> Any:
+        return (
+            self.kernel_runtime
+            if self._is_kernel_binding(record)
+            else self.mobile_archive
+        )
+
+    @staticmethod
+    def _is_kernel_binding(record: GoalRecord) -> bool:
+        return record.binding_kind in {"runtime_kernel", "runtime_kernel_canary"}
 
     def daily_checklist(self, goal_id: str) -> dict[str, Any] | None:
         if self.daily_checklist_store is None:
@@ -515,7 +577,15 @@ def _daily_checklist_gate(
     intent = specification.get("normalized_intent") or {}
     if intent.get("goal_family") != "stzb/daily/vnext":
         return proposed
-    if checklist is not None and checklist.get("final_verified") is True:
+    discovery_only = intent.get("execution_policy") == "discovery_only"
+    if (
+        checklist is not None
+        and (
+            checklist.get("final_verified") is True
+            or discovery_only
+            and checklist.get("state") in {"FROZEN", "VERIFIED_COMPLETE"}
+        )
+    ):
         return proposed
     if checklist is None or checklist.get("state") in {"NOT_AVAILABLE", "NOT_DISCOVERED"}:
         evidence = "没有持久化覆盖完整的今日每日任务清单及独立最终复查画面。"
@@ -558,36 +628,7 @@ def _daily_checklist_gate(
 
 
 def _looks_like_daily_checklist_evidence(evidence: str) -> bool:
-    text = evidence.casefold()
-    if any(
-        token in text
-        for token in (
-            "未弹出任务",
-            "未打开任务",
-            "未进入任务",
-            "未见任务列表",
-            "并非任务",
-            "不在任务",
-            "task panel did not",
-            "checklist is not visible",
-        )
-    ):
-        return False
-    return any(
-        token in text
-        for token in (
-            "已展开任务面板",
-            "已打开任务面板",
-            "显示每日任务",
-            "显示日常任务",
-            "每日任务列表显示",
-            "今日任务列表显示",
-            "清单的全部条目",
-            "任务条目及",
-            "daily task",
-            "daily checklist",
-        )
-    )
+    return looks_like_daily_checklist_evidence(evidence)
 
 
 def _validate_specification(goal: str, draft: GoalSpecificationDraft) -> None:

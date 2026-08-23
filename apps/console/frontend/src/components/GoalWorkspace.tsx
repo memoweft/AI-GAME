@@ -123,10 +123,12 @@ export function GoalWorkspace() {
   return (
     <section className="agent-workspace goal-workspace" aria-label="目标中心">
       <section className="panel agent-composer goal-composer">
+        <div className="goal-composer-orbit" aria-hidden="true"><span /><span /><Smartphone size={28} /></div>
         <div className="agent-composer-heading">
           <div className="agent-composer-icon"><Sparkles size={22} /></div>
-          <div><h2>你想让手机替你完成什么？</h2><p>直接说结果。设备、模型和执行方式由 AI Game 自动检查与选择。</p></div>
+          <div className="goal-composer-copy"><span className="eyebrow">一句话交给本地智能体</span><h2>今天想让手机替你完成什么？</h2><p>只需要说清楚想要的结果。设备、模型和执行方式由 AI Game 自动检查与选择。</p></div>
         </div>
+        <div className="goal-capability-strip" aria-label="执行特点"><span>自动检查设备</span><span>逐步观察验证</span><span>随时可以停止</span></div>
         <label className="agent-goal-field">
           <span>目标</span>
           <textarea
@@ -136,11 +138,13 @@ export function GoalWorkspace() {
             rows={3}
           />
         </label>
-        <button className="button button-primary agent-start-button" onClick={() => void create()} disabled={creating || !goalText.trim()}>
-          {creating ? <span className="button-spinner" /> : <Send size={17} />}
-          {creating ? '正在接收目标…' : '开始执行'}
-        </button>
-        <div className="goal-promise"><ShieldCheck size={16} /><span>系统只报告经过证据支持的结果；执行计划结束不等于原始目标已经验证完成。</span></div>
+        <div className="goal-composer-footer">
+          <div className="goal-promise"><ShieldCheck size={16} /><span>只报告经过证据支持的结果</span></div>
+          <button className="button button-primary agent-start-button" onClick={() => void create()} disabled={creating || !goalText.trim()}>
+            {creating ? <span className="button-spinner" /> : <Send size={17} />}
+            {creating ? '正在接收目标…' : '开始执行'}
+          </button>
+        </div>
         {error && <div className="agent-inline-error" role="alert"><AlertCircle size={17} /><span>{error}</span></div>}
       </section>
 

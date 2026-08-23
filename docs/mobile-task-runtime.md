@@ -1,6 +1,11 @@
 # Generic Mobile Task Runtime
 
-> **CURRENT COMPATIBILITY ENGINE.** This document describes the existing MobileTask execution path retained during migration. It does not define the vNext product entry or canonical experience contract. See [`product/00_INDEX.md`](product/00_INDEX.md).
+> **LEGACY COMPATIBILITY REFERENCE.** This document describes the MobileTask
+> execution path retained as read-only history in normal Kernel mode and as an
+> explicit rollback path. It is not the current default execution composition
+> and does not define the product entry or canonical experience contract. See
+> [`product/00_INDEX.md`](product/00_INDEX.md) and
+> [`product/02_CURRENT_STATE.md`](product/02_CURRENT_STATE.md) section 14.
 
 ## Product scope
 

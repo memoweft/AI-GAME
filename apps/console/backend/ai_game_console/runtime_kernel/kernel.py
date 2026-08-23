@@ -223,6 +223,106 @@ class RuntimeKernel:
     ) -> tuple[RuntimeEvent, ...]:
         return self._store.list_events(task_id, after_sequence=after_sequence)
 
+    def record_worker_event(
+        self,
+        *,
+        task_id: str,
+        event_type: str,
+        payload: Mapping[str, object],
+    ) -> RuntimeEvent:
+        """Append a durable coordinator fact without exposing Store internals."""
+        self._store.load_task(task_id)
+        now = self._clock()
+        return self._store.append_event(
+            task_id,
+            self._event(event_type, now, task_id, payload),
+        )
+
+    def complete_task(
+        self,
+        *,
+        task_id: str,
+        evidence_refs: Iterable[str],
+        summary: str,
+    ) -> Task:
+        """Commit final Task success only after every Stage has completed."""
+        before = self._store.load_task(task_id)
+        stages = self._store.list_stages(task_id)
+        refs = tuple(str(item) for item in evidence_refs if str(item).strip())
+        if before.status is not TaskStatus.PLANNING or before.current_stage_id is not None:
+            raise ValueError("Task completion requires an idle PLANNING Task")
+        if not stages or any(stage.status is not StageStatus.COMPLETED for stage in stages):
+            raise ValueError("Task completion requires every planned Stage to be complete")
+        if not refs:
+            raise ValueError("Task completion requires final verification evidence")
+        now = self._clock()
+        after = before.transition_to(TaskStatus.COMPLETED, at=now)
+        self._store.mutate_task(
+            before_task=before,
+            after_task=after,
+            event=self._event(
+                "TaskCompleted",
+                now,
+                task_id,
+                {"summary": summary, "evidence_refs": list(refs)},
+            ),
+        )
+        return after
+
+    def fail_task(self, *, task_id: str, code: str, summary: str) -> Task:
+        return self._terminalize_task(
+            task_id=task_id,
+            status=TaskStatus.FAILED,
+            event_type="TaskFailed",
+            code=code,
+            summary=summary,
+        )
+
+    def mark_task_uncertain(self, *, task_id: str, code: str, summary: str) -> Task:
+        return self._terminalize_task(
+            task_id=task_id,
+            status=TaskStatus.FAILED,
+            event_type="TaskUncertain",
+            code=code,
+            summary=summary,
+        )
+
+    def _terminalize_task(
+        self,
+        *,
+        task_id: str,
+        status: TaskStatus,
+        event_type: str,
+        code: str,
+        summary: str,
+    ) -> Task:
+        before = self._store.load_task(task_id)
+        if before.terminal:
+            return before
+        now = self._clock()
+        after = before.record_failure(
+            self._failure_state(
+                before,
+                code=code,
+                summary=summary,
+                action_id=None,
+                verdict="UNCERTAIN" if event_type == "TaskUncertain" else "FAIL",
+                at=now,
+            ),
+            at=now,
+        ).transition_to(status, at=now)
+        self._store.mutate_task(
+            before_task=before,
+            after_task=after,
+            event=self._event(
+                event_type,
+                now,
+                task_id,
+                {"code": code, "summary": summary},
+            ),
+        )
+        return after
+
     def record_user_message(
         self,
         *,
@@ -422,6 +522,12 @@ class RuntimeKernel:
     def load_action(self, task_id: str, action_id: str) -> Action:
         return self._store.load_action(task_id, action_id)
 
+    def load_action_execution(self, action_id: str) -> ActionExecution:
+        return self._store.load_action_execution(action_id)
+
+    def load_verification(self, action_id: str) -> Verification:
+        return self._store.load_verification(action_id)
+
     def list_actions(self, task_id: str) -> tuple[Action, ...]:
         return self._store.list_actions(task_id)
 
@@ -452,7 +558,7 @@ class RuntimeKernel:
         self,
         *,
         task_id: str,
-        action_id: str,
+        action_id: str | None,
         execution_id: str | None = None,
         accepted: bool,
         adapter_code: int | None,
@@ -628,7 +734,11 @@ class RuntimeKernel:
         now = self._clock()
 
         if command is ControlCommand.PAUSE:
-            if task.status is not TaskStatus.RUNNING:
+            if task.status not in {
+                TaskStatus.CREATED,
+                TaskStatus.PLANNING,
+                TaskStatus.RUNNING,
+            }:
                 raise InvalidControlTransition(
                     f"Task in {task.status.value} cannot be paused"
                 )
@@ -639,7 +749,30 @@ class RuntimeKernel:
                 raise InvalidControlTransition(
                     f"Task in {task.status.value} cannot be resumed"
                 )
-            after = task.transition_to(TaskStatus.RUNNING, at=now)
+            paused_event = next(
+                (
+                    item
+                    for item in reversed(self.events(task_id))
+                    if item.type in {"TaskPaused", "UserTakeover"}
+                ),
+                None,
+            )
+            previous_status = (
+                str(paused_event.payload.get("previous_status"))
+                if paused_event is not None
+                else TaskStatus.RUNNING.value
+            )
+            resume_status = (
+                TaskStatus(previous_status)
+                if previous_status
+                in {
+                    TaskStatus.CREATED.value,
+                    TaskStatus.PLANNING.value,
+                    TaskStatus.RUNNING.value,
+                }
+                else TaskStatus.RUNNING
+            )
+            after = task.transition_to(resume_status, at=now)
             event_type = "TaskResumed"
         elif command is ControlCommand.CANCEL:
             if task.terminal:
@@ -649,7 +782,11 @@ class RuntimeKernel:
             after = task.transition_to(TaskStatus.CANCELLED, at=now)
             event_type = "TaskCancelled"
         elif command is ControlCommand.TAKEOVER:
-            if task.status is not TaskStatus.RUNNING:
+            if task.status not in {
+                TaskStatus.CREATED,
+                TaskStatus.PLANNING,
+                TaskStatus.RUNNING,
+            }:
                 raise InvalidControlTransition(
                     f"Task in {task.status.value} cannot be taken over"
                 )

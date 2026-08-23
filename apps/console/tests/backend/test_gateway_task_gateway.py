@@ -600,13 +600,17 @@ class TestControl:
             "TaskCancelled",
         ]
 
-    def test_pause_from_created_rejected(self, tmp_path: Path) -> None:
+    def test_pause_from_created_and_resume_return_to_created(self, tmp_path: Path) -> None:
         gateway, _, _ = _harness(tmp_path)
         task_id = _create(gateway)["task"]["id"]
-        with pytest.raises(TaskNotActive):
-            gateway.control(
-                task_id=task_id, command="pause", idempotency_key="key"
-            )
+        paused = gateway.control(
+            task_id=task_id, command="pause", idempotency_key="key"
+        )
+        assert paused["status"] == "PAUSED"
+        resumed = gateway.control(
+            task_id=task_id, command="resume", idempotency_key="key-2"
+        )
+        assert resumed["status"] == "CREATED"
 
     def test_unknown_command_rejected(self, tmp_path: Path) -> None:
         gateway, kernel, _ = _harness(tmp_path)
@@ -797,3 +801,76 @@ class TestConversationMessage:
                 device_id="device-1",
                 idempotency_key="key-conv-1",
             )
+
+
+class RecordingKernelWorker:
+    def __init__(self, kernel: RuntimeKernel) -> None:
+        self.kernel = kernel
+        self.submitted: list[str] = []
+        self.controls: list[tuple[str, str]] = []
+
+    def submit(self, task_id: str) -> None:
+        self.submitted.append(task_id)
+        stage = self.kernel.create_stage(
+            task_id=task_id,
+            objective="worker-owned stage",
+            completion_criteria=("visible",),
+        )
+        self.kernel.start_stage(task_id=task_id, stage_id=stage.id)
+
+    def control(self, task_id: str, action: str):
+        self.controls.append((task_id, action))
+        command = "cancel" if action == "stop" else action
+        return self.kernel.apply_control(task_id=task_id, command=command)
+
+
+class FailingKernelWorker:
+    def submit(self, task_id: str) -> None:
+        del task_id
+        raise RuntimeError("queue unavailable")
+
+
+def test_gateway_worker_hook_submits_created_task_and_owns_control(tmp_path: Path) -> None:
+    kernel = _kernel(tmp_path)
+    store = GatewayStore(tmp_path / "gateway.db")
+    store.initialize()
+    worker = RecordingKernelWorker(kernel)
+    gateway = TaskGateway(
+        kernel=kernel,
+        idempotency=IdempotencyService(store),
+        worker=worker,
+    )
+
+    task_id = _create(gateway)["task"]["id"]
+    assert worker.submitted == [task_id]
+    assert kernel.load_task(task_id).status is TaskStatus.RUNNING
+
+    response = gateway.control(
+        task_id=task_id,
+        command="pause",
+        reason="owner pause",
+        idempotency_key="worker-pause",
+    )
+    assert response["status"] == "PAUSED"
+    assert worker.controls == [(task_id, "pause")]
+
+
+def test_gateway_worker_submission_failure_terminalizes_created_task(tmp_path: Path) -> None:
+    kernel = _kernel(tmp_path)
+    store = GatewayStore(tmp_path / "gateway.db")
+    store.initialize()
+    gateway = TaskGateway(
+        kernel=kernel,
+        idempotency=IdempotencyService(store),
+        worker=FailingKernelWorker(),
+    )
+
+    with pytest.raises(RuntimeError, match="queue unavailable"):
+        _create(gateway)
+
+    tasks = kernel.list_tasks()
+    assert len(tasks) == 1
+    assert tasks[0].status is TaskStatus.FAILED
+    assert tasks[0].failure_state is not None
+    assert tasks[0].failure_state.code == "worker_submission_failed"
+    assert kernel.events(tasks[0].id)[-1].type == "TaskFailed"

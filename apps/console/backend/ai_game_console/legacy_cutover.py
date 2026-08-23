@@ -11,9 +11,12 @@ SQLite 在线备份快照作为回滚锚点。
 
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 # 切流前必须排空的活动状态：排队中、规划中、运行中、停止中。
 ACTIVE_LEGACY_STATUSES = ("queued", "planning", "running", "stopping")
@@ -71,3 +74,100 @@ def drain_gate_satisfied(active_count: int) -> bool:
     完成或被显式停止（即不再处于 :data:`ACTIVE_LEGACY_STATUSES` 任一状态）。
     """
     return active_count == 0
+
+
+def sqlite_logical_digest(database_path: Path | str) -> str:
+    """Return a deterministic digest of one readable SQLite database.
+
+    The digest uses SQLite's logical dump instead of file bytes, because a real
+    backup/restore can legitimately change page layout while preserving every
+    schema object and row.
+    """
+    path = Path(database_path).resolve()
+    with sqlite3.connect(path) as connection:
+        integrity = connection.execute("PRAGMA integrity_check").fetchone()
+        if integrity is None or str(integrity[0]).lower() != "ok":
+            raise RuntimeError(f"SQLite integrity check failed: {path}")
+        dump = "\n".join(connection.iterdump()).encode("utf-8")
+    return hashlib.sha256(dump).hexdigest()
+
+
+def restore_sqlite_snapshot(
+    snapshot_path: Path | str,
+    destination_path: Path | str,
+) -> Path:
+    """Actually restore a snapshot through SQLite's backup API.
+
+    U7 uses this against a disposable controlled destination.  The function
+    refuses an in-place source/destination identity so a verification exercise
+    cannot accidentally replace the archived snapshot itself.
+    """
+    source = Path(snapshot_path).resolve()
+    destination = Path(destination_path).resolve()
+    if not source.is_file():
+        raise FileNotFoundError(source)
+    if source == destination:
+        raise ValueError("snapshot and restore destination must be different")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+
+    source_connection = sqlite3.connect(f"file:{source.as_posix()}?mode=ro", uri=True)
+    destination_connection = sqlite3.connect(destination)
+    try:
+        integrity = source_connection.execute("PRAGMA integrity_check").fetchone()
+        if integrity is None or str(integrity[0]).lower() != "ok":
+            raise RuntimeError(f"Snapshot integrity check failed: {source}")
+        with destination_connection:
+            source_connection.backup(destination_connection)
+    finally:
+        source_connection.close()
+        destination_connection.close()
+
+    # Reopen the restored copy independently; a successful backup call alone
+    # is not restore evidence.
+    restored_digest = sqlite_logical_digest(destination)
+    source_digest = sqlite_logical_digest(source)
+    if restored_digest != source_digest:
+        raise RuntimeError("Restored SQLite copy does not match the snapshot")
+    return destination
+
+
+def exercise_snapshot_restore(
+    snapshot_path: Path | str,
+    restore_dir: Path | str,
+) -> dict[str, Any]:
+    """Restore into a disposable copy and return independently checkable facts."""
+    source = Path(snapshot_path).resolve()
+    destination = (
+        Path(restore_dir).resolve()
+        / f"mobile-tasks-restored-{_timestamp()}.db"
+    )
+    restore_sqlite_snapshot(source, destination)
+    return {
+        "snapshot": str(source),
+        "restored_copy": str(destination),
+        "logical_sha256": sqlite_logical_digest(destination),
+        "integrity": "ok",
+        "restored_at": datetime.now(UTC).isoformat(),
+    }
+
+
+def append_mode_journal(
+    journal_path: Path | str,
+    *,
+    mode: str,
+    event: str,
+    details: dict[str, Any] | None = None,
+) -> None:
+    """Append one durable, non-truncating cutover mode record."""
+    path = Path(journal_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "timestamp": datetime.now(UTC).isoformat(),
+        "mode": mode,
+        "event": event,
+        "details": details or {},
+    }
+    with path.open("a", encoding="utf-8", newline="\n") as stream:
+        stream.write(json.dumps(record, ensure_ascii=False, sort_keys=True))
+        stream.write("\n")
+        stream.flush()

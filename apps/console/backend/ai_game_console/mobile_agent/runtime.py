@@ -23,6 +23,8 @@ from .domain import (
     Subgoal,
     TaskDriver,
     TaskQueueFull,
+    TaskProgressController,
+    TaskProgressDirective,
     TaskRuntimeClosed,
     TaskSession,
     TransportReceipt,
@@ -60,6 +62,7 @@ class MobileTaskRuntime:
         queue_capacity: int = 32,
         scope_resolver: SkillScopeResolver | None = None,
         experience: Any | None = None,
+        progress_controller: TaskProgressController | None = None,
     ) -> None:
         if max_reflections < 1:
             raise ValueError("max_reflections must be positive")
@@ -74,6 +77,7 @@ class MobileTaskRuntime:
         self._max_attempts = max_attempts
         self._scope_resolver = scope_resolver
         self._experience = experience
+        self._progress_controller = progress_controller
         self._attempt_experience: dict[str, Any] = {}
         self._queue: queue.Queue[object] = queue.Queue(maxsize=queue_capacity)
         self._slots = threading.BoundedSemaphore(queue_capacity)
@@ -147,6 +151,9 @@ class MobileTaskRuntime:
             self._ensure_mutable()
             existing = self._store.existing_request(request_id, digest)
             if existing is not None:
+                self._bind_progress_controller(
+                    existing, goal_id=goal_id, goal=goal,
+                )
                 self._begin_experience(
                     existing, goal_id=goal_id,
                     goal_spec_revision=goal_spec_revision,
@@ -180,6 +187,7 @@ class MobileTaskRuntime:
                 if not created:
                     self._slots.release()
                     return state
+                self._bind_progress_controller(state, goal_id=goal_id, goal=goal)
                 self._begin_experience(
                     state, goal_id=goal_id,
                     goal_spec_revision=goal_spec_revision,
@@ -379,6 +387,8 @@ class MobileTaskRuntime:
                     detail="已达到动作尝试上限，任务未被验证完成。",
                 )
                 return
+            if self._apply_progress_directive(task_id, worker_token, state):
+                continue
             self._decide_and_apply(task_id, worker_token, state, session)
 
     def _runaway_limits(self, state: MobileTaskState) -> tuple[int, int]:
@@ -580,6 +590,8 @@ class MobileTaskRuntime:
                     after=after,
                     input_revision=state.input_revision,
                     owner_inputs=owner_inputs,
+                    plan_revision=state.plan.revision if state.plan is not None else 0,
+                    recent_attempts=state.attempts[-8:],
                 )
             )
         except Exception as exc:
@@ -766,10 +778,23 @@ class MobileTaskRuntime:
         state = self._store.finish_attempt(**kwargs)
         attempt_id = str(kwargs["attempt_id"])
         packet = self._attempt_experience.pop(attempt_id, None)
-        if state is None or self._experience is None:
+        if state is None:
             return state
         attempt = next((item for item in state.attempts if item.attempt_id == attempt_id), None)
         if attempt is None or state.plan is None:
+            return state
+        if self._progress_controller is not None and not state.terminal:
+            try:
+                self._progress_controller.after_attempt(state, attempt)
+            except Exception:
+                self._store.fail(
+                    state.task_id,
+                    worker_token=str(kwargs["worker_token"]),
+                    error_code="task_progress_update_failed",
+                    detail="验证已持久化，但运行中目标进度更新失败；未继续下发动作。",
+                )
+                return self._store.inspect(state.task_id)
+        if self._experience is None:
             return state
         objective = next(
             (item.description for item in state.plan.subgoals
@@ -786,6 +811,51 @@ class MobileTaskRuntime:
             # block the physical owner's already-persisted task truth.
             pass
         return state
+
+    def _bind_progress_controller(
+        self, state: MobileTaskState, *, goal_id: str | None, goal: str,
+    ) -> None:
+        if self._progress_controller is None or goal_id is None:
+            return
+        self._progress_controller.bind(state.task_id, goal_id, goal)
+
+    def _apply_progress_directive(
+        self, task_id: str, worker_token: str, state: MobileTaskState,
+    ) -> bool:
+        if self._progress_controller is None or state.plan is None:
+            return False
+        subgoal = _active_subgoal(state)
+        try:
+            directive = self._progress_controller.before_subgoal(state, subgoal)
+        except Exception:
+            self._store.fail(
+                task_id,
+                worker_token=worker_token,
+                error_code="task_progress_gate_failed",
+                detail="运行中目标进度门暂时不可用；未继续下发动作。",
+            )
+            return True
+        if directive is None:
+            return False
+        if directive.kind == "fail":
+            self._store.fail(
+                task_id,
+                worker_token=worker_token,
+                error_code=str(directive.error_code),
+                detail=directive.reason,
+            )
+            return True
+        result = self._store.replace_plan_if_current(
+            task_id=task_id,
+            worker_token=worker_token,
+            expected_plan_revision=state.plan.revision,
+            expected_active_subgoal_index=state.active_subgoal_index,
+            draft=directive.plan,  # type: ignore[arg-type]
+            reason=directive.reason,
+        )
+        if result == "closed":
+            self._finish_if_cancelled(task_id, worker_token)
+        return True
 
     def _begin_experience(
         self, state: MobileTaskState, *, goal_id: str | None,

@@ -22,13 +22,25 @@ class TaskStatus(StrEnum):
 
 
 TERMINAL_TASK_STATUSES = frozenset(
-    {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED}
+    {
+        TaskStatus.COMPLETED,
+        TaskStatus.FAILED,
+        TaskStatus.CANCELLED,
+    }
 )
 
 _ALLOWED_TASK_TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
-    TaskStatus.CREATED: frozenset({TaskStatus.PLANNING, TaskStatus.CANCELLED}),
+    TaskStatus.CREATED: frozenset(
+        {TaskStatus.PLANNING, TaskStatus.PAUSED, TaskStatus.FAILED, TaskStatus.CANCELLED}
+    ),
     TaskStatus.PLANNING: frozenset(
-        {TaskStatus.RUNNING, TaskStatus.FAILED, TaskStatus.CANCELLED}
+        {
+            TaskStatus.RUNNING,
+            TaskStatus.PAUSED,
+            TaskStatus.COMPLETED,
+            TaskStatus.FAILED,
+            TaskStatus.CANCELLED,
+        }
     ),
     TaskStatus.RUNNING: frozenset(
         {
@@ -41,9 +53,21 @@ _ALLOWED_TASK_TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
             TaskStatus.CANCELLED,
         }
     ),
-    TaskStatus.WAITING: frozenset({TaskStatus.RUNNING, TaskStatus.CANCELLED}),
-    TaskStatus.PAUSED: frozenset({TaskStatus.RUNNING, TaskStatus.CANCELLED}),
-    TaskStatus.STUCK: frozenset({TaskStatus.PLANNING, TaskStatus.CANCELLED}),
+    TaskStatus.WAITING: frozenset(
+        {TaskStatus.RUNNING, TaskStatus.FAILED, TaskStatus.CANCELLED}
+    ),
+    TaskStatus.PAUSED: frozenset(
+        {
+            TaskStatus.CREATED,
+            TaskStatus.PLANNING,
+            TaskStatus.RUNNING,
+            TaskStatus.FAILED,
+            TaskStatus.CANCELLED,
+        }
+    ),
+    TaskStatus.STUCK: frozenset(
+        {TaskStatus.PLANNING, TaskStatus.FAILED, TaskStatus.CANCELLED}
+    ),
     TaskStatus.COMPLETED: frozenset(),
     TaskStatus.FAILED: frozenset(),
     TaskStatus.CANCELLED: frozenset(),

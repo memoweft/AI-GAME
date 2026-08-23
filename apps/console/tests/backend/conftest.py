@@ -25,6 +25,9 @@ def build_settings(root: Path, *, frontend: bool = False) -> Settings:
         data_dir=data_dir,
         database_path=data_dir / "console.db",
         frontend_dist=frontend_dist,
+        # Unit/integration harnesses opt into the compatibility composition;
+        # the production Settings.from_env() default is Kernel-active after U7.
+        runtime_mode="legacy",
     )
 
 
@@ -41,4 +44,3 @@ def client(settings: Settings) -> Iterator[TestClient]:
     )
     with TestClient(app) as test_client:
         yield test_client
-

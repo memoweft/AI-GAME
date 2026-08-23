@@ -12,9 +12,9 @@ from ai_game_console.runtime_mode import (
 
 def test_parse_runtime_mode_from_env() -> None:
     """验证从环境变量解析 runtime_mode"""
-    # 默认 legacy
+    # U7 之后普通启动默认走 Kernel。
     settings = Settings.from_env({})
-    assert settings.runtime_mode == "legacy"
+    assert settings.runtime_mode == "kernel_active"
     
     # 显式 legacy
     settings = Settings.from_env({"AI_GAME_RUNTIME_MODE": "legacy"})
@@ -40,9 +40,9 @@ def test_parse_runtime_mode_from_env() -> None:
     settings = Settings.from_env({"AI_GAME_RUNTIME_MODE": "new"})
     assert settings.runtime_mode == "kernel_active"
     
-    # 无效值回退到 legacy
-    settings = Settings.from_env({"AI_GAME_RUNTIME_MODE": "invalid"})
-    assert settings.runtime_mode == "legacy"
+    # 无效值 fail closed，不能因拼写错误静默重新开放 Legacy 写入。
+    with pytest.raises(ValueError, match="Unknown AI_GAME_RUNTIME_MODE"):
+        Settings.from_env({"AI_GAME_RUNTIME_MODE": "invalid"})
     
     # 大小写不敏感
     settings = Settings.from_env({"AI_GAME_RUNTIME_MODE": "DRAINING"})

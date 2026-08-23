@@ -105,9 +105,65 @@ zero-reasoning-budget request shape as Goal Completion. This is a reliability
 tuning inside the accepted Qwen binding, not a model-role change. A failed warm
 run caused by a later model-service outage remains failed and unpromoted.
 
+### D16 — Owner-authorized U5 closeout and U6 advancement
+
+Confirmed by the user on 2026-08-23:
+
+- close U5 quickly without pretending its missing real complete-manifest,
+  whole-set reread, and cold/warm learning evidence exists;
+- reduce documentation rules that made every remaining U5 stabilization item a
+  hard blocker for the total roadmap;
+- move those missing U5 facts to a named non-blocking stabilization backlog;
+- activate U6 and execute one bounded, reversible Kernel settings/battery
+  canary;
+- retain every non-negotiable correctness gate, especially one physical owner,
+  user control, revision/current-observation fences, fresh after evidence, no
+  uncertain replay, independent final completion, and rollback to
+  `mobile_task_compat`.
+
+This is a scheduling and advancement decision, not a retroactive lowering of
+U5 acceptance or permission to claim U5 `DONE`.
+
+### D17 — U7 local observation acceptance
+
+Confirmed through the user's U7 observation execution instruction on
+2026-08-23:
+
+- define and execute the remaining U7 observation, close U7 only after it
+  passes, then activate `U8_LONG_LIVED_ROUTING` under the ordinary rule;
+- use a 30-minute local wall-clock observation with a health/ownership sample
+  every 30 seconds and one controlled normal Kernel restart after 15 minutes;
+- every sample must keep the managed console and database healthy, runtime
+  capabilities ready, `kernel_active=true`, `legacy_writable=false`, zero
+  active Legacy work, and—because this is an isolated idle observation—zero
+  active Kernel tasks and active Leases;
+- the controlled restart must restore the owned current-source Kernel process
+  within 30 seconds with a new listener identity, append the full mode-log
+  stop/composition/start sequence, retain `runtime_kernel`, and keep Legacy
+  workers stopped;
+- before and after restart, a fenced Legacy write must return the explicit 403
+  contract while the Legacy compatibility archive, Kernel tasks, and GoalRuns
+  remain readable;
+- append-only cutover/mode logs must not shrink, and the observation must not
+  record a fatal/unhandled console error or a new physical action.
+
+[constraint-source: USER_DECISION; ref: U7 observation execution instruction 2026-08-23]
+
+This is a bounded local U7 cutover acceptance definition. It does not claim
+packaged deployment, long-run production reliability, U5 STZB acceptance, or
+U8 long-lived capability acceptance; those remain separate milestones.
+
+Executed result: the observation passed on 2026-08-23 with 61/61 successful
+samples over 1,801.493 seconds, a 3.675-second controlled restart, the required
+mode-log sequence, Legacy 403 fences before and after restart, stable read
+surfaces, zero active tasks/Leases, and zero fatal errors. U7 closed and U8 was
+activated under the ordinary advancement rule.
+
 ## 2. Current open decisions
 
-There is no known product decision currently blocking U1-U9. Implementation may still discover a new material choice; it records and asks that question under `08_AI_EXECUTION_PROTOCOL.md` instead of guessing.
+There is no currently recorded product decision blocking the activated U8 work
+order. Live external-owner, authorized-account, and external-outcome
+availability still need current inspection under that work order.
 
 ## 3. Decisions that implementation must not invent
 

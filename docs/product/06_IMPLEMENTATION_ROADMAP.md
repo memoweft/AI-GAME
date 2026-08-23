@@ -157,12 +157,44 @@ Passing U5 proves one learning vertical, not general game mastery.
 
 **Status**: `PARTIAL` — the family binding, dynamic checklist gate, controlled
 fixtures, current-source runtime, and real MuMu attempts exist. A real run
-now separates the chapter/reputation/affairs pages from explicit daily identity
-and reached real daily-labelled activity cards, while preserving truthful
-incomplete evidence. It still did not discover, freeze, execute, and
-independently reverify the complete daily checklist. Repeated dense-frame Qwen
-calls also retain an unresolved 40.96-second-to-timeout latency tail. U6 remains
-blocked by the ordinary advancement rule.
+now separates the chapter/reputation/affairs pages from explicit daily identity,
+covered visible activity-carousel boundaries, and reached real daily-labelled
+activity details. Under the owner's explicit open-development test override,
+later runs also claimed three visible cumulative-login rewards and verified the
+resulting reward flow without claiming overall completion. The narrow repeated dense-frame Qwen canary is now stable at a
+32,768-token context (three correct reads in 11.96, 11.37, and 11.54 seconds),
+and later device continuations added verified recruit, warehouse-Lv.2, and
+patrol-count changes. Occupation still remained `1/4`; the selected sweep target
+proved invalid for occupation, and the final patrol closure required a narrow
+compatibility MobileTask after GoalRun/model failures. No durable complete
+multi-surface manifest, whole-set independent reread, comparable cold/warm
+pair, or learned warm-run improvement exists. The pre-manifest actions are
+development evidence, not acceptance of the roadmap ordering. A deterministic
+ratio guard now prevents a requested `2/4` state from passing against visible
+`1/4` evidence. The latest takeover continuation also rejects shortened
+full-goal plans, accepts recovery that explicitly leaves a generic task panel
+for an independent daily surface, and crossed two previously failing real
+reflection boundaries. Its later conditional/presumed-identity recovery was
+correctly rejected; no complete manifest was frozen. The resulting
+current-source backend regression is 805 passed.
+The 2026-08-23 continuation additionally replaced model-declared carousel
+boundaries with correctly directed terminal-swipe evidence, normalized one
+run's activity views to a single current-cycle identity, and expanded generic
+detail stages from the discovered candidate manifest. Real MuMu runs proved
+both activity boundaries, a distinct middle view, an exact two-candidate set
+(`心愿征程` and `登录奖励`), revision-fenced candidate-specific planning, both
+candidate-card locations, and both detail pages. The last exact-login-detail
+verdict extension is automated-only and still needs a fresh device run. No
+complete multi-surface manifest was frozen and no post-freeze execution or
+independent final reread occurred. Focused verification is 108 passed and the
+full current-source backend regression is 837 passed with one pre-existing
+deprecation warning.
+U5 remains `PARTIAL`, but it is no longer a roadmap-advancement blocker. On
+2026-08-23 the owner explicitly directed the team to close U5 quickly, reduce
+its blocking documentation constraints, and execute U6. The missing complete
+manifest, whole-set execution/reread, and comparable cold/warm evidence remain
+truthful U5 stabilization gaps and still block a U5 `DONE` or production STZB
+claim; they do not block the bounded, reversible U6 settings/battery canary.
 
 ### U6 — Canonical Kernel autonomous worker canary
 
@@ -184,6 +216,14 @@ blocked by the ordinary advancement rule.
 **Rollback**: switch v2 binding back to the MobileTask compatibility engine; never dual-run a goal.
 
 ### U7 — Real Kernel cutover and compatibility retirement
+
+**Current status**: `DONE` on 2026-08-23. The local normal-launcher cutover,
+real GoalRun, controls, restart recovery, actual SQLite restore, append-only
+logs, explicit Legacy archive, and guarded rollback passed. The final D17
+observation then passed for 1,801.493 seconds with 61/61 healthy samples, a
+3.675-second controlled restart, zero active tasks/Leases, intact logs, and
+Legacy write rejection before and after restart. Packaged or production
+deployment acceptance remains U9 scope.
 
 **Outcome**: default launcher in Kernel mode constructs the real Gateway, coordinator, model bindings, action executor, experience service, and v2 Goal API. Legacy device writes are disabled only after Kernel completes a real business goal through the normal product entry.
 
@@ -211,6 +251,10 @@ legacy
 - explicit legacy read-only archive.
 
 ### U8 — Multi-capability and long-lived goal routing
+
+**Status**: `IN_PROGRESS` — activated after U7 completed its ordinary
+advancement gates on 2026-08-23. No U8 implementation or acceptance claim is
+made by activation alone.
 
 **Outcome**: the orchestrator can bind different goal types without exposing internal modules.
 
@@ -253,10 +297,10 @@ Includes only after earlier exits:
 | U2 One UI + preflight | PARTIAL | Managed preflight/repair and a real settings/battery compatibility run exist; primary-composer visual/reopen proof remains unavailable |
 | U3 Qwen + final verifier | DONE | Frozen criteria, independent evidence-referenced completion, gated learning, real settings/battery completion, and measured Qwen visual default |
 | U4 Experience ledger | DONE | Additive evidence ledger, reversible policies, controlled thresholds, and real attributable 10-to-5-action settings warm run |
-| U5 STZB learning vertical | PARTIAL | Checklist and experience gates exist; real complete daily cold/warm acceptance is still open |
-| U6 Kernel worker canary | Not started | None |
-| U7 Real cutover | Not started | None |
-| U8 Long-lived routing | Not started | None |
+| U5 STZB learning vertical | PARTIAL, non-blocking | Checklist and experience gates exist; real complete daily cold/warm acceptance remains a stabilization backlog |
+| U6 Kernel worker canary | DONE | Explicit Kernel canary completed settings/battery/Home, controls, final verification, and Experience reuse; default cutover remains out of scope |
+| U7 Real cutover | DONE | Local normal launcher, real Kernel GoalRun, controls, restore/rollback, final active restart, and 30-minute local observation passed |
+| U8 Long-lived routing | IN PROGRESS | Work order activated; implementation and acceptance not yet claimed |
 | U9 Production hardening | Not started | None |
 
 ## 5. Advancement rule
@@ -269,5 +313,13 @@ An AI may complete multiple implementation steps inside one work order without p
 - no new user choice materially changes product behavior;
 - rollback remains available;
 - the next work order does not require an unresolved decision in `09_DECISIONS_AND_OPEN_QUESTIONS.md`.
+
+An explicit owner instruction may advance the roadmap past a `PARTIAL`
+milestone when the incomplete evidence is isolated, recorded without being
+relabelled, the next slice is additive and reversible, and no non-negotiable
+correctness gate is waived. The incomplete milestone then becomes a named
+non-blocking stabilization track. This changes scheduling, not evidence truth:
+it cannot be used to claim the partial milestone `DONE`, production-ready, or
+accepted on evidence that was never obtained.
 
 Hard work is not a reason to stop. A real missing authority, external gate, destructive migration risk, or product choice is.

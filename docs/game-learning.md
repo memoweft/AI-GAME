@@ -4,8 +4,8 @@
 
 ## Current conclusion
 
-The primary one-sentence path for Android and game objectives is now
-MobileTask: it owns a durable TaskPlan/Subgoal loop, accepts mid-task Input,
+In the Legacy compatibility snapshot, the primary one-sentence path for Android
+and game objectives was MobileTask: it owns a durable TaskPlan/Subgoal loop, accepts mid-task Input,
 uses Planner/Verifier/Reflection roles, and may resolve an automatic
 `auto:*` SkillMemory scope. This document instead describes the retained
 advanced/experimental GameLearner Interface. GameLearner accepts a bounded

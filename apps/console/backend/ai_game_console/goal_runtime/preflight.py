@@ -34,12 +34,14 @@ class GoalPreflight:
         lease_is_held: Callable[[str], bool],
         runtime_available: Callable[[], bool],
         preferred_serial: str | None = None,
+        runtime_kind: str = "mobile_task_compat",
     ) -> None:
         self.capability_snapshot = capability_snapshot
         self.discover_targets = discover_targets
         self.lease_is_held = lease_is_held
         self.runtime_available = runtime_available
         self.preferred_serial = preferred_serial.strip() if preferred_serial else None
+        self.runtime_kind = runtime_kind
 
     def assess(self) -> PreflightResult:
         snapshot = self.capability_snapshot()
@@ -59,11 +61,23 @@ class GoalPreflight:
             )
         )
         runtime_ready = self.runtime_available()
+        kernel_runtime = self.runtime_kind in {
+            "runtime_kernel",
+            "runtime_kernel_canary",
+        }
         facts.append(
             _fact(
-                "mobile_task_compat",
+                self.runtime_kind,
                 "READY" if runtime_ready else "WAITING_CONFIGURATION",
-                "兼容执行运行时已就绪。" if runtime_ready else "兼容执行运行时尚未就绪。",
+                (
+                    "RuntimeKernel 执行运行时已就绪。"
+                    if runtime_ready and kernel_runtime
+                    else "RuntimeKernel 执行运行时尚未就绪。"
+                    if kernel_runtime
+                    else "兼容执行运行时已就绪。"
+                    if runtime_ready
+                    else "兼容执行运行时尚未就绪。"
+                ),
             )
         )
 
@@ -115,7 +129,7 @@ class GoalPreflight:
                 tuple(facts),
                 waiting_reason={
                     "code": "execution_capability_not_ready",
-                    "message": "本地模型或兼容执行服务尚未就绪。",
+                    "message": "本地模型或所选执行运行时尚未就绪。",
                 },
             )
         if not ready:

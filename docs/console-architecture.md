@@ -1,6 +1,14 @@
 # General mobile-agent console architecture
 
-> **CURRENT COMPONENT DESCRIPTION, NOT THE vNEXT PRODUCT AUTHORITY.** This document describes the presently implemented console and split workspaces. The target one-goal product architecture is defined by [`product/00_INDEX.md`](product/00_INDEX.md). Statements here that there is no universal router describe a current gap, not a frozen future boundary.
+> **LEGACY COMPATIBILITY SNAPSHOT, NOT CURRENT EXECUTION AUTHORITY.** This
+> document preserves the pre-U7 console and split-workspace architecture. The
+> current default Kernel composition and status are defined by
+> [`product/00_INDEX.md`](product/00_INDEX.md) and
+> [`product/02_CURRENT_STATE.md`](product/02_CURRENT_STATE.md). Statements below
+> about MobileTask being primary or a universal router being absent are
+> migration-era facts, not current blockers or product boundaries.
+>
+> [constraint-source: PRODUCT_SPEC; ref: `product/00_INDEX.md` section 1]
 
 ## Product boundary
 
@@ -9,7 +17,7 @@ general local phone Operator. The reusable application-cycle platform is the
 deep `ApplicationRuntime` Module; application-specific behavior arrives through
 Profiles and their Adapters. `soul-reply-v1` is one such Profile, not the
 product boundary. The one-sentence `MobileTask` remains the primary work surface
-for arbitrary long-horizon Android goals.
+for arbitrary long-horizon Android goals in the Legacy compatibility snapshot.
 
 Chat and bounded game learning remain separate Modules with deliberately
 different domain and recovery semantics. Chat has two modes:

@@ -53,6 +53,7 @@ def configured_settings(tmp_path: Path, adb: Path) -> Settings:
         gui_executor_enabled=True,
         adb_path=str(adb),
         adb_serial="127.0.0.1:16384",
+        runtime_mode="legacy",
     )
 
 

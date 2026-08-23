@@ -11,7 +11,7 @@ The user has delegated technical implementation choices inside the current work 
 Before implementation:
 
 1. read root `AGENTS.md` and this product package;
-2. read the active work order completely;
+2. read the active work order completely, if one is explicitly active;
 3. run `git status --short --branch`;
 4. preserve unrelated and user-owned changes;
 5. inspect current code and current runtime rather than trusting an old report;
@@ -41,6 +41,27 @@ The AI must not:
 - promote incomplete or uncertain experience;
 - claim a real-device result from mocks, tests, ADB acceptance, or a report from another commit;
 - deploy, publish, push, install broad machine dependencies, or alter external accounts without the necessary authority.
+
+### Constraint-governance entry point
+
+[constraint-source: USER_DECISION; ref: repository governance request 2026-08-23]
+
+When a failure, implementation choice, work order, or handoff would add or
+broaden a prohibition, blocker, gate, precondition, or required step, apply
+`.agents/skills/constraint-governance/SKILL.md`. Use
+`avoid-overdefensive-programming` for implementation guards and fallbacks, and
+`doc-drift` for rule audits. Keep source and lifecycle details in the Skills
+instead of copying them into this authority document.
+
+### Subagent and main-agent context entry point
+
+[constraint-source: USER_DECISION; ref: repository governance request 2026-08-23]
+
+When deciding whether to delegate, preparing a subagent brief, or discovering
+that the main Agent's current context cannot support a material decision or
+claim, apply `.agents/skills/subagent-context-governance/SKILL.md`. Keep the
+detailed invocation, context-repair, ownership, and integration rules in that
+Skill rather than duplicating them here.
 
 ## 4. Earliest-break loop
 
@@ -118,6 +139,10 @@ If the user authorizes execution of the roadmap, the AI may continue from one co
 Otherwise it reports the exact completed boundary and asks one concrete question.
 
 Creating or editing these documents alone is not authorization to implement product code. A request such as “按最新路线开始执行”, “执行 U1”, or equivalent activates implementation.
+
+An unfinished or `PARTIAL` milestone is not automatically an active work
+order. The current execution pointer in `00_INDEX.md` is authoritative for
+whether an order is active.
 
 ## 8. Git and changes
 

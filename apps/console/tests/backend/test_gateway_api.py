@@ -687,14 +687,14 @@ class TestControls:
         assert body["event_sequence"] == 4
         assert kernel.events(task_id)[-1].type == "UserTakeover"
 
-    def test_control_on_created_task_409(self, tmp_path: Path) -> None:
+    def test_pause_on_created_task_preserves_pre_execution_fence(self, tmp_path: Path) -> None:
         client, _, _ = _harness(tmp_path)
         task_id = _create_task(client)["task"]["id"]
 
         response = self._control(client, task_id, "pause", "k1")
 
-        assert response.status_code == 409
-        assert response.json()["error"]["code"] == "TASK_NOT_ACTIVE"
+        assert response.status_code == 200
+        assert response.json()["status"] == "PAUSED"
 
     def test_unknown_command_400(self, tmp_path: Path) -> None:
         client, kernel, _ = _harness(tmp_path)

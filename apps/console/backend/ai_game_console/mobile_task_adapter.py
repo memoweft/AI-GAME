@@ -26,7 +26,11 @@ from .gui_owl_client import (
     _completion_content,
     _loopback_chat_completions_endpoint,
 )
-from .goal_families import STZB_DAILY_GOAL_FAMILY, normalize_goal_family
+from .goal_families import (
+    STZB_DAILY_GOAL_FAMILY,
+    is_stzb_discovery_only_goal,
+    normalize_goal_family,
+)
 from .mobile_agent import (
     ActionDecision,
     DecisionContext,
@@ -42,6 +46,7 @@ from .mobile_agent import (
     VerificationContext,
 )
 from .repository import SQLiteRepository
+from .visual_similarity import png_perceptual_distance
 
 
 _EVIDENCE_ID = re.compile(r"^[0-9a-f]{32}$")
@@ -898,37 +903,66 @@ class OpenAICompatibleToolRoleModel:
     transport: GuiOwlTransport | None = field(default=None, repr=False)
 
     def plan(self, context: PlanContext) -> PlanDraft:
-        decoded = self.call_tool(
-            system=(
-                "你是手机任务指挥层。必须调用 record_plan。规划1到16个可观察阶段，"
-                "完整覆盖原始目标；不输出坐标、点击或设备命令。只规划需要在手机上达到的"
-                "可见状态，不要把向用户汇报或结束任务单列为手机阶段。"
-            ),
-            prompt=_planner_prompt(context),
-            observations=(context.observation,),
-            tool_name="record_plan",
-            description="Record an observable plan that preserves the full owner goal",
-            parameters={
-                "type": "object", "additionalProperties": False,
-                "properties": {
-                    "subgoals": {"type": "array", "items": {"type": "string"}},
-                },
-                "required": ["subgoals"],
-            },
-            max_tokens=1_024,
-            reasoning_effort="low",
-            reasoning_budget=0,
-        )
-        subgoals = decoded.get("subgoals")
-        if not isinstance(subgoals, list):
-            raise _invalid_role_response()
-        cleaned = tuple(
-            item.strip() for item in subgoals
-            if isinstance(item, str) and item.strip() and not _is_meta_finish_subgoal(item)
-        )
-        if len(cleaned) != len(subgoals) or not 1 <= len(cleaned) <= 16:
-            raise _invalid_role_response()
-        return PlanDraft(cleaned)
+        base_prompt = _planner_prompt(context)
+        retry_feedback = ""
+        previous_rejected: tuple[str, ...] | None = None
+        for semantic_attempt in range(4):
+            try:
+                decoded = self.call_tool(
+                    system=(
+                        "你是手机任务指挥层。必须调用 record_plan。规划1到24个可观察阶段，"
+                        "完整覆盖原始目标；不输出坐标、点击或设备命令。只规划需要在手机上达到的"
+                        "可见状态，不要把向用户汇报或结束任务单列为手机阶段。每个阶段必须能由"
+                        "一张当前截图独立验证；不同页签、不同列表边界或不同详情页面必须拆成"
+                        "不同阶段，禁止把依次查看多个页面合并为一个阶段。这是线性计划："
+                        "每个阶段必须是无条件的单一可观察结果，禁止写若、如果、否则、如无等分支。"
+                    ),
+                    prompt=base_prompt + retry_feedback,
+                    observations=(context.observation,),
+                    tool_name="record_plan",
+                    description="Record an observable plan that preserves the full owner goal",
+                    parameters={
+                        "type": "object", "additionalProperties": False,
+                        "properties": {
+                            "subgoals": {
+                                "type": "array", "minItems": 1, "maxItems": 24,
+                                "items": {"type": "string"},
+                            },
+                        },
+                        "required": ["subgoals"],
+                    },
+                    max_tokens=1_024,
+                    reasoning_effort="low",
+                    reasoning_budget=0,
+                )
+            except MobileTaskAdapterError as error:
+                if (
+                    error.code == "mobile_role_invalid_response"
+                    and normalize_goal_family(context.goal) == STZB_DAILY_GOAL_FAMILY
+                ):
+                    return PlanDraft(_stzb_daily_plan_scaffold(context.goal))
+                raise
+            subgoals = decoded.get("subgoals")
+            if not isinstance(subgoals, list):
+                retry_feedback = _plan_retry_feedback(("invalid_structure",))
+                continue
+            cleaned = tuple(
+                item.strip() for item in subgoals
+                if isinstance(item, str) and item.strip() and not _is_meta_finish_subgoal(item)
+            )
+            if len(cleaned) != len(subgoals) or not 1 <= len(cleaned) <= 24:
+                retry_feedback = _plan_retry_feedback(("invalid_structure",))
+                continue
+            issues = _stzb_daily_plan_issues(context.goal, cleaned)
+            if not issues:
+                return PlanDraft(cleaned)
+            if previous_rejected == cleaned:
+                return PlanDraft(_stzb_daily_plan_scaffold(context.goal))
+            previous_rejected = cleaned
+            retry_feedback = _plan_retry_feedback(issues, cleaned)
+        if normalize_goal_family(context.goal) == STZB_DAILY_GOAL_FAMILY:
+            return PlanDraft(_stzb_daily_plan_scaffold(context.goal))
+        raise _invalid_role_response()
 
     def decide(self, context: DecisionContext) -> ActionDecision:
         screenshot = self.evidence.load(context.observation.evidence_id)
@@ -937,9 +971,11 @@ class OpenAICompatibleToolRoleModel:
                 "你是手机视觉动作层。必须调用 mobile_use，并且只根据当前截图和当前子目标"
                 "给一个动作。若画面已证明子目标完成，terminate success。系统级返回桌面、"
                 "返回或最近任务应使用 system_button，不要点击导航栏坐标。对可见目标动作"
-                "填写简短 target_description，描述目标文字或语义，不得填写坐标。点击目标"
-                "应落在当前截图可见的可交互文字或控件主体内，避开装饰边缘；若同一区域"
-                "刚刚无进展，必须依据当前截图重新定位到 visibly different 的可交互子区域。"
+                    "填写简短 target_description，描述目标文字或语义，不得填写坐标。点击目标"
+                    "应落在当前截图可见的可交互文字或控件主体内，避开装饰边缘；若同一区域"
+                    "刚刚无进展，必须依据当前截图重新定位到 visibly different 的可交互子区域。"
+                    "若领取后出现全屏‘获得新战法’或类似连续奖励展示，名称/图标随点击变化"
+                    "就是结算进展：每页点击一次继续，直到返回原列表；期间不要使用系统返回。"
             ),
             prompt=_executor_prompt(context),
             observations=(context.observation,),
@@ -950,6 +986,12 @@ class OpenAICompatibleToolRoleModel:
             reasoning_effort="low",
             reasoning_budget=0,
         )
+        # Qwen occasionally names the Android atomic gesture ``tap`` even
+        # though the shared mobile_use schema inherited GUI-Owl's ``click``
+        # spelling. They are exact semantic aliases here; normalize only this
+        # one token before the ordinary coordinate/bounds parser runs.
+        if decoded.get("action") == "tap":
+            decoded = {**decoded, "action": "click"}
         envelope = (
             '<tool_call>{"name":"mobile_use","arguments":'
             + json.dumps(decoded, ensure_ascii=False, separators=(",", ":"))
@@ -995,6 +1037,8 @@ class OpenAICompatibleToolRoleModel:
                 "你是动作后验证层。必须调用 record_verification。只提供一张动作后画面。"
                 "传输成功不等于结果成功；verdict四选一，不得输出互相矛盾的状态。"
                 "只有画面不可读、严重遮挡或无法可靠判断时才选择 uncertain。"
+                "若画面清晰可读但手势后没有可见变化，应选 no_progress，不得仅因为边界或"
+                "子目标尚未被证明就选 uncertain。"
             ),
             prompt=(
                 f"整体目标：{context.goal}\n当前子目标：{context.subgoal.description}\n"
@@ -1031,10 +1075,151 @@ class OpenAICompatibleToolRoleModel:
         uncertain = verdict == "uncertain"
         before = self.evidence.load(context.before.evidence_id)
         after = self.evidence.load(context.after.evidence_id)
-        if before.width == after.width and before.height == after.height and before.png_bytes == after.png_bytes:
-            progress = satisfied is True
+        perceptual_distance = (
+            png_perceptual_distance(before.png_bytes, after.png_bytes)
+            if before.width == after.width and before.height == after.height
+            else None
+        )
+        materially_unchanged = (
+            before.width == after.width
+            and before.height == after.height
+            and (
+                before.png_bytes == after.png_bytes
+                or perceptual_distance is not None
+                and perceptual_distance <= 8
+            )
+        )
+        activity_boundary = _stzb_activity_boundary_kind(
+            context.goal, context.subgoal.description
+        )
+        boundary_probe_invalid = False
+        if activity_boundary is not None:
+            intent = context.decision.intent
+            start_x = intent.arguments.get("x") if intent is not None else None
+            end_x = intent.arguments.get("end_x") if intent is not None else None
+            correct_probe = (
+                intent is not None
+                and intent.name == "swipe"
+                and isinstance(start_x, (int, float))
+                and isinstance(end_x, (int, float))
+                and (
+                    end_x > start_x
+                    if activity_boundary == "left"
+                    else end_x < start_x
+                )
+            )
+            if not correct_probe:
+                satisfied = False
+                progress = False
+                uncertain = False
+                boundary_probe_invalid = True
+                evidence = (
+                    f"{activity_boundary} activity boundary lacks the required "
+                    "directed terminal swipe probe [STZB activity-boundary guard]"
+                )
+            elif not materially_unchanged:
+                # A correctly directed swipe that still changes the frame is
+                # traversal progress, not proof that the terminal boundary has
+                # been reached. This objective transition outranks a model's
+                # mistaken expectation that one old card title must define the
+                # boundary. Only an unchanged same-direction probe may close
+                # this stage.
+                satisfied = False
+                progress = True
+                uncertain = False
+                evidence = (
+                    f"directed swipe moved toward the {activity_boundary} activity "
+                    "boundary; another terminal probe is required "
+                    "[STZB activity-boundary guard]"
+                )
+        if materially_unchanged:
+            middle_viewport_requires_transition = (
+                normalize_goal_family(context.goal) == STZB_DAILY_GOAL_FAMILY
+                and re.search(
+                    r"(?:活动|轮播|卡片)", context.subgoal.description
+                ) is not None
+                and re.search(
+                    r"(?:中间视口|中间画面|中部视口|有重叠|一个可见卡片组)",
+                    context.subgoal.description,
+                ) is not None
+            )
+            if satisfied and middle_viewport_requires_transition:
+                # The plan contract puts this stage after the left boundary.
+                # Therefore an unchanged frame cannot prove that a distinct
+                # middle viewport was reached, even if the model describes the
+                # same visible cards as an overlapping group.
+                satisfied = False
+                progress = False
+                uncertain = False
+                evidence = (
+                    "no material visual transition from the prior activity "
+                    "boundary [STZB activity-middle guard]"
+                )
+            else:
+                progress = satisfied is True
             if not satisfied:
-                evidence = "no material visual change from BEFORE evidence"
+                if (
+                    not middle_viewport_requires_transition
+                    and not boundary_probe_invalid
+                ):
+                    evidence = "no material visual change from BEFORE evidence"
+                # A readable, unchanged result after a swipe is a definitive
+                # boundary/no-progress observation. Unlike a tap, the gesture
+                # has no plausible hidden one-shot side effect that would make
+                # a later strategy unsafe; keep it reflectable instead of
+                # terminating the task as uncertain.
+                if (
+                    context.decision.intent is not None
+                    and context.decision.intent.name == "swipe"
+                ):
+                    uncertain = False
+        elif uncertain and not re.search(
+            r"(?:画面|截图|图像).{0,24}(?:不可读|无法看清|看不清|模糊|"
+            r"严重遮挡|缺失|损坏|异常)|(?:黑屏|花屏|截图失败)",
+            evidence,
+            re.IGNORECASE,
+        ):
+            # A materially changed and readable AFTER frame makes the physical
+            # outcome observable even when it still does not prove the semantic
+            # subgoal. Keep that case reflectable as no-progress. True visual
+            # ambiguity remains terminal, as does an unchanged tap above.
+            uncertain = False
+            progress = False
+            evidence = (
+                evidence.strip()[:7_520]
+                + " [clear changed AFTER frame: semantic uncertainty is no-progress]"
+            )
+        if progress and not satisfied:
+            for attempt in context.recent_attempts:
+                if (
+                    attempt.plan_revision != context.plan_revision
+                    or attempt.subgoal_index != context.subgoal.index
+                    or attempt.after is None
+                ):
+                    continue
+                try:
+                    prior = self.evidence.load(attempt.after.evidence_id)
+                except (MobileTaskAdapterError, OSError):
+                    continue
+                if after.width != prior.width or after.height != prior.height:
+                    continue
+                repeated_distance = png_perceptual_distance(
+                    prior.png_bytes, after.png_bytes,
+                )
+                if prior.png_bytes == after.png_bytes or repeated_distance <= 8:
+                    progress = False
+                    evidence = (
+                        evidence.strip()[:7_520]
+                        + " [scene-loop guard: this unsatisfied subgoal revisited "
+                        "a materially unchanged prior scene]"
+                    )
+                    break
+        if context.decision.kind == "finish" and not satisfied:
+            # A finish decision sends no device action. Animation or other
+            # incidental frame drift cannot create progress when the current
+            # screenshot still does not prove the subgoal; count it as
+            # no-progress so bounded reflection can repair the plan granularity.
+            progress = False
         return Verification(
             bool(satisfied), bool(progress), uncertain=bool(uncertain),
             evidence=evidence.strip()[:8_000],
@@ -1042,48 +1227,87 @@ class OpenAICompatibleToolRoleModel:
 
     def reflect(self, context: ReflectionContext) -> ReflectionDecision:
         observation = _latest_attempt_observation(context)
-        decoded = self.call_tool(
-            system=(
-                "你是手机任务反思层。必须调用 record_reflection。根据连续无进展记录改变策略，"
-                "不得原样重复失败动作。replacement_subgoals 只能写无条件、可从新画面验证的"
-                "结果；禁止坐标、固定点击脚本、‘若/如果/否则’条件步骤。只插入恢复目标，"
-                "不要重写或删除原计划尚未完成的后续目标，运行时会自动接回它们。"
-            ),
-            prompt=_reflection_prompt(context),
-            observations=(observation,),
-            tool_name="record_reflection",
-            description="Record one bounded recovery strategy",
-            parameters={
-                "type": "object", "additionalProperties": False,
-                "properties": {
-                    "strategy": {"type": "string"},
-                    "terminate": {"type": "boolean"},
-                    "reason": {"type": "string"},
-                    "replacement_subgoals": {
-                        "type": ["array", "null"], "items": {"type": "string"},
+        base_prompt = _reflection_prompt(context)
+        semantic_issues: tuple[str, ...] = ()
+        for semantic_attempt in range(4):
+            try:
+                decoded = self.call_tool(
+                    system=(
+                        "你是手机任务反思层。必须调用 record_reflection。根据连续无进展记录改变策略，"
+                        "不得原样重复失败动作。replacement_subgoals 只能写无条件、可从新画面验证的"
+                        "完整结果句；禁止坐标、固定点击脚本、‘若/如果/否则’条件步骤。只插入恢复目标，"
+                        "不要重写或删除原计划尚未完成的后续目标，运行时会自动接回它们。"
+                    ),
+                    prompt=base_prompt + (
+                        _reflection_retry_feedback(
+                            semantic_issues, context.subgoal.description,
+                        )
+                        if semantic_attempt else ""
+                    ),
+                    observations=(observation,),
+                    tool_name="record_reflection",
+                    description="Record one bounded recovery strategy",
+                    parameters={
+                        "type": "object", "additionalProperties": False,
+                        "properties": {
+                            "strategy": {"type": "string"},
+                            "terminate": {"type": "boolean"},
+                            "reason": {"type": "string"},
+                            "replacement_subgoals": {
+                                "type": ["array", "null"], "items": {"type": "string"},
+                            },
+                        },
+                        "required": ["strategy", "terminate", "reason", "replacement_subgoals"],
                     },
-                },
-                "required": ["strategy", "terminate", "reason", "replacement_subgoals"],
-            },
-            max_tokens=1_024,
-        )
-        strategy = decoded.get("strategy")
-        terminate = decoded.get("terminate")
-        reason = decoded.get("reason")
-        replacement = decoded.get("replacement_subgoals")
-        if not isinstance(strategy, str) or not strategy.strip() or not isinstance(terminate, bool) or not isinstance(reason, str):
-            raise _invalid_role_response()
-        replacement_tuple = None
-        if replacement is not None:
-            if not isinstance(replacement, list) or not replacement or any(
-                not isinstance(item, str) or not item.strip() for item in replacement
+                    max_tokens=512,
+                    reasoning_effort="low",
+                    reasoning_budget=0,
+                )
+            except MobileTaskAdapterError as error:
+                if error.code != "mobile_role_invalid_response":
+                    raise
+                break
+            strategy = decoded.get("strategy")
+            terminate = decoded.get("terminate")
+            reason = decoded.get("reason")
+            replacement = decoded.get("replacement_subgoals")
+            if (
+                not isinstance(strategy, str)
+                or not strategy.strip()
+                or not isinstance(terminate, bool)
+                or not isinstance(reason, str)
             ):
-                raise _invalid_role_response()
-            replacement_tuple = tuple(item.strip() for item in replacement)
-        return ReflectionDecision(
-            strategy.strip(), terminate=terminate, reason=reason.strip(),
-            replacement_subgoals=replacement_tuple,
-        )
+                semantic_issues = ("invalid_structure",)
+                continue
+            replacement_tuple = None
+            if replacement is not None:
+                if (
+                    not isinstance(replacement, list)
+                    or not replacement
+                    or any(
+                        not isinstance(item, str)
+                        or not item.strip()
+                        for item in replacement
+                    )
+                ):
+                    semantic_issues = ("invalid_structure",)
+                    continue
+                replacement_tuple = tuple(item.strip() for item in replacement)
+                semantic_issues = _stzb_daily_recovery_issues(
+                    context.goal,
+                    context.subgoal.description,
+                    replacement_tuple,
+                )
+                if semantic_issues:
+                    continue
+            return ReflectionDecision(
+                strategy.strip(), terminate=terminate, reason=reason.strip(),
+                replacement_subgoals=replacement_tuple,
+            )
+        fallback = _stzb_daily_reflection_fallback(context)
+        if fallback is not None:
+            return fallback
+        raise _invalid_role_response()
 
     def call_tool(
         self, *, system: str, prompt: str, observations: tuple[Observation, ...],
@@ -1093,19 +1317,27 @@ class OpenAICompatibleToolRoleModel:
     ) -> dict[str, Any]:
         if not self.model.strip():
             raise MobileTaskAdapterError("mobile_role_not_configured", "本地角色模型名称未配置。")
-        content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+        no_think = "\n/no_think" if "qwen" in self.model.casefold() else ""
+        content: list[dict[str, Any]] = [
+            {"type": "text", "text": prompt + no_think}
+        ]
         for observation in observations:
             screenshot = self.evidence.load(observation.evidence_id)
             content.append({
                 "type": "image_url",
                 "image_url": {"url": "data:image/png;base64," + base64.b64encode(screenshot.png_bytes).decode("ascii")},
             })
+        if no_think and observations:
+            # Qwen's multimodal template evaluates the directive at the end of
+            # the user turn. Keeping it only in the leading text block leaves
+            # an image after it and may re-enable a long hidden reasoning pass.
+            content.append({"type": "text", "text": "/no_think"})
         payload = {
             "model": self.model.strip(), "temperature": 0.0,
             "reasoning_effort": reasoning_effort,
             "max_tokens": max_tokens,
             "messages": [
-                {"role": "system", "content": system},
+                {"role": "system", "content": system + no_think},
                 {"role": "user", "content": content},
             ],
             "tools": [{"type": "function", "function": {
@@ -1131,6 +1363,7 @@ class OpenAICompatibleToolRoleModel:
                     + "\n\nYour previous response was not one valid forced tool call. "
                     + f"Call {tool_name} exactly once with arguments matching its schema. "
                     + "Do not explain, use Markdown, or return plain text."
+                    + no_think
                 )
             try:
                 response = (
@@ -1225,19 +1458,53 @@ def _physical_intent(
 def _planner_prompt(context: PlanContext) -> str:
     family_instruction = ""
     if normalize_goal_family(context.goal) == STZB_DAILY_GOAL_FAMILY:
+        execution_instruction = (
+            "This owner goal is discovery_only: navigate and inspect, but do not execute, "
+            "claim, complete, recruit for, or otherwise mutate any discovered daily item. "
+            "Finish after the complete visible target set and its coverage boundaries are "
+            "recorded. "
+            if is_stzb_discovery_only_goal(context.goal)
+            else "Then complete every currently incomplete available item and finally "
+            "reopen and visibly reread the complete checklist. "
+        )
         family_instruction = (
             "\nSTZB daily vNext requirements: first reach and visibly inspect today's "
-            "complete daily checklist; then complete every currently incomplete item "
-            "that is available; finally reopen and visibly reread the complete checklist. "
+            "complete daily checklist or bounded multi-surface target set. "
+            f"{execution_instruction}"
             "A map-side quick task strip with one tracked objective is navigation only, "
-            "not that checklist: plan a separate observable stage for reaching an "
-            "independent full daily-task page that shows multiple items and their states. "
-            "Do not reinterpret main-story, reputation, or generic affairs items as daily "
-            "tasks. Plan item execution only after the screenshot visibly identifies a "
-            "daily/today/activity category; otherwise plan an availability check and an "
+            "not that checklist: plan a separate observable stage for reaching a "
+            "daily target surface that shows explicit daily identity and item state. "
+            "Current game builds may rename the former daily-affairs page to 事务 or move "
+            "it to 巡察. Never treat the 事务 label alone as daily identity, but do inspect "
+            "visible 巡察, 每日/每天刷新, 今日, or equivalent current-cycle evidence. "
+            "The current-day target set may span several explicit daily cards or surfaces; "
+            "preserve each item and the visible start/middle/end coverage views instead of "
+            "inventing one legacy page. For execution goals, plan item execution only "
+            "after the screenshot "
+            "visibly identifies a daily/today/activity category; otherwise plan an "
             "observable fallback: leave the exhausted task surface, inspect the current "
             "main navigation for a visibly labeled activity/daily entry, and only then "
             "use an honest partial stop if no visible route remains. "
+            "Treat the task panel as an identity investigation, not as a presumed daily "
+            "page: inspect 主要事宜, 事务, and 名望 in separate screenshot-verifiable stages, "
+            "and word each stage as confirming whether daily/current-cycle identity is "
+            "present so a visibly negative result can close that stage. Never combine "
+            "multiple task-panel tabs into one '逐页/逐标签' stage. Likewise, keep carousel "
+            "left boundary, one overlapping middle viewport, right boundary, and each planned "
+            "card detail as distinct stages. A direct jump from the first to last viewport is "
+            "not complete carousel coverage. "
+            "对执行型目标，必须严格按以下四段顺序生成计划："
+            "(1) 先用独立阶段覆盖轮播边界、卡片详情和任务页签，只确认是否存在明确的"
+            "每日身份；当前画面只显示名称时，不得把某张卡片预设为每日来源。"
+            "(2) 在任何执行、领取或完成阶段之前，单独加入一条类似‘汇总以上"
+            "各独立表面，冻结并记录今天完整目标清单及覆盖边界’的可观察阶段。"
+            "(3) 只在该冻结阶段之后规划执行，不得把多项物理操作合并成一个不可单屏"
+            "验证的阶段。(4) 最后从新鲜画面分开复读已确认的每日表面；对先前为"
+            "否定结果的页面，只能复核其仍无每日身份，不得写成复读其每日条目。"
+            "初始规划尚未得到冻结清单，不得猜测第四个及更多未知条目；最多为冻结后"
+            "发现的前三个当前可行条目各预留一个执行阶段，把其余阶段留给完整发现和"
+            "逐表面最终复读。清单确有更多条目时必须由后续有证据的重规划扩展，不能"
+            "用‘其余条目逐一执行’合并占位。"
             "Do not reduce the goal to launching the game, opening one panel, or claiming "
             "one reward. Do not invent task-specific coordinates. If an item needs elapsed "
             "time or an unavailable external condition, preserve it as remaining instead "
@@ -1249,6 +1516,517 @@ def _planner_prompt(context: PlanContext) -> str:
         f"Current observation: {context.observation.summary}\n"
         f"Verified Skill Memory: {_skill_memory(context.skill_memory)}"
         f"{family_instruction}"
+    )
+
+
+def _stzb_daily_plan_is_semantically_valid(
+    goal: str, subgoals: tuple[str, ...],
+) -> bool:
+    return not _stzb_daily_plan_issues(goal, subgoals)
+
+
+def _stzb_daily_recovery_issues(
+    goal: str,
+    current_subgoal: str,
+    subgoals: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Validate a recovery replacement and retain the stalled stage's core outcome."""
+
+    if normalize_goal_family(goal) != STZB_DAILY_GOAL_FAMILY:
+        return ()
+    issues = [
+        issue
+        for issue in _stzb_daily_plan_issues(goal, subgoals)
+        if not issue.startswith("missing_")
+    ]
+    if any(_looks_truncated_subgoal(item) for item in subgoals):
+        issues.append("truncated_subgoal")
+    if any(
+        re.search(
+            r"(?:^|[，。；;])\s*(?:若|如果|否则|如未|如无|没有则|未显示则)",
+            item,
+        )
+        for item in subgoals
+    ):
+        issues.append("conditional_stage")
+
+    joined = "\n".join(subgoals)
+    if re.search(
+        r"(?:每日|每天|今日).{0,20}(?:列表|详情|页面|目标表面|表面)"
+        r"|(?:列表|详情|页面|目标表面|表面).{0,20}(?:每日|每天|今日)",
+        current_subgoal,
+    ) and not re.search(
+        r"(?:每日|每天|今日).{0,20}(?:列表|详情|页面|目标表面|表面)"
+        r"|(?:列表|详情|页面|目标表面|表面).{0,20}(?:每日|每天|今日)",
+        joined,
+    ):
+        issues.append("missing_current_daily_surface")
+    if re.search(
+        r"(?:完整.{0,16}(?:清单|目标集|列表|条目|第一屏)|"
+        r"第一屏.{0,16}(?:完整|边界)|"
+        r"(?:清单|目标集|列表).{0,16}(?:起止|左右|上下|全部).{0,8}边界|"
+        r"覆盖.{0,16}(?:起止|左右|上下|全部).{0,8}边界)",
+        current_subgoal,
+    ) and not re.search(
+        r"(?:完整.{0,16}(?:清单|目标集|列表|条目|第一屏)|"
+        r"第一屏.{0,16}(?:完整|边界)|"
+        r"(?:清单|目标集|列表).{0,16}(?:起止|左右|上下|全部).{0,8}边界|"
+        r"覆盖.{0,16}(?:起止|左右|上下|全部).{0,8}边界)",
+        joined,
+    ):
+        issues.append("missing_current_discovery")
+    current_boundary = re.search(
+        r"(左|右)(?:侧)?边界|最(左|右)", current_subgoal,
+    )
+    if current_boundary is not None:
+        direction = next(
+            value for value in current_boundary.groups() if value is not None
+        )
+        if re.search(
+            rf"(?:{direction}(?:侧)?边界|最{direction})", joined,
+        ) is None:
+            issues.append("missing_current_activity_boundary")
+    if re.search(
+        r"(?:执行|完成|领取|招募|占领|升级|处理).{0,24}"
+        r"(?:条目|任务|事项|奖励|招募|占领|升级|巡察|状态|进度)",
+        current_subgoal,
+    ) and not re.search(
+        r"(?:执行|完成|领取|招募|占领|升级|处理).{0,24}"
+        r"(?:条目|任务|事项|奖励|招募|占领|升级|巡察|状态|进度)"
+        r"|(?:阻塞|不可完成|条件不足|资源不足|时间未到)",
+        joined,
+    ):
+        issues.append("missing_current_execution")
+    if re.search(
+        r"(?:重新|再次|最终|独立).{0,24}(?:复读|复查|读取|确认|打开)",
+        current_subgoal,
+    ) and not re.search(
+        r"(?:重新|再次|最终|独立).{0,24}(?:复读|复查|读取|确认|打开)",
+        joined,
+    ):
+        issues.append("missing_current_reread")
+    return tuple(dict.fromkeys(issues))
+
+
+_STZB_REFLECTION_FALLBACK_STRATEGY = "bounded STZB visible-surface recovery"
+
+
+def _stzb_daily_reflection_fallback(
+    context: ReflectionContext,
+) -> ReflectionDecision | None:
+    """Preserve one read-only stalled outcome when Qwen cannot shape a recovery.
+
+    This is deliberately unavailable for execution stages and may only replace
+    one model reflection in a row. It re-grounds through an observable
+    navigation result without coordinates, then restores the exact stalled
+    outcome so invalid role formatting cannot discard the owner goal.
+    """
+
+    current = context.subgoal.description.strip()
+    if (
+        normalize_goal_family(context.goal) != STZB_DAILY_GOAL_FAMILY
+        or _is_stzb_execution_stage(current)
+        or context.strategy == _STZB_REFLECTION_FALLBACK_STRATEGY
+    ):
+        return None
+    replacement = tuple(dict.fromkeys((
+        "画面已回到可操作的主导航表面，主导航入口清晰可见。",
+        current,
+    )))
+    if _stzb_daily_recovery_issues(context.goal, current, replacement):
+        return None
+    return ReflectionDecision(
+        strategy=_STZB_REFLECTION_FALLBACK_STRATEGY,
+        terminate=False,
+        reason=(
+            "本地角色模型未返回可用恢复格式；仅重建可见导航状态并保留原子目标，"
+            "不执行清单条目。"
+        ),
+        replacement_subgoals=replacement,
+    )
+
+
+def _reflection_retry_feedback(
+    issues: tuple[str, ...], current_subgoal: str,
+) -> str:
+    messages = {
+        "invalid_structure": "返回非空 strategy/reason、布尔 terminate 和非空恢复阶段数组。",
+        "truncated_subgoal": "每个恢复阶段必须是完整结果句，不得以连接词或未完成短语结尾。",
+        "conditional_stage": "不得写若、如果、否则等分支；把当前可见的下一条单一路径写成无条件结果阶段。",
+        "aggregated_surface": "不同任务页签或列表边界必须拆成独立的单屏恢复阶段。",
+        "presumed_daily_identity": "任务面板、主要事宜、事务或名望只能确认是否具有每日身份，不得预设其就是每日页。",
+        "aggregated_execution": "不得把多个执行结果合成一个恢复阶段。",
+        "missing_current_daily_surface": "恢复阶段替换了当前阶段，最后必须重新进入并证明当前要求的每日列表或详情表面。",
+        "missing_current_discovery": "恢复阶段替换了当前阶段，最后必须重新达到当前要求的完整清单或边界覆盖结果。",
+        "missing_current_activity_boundary": "恢复阶段替换了活动边界结果，最后必须重新达到当前要求的同一侧边界。",
+        "missing_current_execution": "恢复阶段替换了当前阶段，最后必须重新达到当前执行结果或明确阻塞结果。",
+        "missing_current_reread": "恢复阶段替换了当前阶段，最后必须重新达到当前独立最终复读结果。",
+    }
+    detail = "".join(messages[item] for item in issues if item in messages)
+    return (
+        "\n上一份恢复方案不满足运行时契约：" + detail
+        + f"当前被替换子目标是：{current_subgoal}。"
+        + "重新生成至多四个无条件、逐画面可验证的恢复结果；最后一个阶段必须重新达到当前子目标的核心结果，"
+        + "如果当前子目标预设了实际不存在的单一每日清单页，不要继续虚构该页面或标题；"
+        + "可以改为覆盖多个带明确每日/每天/今日机制的独立表面及其边界，重建同等完整目标集。"
+        + "只选择当前画面可见的一条下一路径，不要附加备用分支。"
+        + "运行时随后会自动接回原计划尚未尝试的尾部。"
+    )
+
+
+def _stzb_daily_plan_scaffold(goal: str) -> tuple[str, ...]:
+    """Return a bounded semantic fallback, never a coordinate/action macro."""
+
+    discovery = (
+        "率土之滨可操作画面已稳定显示，当前加载层和遮挡性弹窗已结束或关闭",
+        "打开精彩活动面板并切换到活动页签，活动轮播及可见卡片已显示",
+        "将精彩活动的活动轮播移动到左侧边界，记录左侧边界画面全部可见卡片及每日、每天或今日身份标识",
+        "从活动左侧边界向右移动一个有重叠的可见卡片组，记录中间视口全部可见卡片及每日、每天或今日身份标识",
+        "将精彩活动的活动轮播移动到右侧边界，记录右侧边界画面全部可见卡片及每日、每天或今日身份标识",
+        "打开轮播中第一个明确带每日、每天或今日文案的活动卡片详情，确认其每日机制和当前条目状态",
+        "返回活动轮播并打开第二个明确带每日、每天或今日文案的活动卡片详情，确认其每日机制和当前条目状态",
+        "关闭精彩活动面板并回到主界面，主导航入口清晰可见",
+        "从主界面打开任务面板，主要事宜、事务和名望页签清晰可见",
+        "在任务面板打开主要事宜页签，确认该页签是否具有每日、每天或今日周期身份",
+        "在任务面板打开事务页签，确认该页签是否具有每日、每天或今日周期身份",
+        "在任务面板打开名望页签，确认该页签是否具有每日、每天或今日周期身份",
+        "关闭任务面板回到主导航界面，打开当前可见的巡察入口并确认其今日次数、条目和状态",
+        "汇总以上各独立表面，冻结并记录今天完整每日目标清单及覆盖边界",
+    )
+    if is_stzb_discovery_only_goal(goal):
+        return discovery
+    return discovery + (
+        "执行冻结清单中第一个当前可行条目并使其在单屏可见为已完成、已领取或明确阻塞状态",
+        "执行冻结清单中第二个当前可行条目并使其在单屏可见为已完成、已领取或明确阻塞状态",
+        "从新鲜画面重新打开第一个已确认含每日身份的每日表面，复读其全部条目最终状态",
+        "从新鲜画面重新打开主要事宜页签，确认是否仍无每日身份并记录状态",
+        "从新鲜画面重新打开事务页签，确认是否仍无每日身份并记录状态",
+        "从新鲜画面重新打开名望页签，确认是否仍无每日身份并记录状态",
+        "从新鲜画面重新打开巡察入口，复读其今日次数、全部条目和最终状态",
+        "从新鲜画面重新打开精彩活动并移动到左侧边界，复读左侧边界的全部每日候选及最终状态",
+        "从活动左侧边界向右移动一个有重叠的可见卡片组，复读中间视口的全部每日候选及最终状态",
+        "将精彩活动轮播移动到右侧边界，复读右侧边界的全部每日候选及最终状态",
+    )
+
+
+def _stzb_daily_plan_issues(
+    goal: str, subgoals: tuple[str, ...],
+) -> tuple[str, ...]:
+    if normalize_goal_family(goal) != STZB_DAILY_GOAL_FAMILY:
+        return ()
+    issues: list[str] = []
+    task_surface = r"(?:任务[\s\"'“”‘’]{0,3}(?:面板|总览|入口|页)|主要事宜|事务|名望)"
+    confirmed_task_surfaces: set[str] = set()
+    task_surface_indices: list[int] = []
+    patrol_indices: list[int] = []
+    for item_index, item in enumerate(subgoals):
+        if re.search(
+            r"(?:^|[，。；;（(])\s*(?:若|如果|否则|如未|如无|如有|如存在|如可见|没有则|未显示则)",
+            item,
+        ):
+            issues.append("conditional_stage")
+        if re.search(
+            task_surface + r".{0,24}"
+            r"(?:逐页|逐标签|全部标签|所有标签|分别查看|全部查看|所有页签)"
+            r"|" + task_surface + r".{0,32}(?:逐一|依次|分别)(?:检查|查看)?"
+            r".{0,16}(?:每个|多个|所有|各个)?(?:页签|子分类)"
+            r"|(?:逐页|逐标签|分别查看|全部查看|所有).{0,24}" + task_surface,
+            item,
+        ):
+            issues.append("aggregated_surface")
+        if re.search(
+            r"(?:关闭|退出|离开).{0,20}精彩活动面板.{0,40}"
+            r"(?:势力发展|充值好礼|活动).{0,8}页签"
+            r"|主界面.{0,24}(?:势力发展|充值好礼).{0,8}页签",
+            item,
+        ):
+            issues.append("closed_surface_navigation")
+        if (
+            re.search(r"(?:主要事宜|事务|名望)", item)
+            and re.search(r"(?:点击|进入|打开|切换)", item)
+            and (
+                re.search(r"(?:主导航|主界面)", item)
+                and not re.search(r"任务(?:面板|总览|入口|页)", item)
+                or re.search(r"精彩活动(?:面板)?", item)
+                and not re.search(
+                    r"(?:关闭|退出|离开).{0,24}精彩活动(?:面板)?.{0,48}"
+                    r"(?:打开|进入).{0,16}任务(?:面板|总览|入口|页)",
+                    item,
+                )
+            )
+        ):
+            issues.append("misplaced_task_tab_navigation")
+        if (
+            re.search(r"(?:每日|每天|今日|当前周期)", item)
+            and re.search(
+                r"(?:是否|有无|确认.{0,24}(?:是否|身份|标识|属于|存在|含有|有无)|"
+                r"判断.{0,16}(?:身份|性质|是否))",
+                item,
+            )
+        ):
+            for surface_name in ("主要事宜", "事务", "名望"):
+                if surface_name in item:
+                    confirmed_task_surfaces.add(surface_name)
+                    task_surface_indices.append(item_index)
+        if (
+            "巡察" in item
+            and re.search(r"(?:确认|查看|读取|记录).{0,32}(?:次数|条目|状态|今日|每日)", item)
+        ):
+            patrol_indices.append(item_index)
+        if (
+            re.search(task_surface, item)
+            and re.search(r"(?:每日|每天|今日|当前周期)", item)
+            and not (
+                re.search(r"(?:主导航|主界面)", item)
+                and re.search(r"可见", item)
+                and re.search(r"(?:、|/|或)", item)
+                and not re.search(r"(?:点击|进入|打开)", item)
+            )
+            and not re.search(
+                r"(?:任务面板.{0,8}(?:已)?关闭|(?:关闭|退出|离开).{0,16}任务面板)"
+                r".{0,80}(?:主导航|独立|不同)",
+                item,
+            )
+            and not re.search(
+                r"(?:是否|有无|确认.{0,24}(?:是否|身份|标识|属于|存在|含有|有无)|"
+                r"判断.{0,16}(?:身份|性质|是否))",
+                item,
+            )
+            and not (
+                confirmed_task_surfaces == {"主要事宜", "事务", "名望"}
+                and re.search(
+                    r"(?:汇总|冻结|记录).{0,200}(?:完整|全部|所有)"
+                    r".{0,24}(?:每日|日常|目标)?(?:清单|目标集|条目)",
+                    item,
+                )
+            )
+            and not re.search(
+                r"(?:汇总|冻结|记录).{0,200}(?:明确|区分|标注).{0,24}"
+                r"哪些.{0,24}(?:每日|日常).{0,8}身份",
+                item,
+            )
+            and not re.search(
+                r"(?:重新|再次|最终|从新鲜画面).{0,48}"
+                r"(?:打开|进入|复读|复核).{0,64}"
+                r"(?:已确认(?:为|具有|含有)?|具有).{0,12}"
+                r"(?:每日|每天|今日)",
+                item,
+            )
+        ):
+            issues.append("presumed_daily_identity")
+        if re.search(
+            r"(?:其余|全部|所有).{0,20}(?:逐项|逐一|逐个|依次|分别).{0,16}"
+            r"(?:执行|完成|领取|处理)",
+            item,
+        ):
+            issues.append("aggregated_execution")
+        if re.search(
+            r"冻结清单中第(?:四|五|六|七|八|九|十|[4-9]|[1-9][0-9]+)个"
+            r".{0,32}(?:执行|完成|领取|处理)",
+            item,
+        ):
+            issues.append("invented_execution_slot")
+        if (
+            re.search(r"(?:重新|再次|最终|从新鲜画面).{0,48}(?:复读|复核|打开|进入)", item)
+            and re.search(r"(?:先前|此前|之前).{0,24}(?:否定|无每日身份|非每日)", item)
+            and sum(name in item for name in ("主要事宜", "事务", "名望")) != 1
+        ):
+            issues.append("aggregated_negative_reread")
+
+    joined = "\n".join(subgoals)
+    discovery_present = re.search(
+        r"(?:发现|清单|目标集|列表|任务面板|主要事宜|事务|名望|活动|轮播|"
+        r"每日|每天|今日|巡察).{0,32}(?:查看|读取|记录|确认|覆盖|边界|身份|状态)"
+        r"|(?:查看|读取|记录|确认|覆盖).{0,32}"
+        r"(?:清单|目标集|列表|任务面板|主要事宜|事务|名望|活动|轮播|每日|每天|今日|巡察)",
+        joined,
+        re.IGNORECASE,
+    ) is not None
+    if not discovery_present:
+        issues.append("missing_discovery")
+
+    if is_stzb_discovery_only_goal(goal):
+        final_record_present = re.search(
+            r"(?:最终|完整|全部|汇总|冻结).{0,28}(?:记录|复读|复查|确认|清单|目标集|边界)"
+            r"|(?:记录|汇总|冻结).{0,28}(?:完整|全部|边界|清单|目标集)",
+            joined,
+            re.IGNORECASE,
+        ) is not None
+        if not final_record_present:
+            issues.append("missing_discovery_record")
+    else:
+        if confirmed_task_surfaces != {"主要事宜", "事务", "名望"}:
+            issues.append("missing_task_identity_surfaces")
+        left_activity_boundary_indices = [
+            index for index, item in enumerate(subgoals)
+            if re.search(
+                r"(?:精彩活动|活动|轮播|卡片).{0,40}(?:左右边界|起止边界|左边界|左侧边界|最左)"
+                r"|(?:左右边界|起止边界|左边界|左侧边界|最左).{0,40}(?:精彩活动|活动|轮播|卡片)",
+                item,
+            )
+        ]
+        right_activity_boundary_indices = [
+            index for index, item in enumerate(subgoals)
+            if re.search(
+                r"(?:精彩活动|活动|轮播|卡片).{0,40}(?:左右边界|起止边界|右边界|右侧边界|最右)"
+                r"|(?:左右边界|起止边界|右边界|右侧边界|最右).{0,40}(?:精彩活动|活动|轮播|卡片)",
+                item,
+            )
+        ]
+        if not left_activity_boundary_indices or not right_activity_boundary_indices:
+            issues.append("missing_activity_boundary")
+        elif set(left_activity_boundary_indices) & set(right_activity_boundary_indices):
+            issues.append("aggregated_surface")
+        activity_middle_indices = [
+            index for index, item in enumerate(subgoals)
+            if re.search(r"(?:活动|轮播|卡片)", item)
+            and re.search(
+                r"(?:中间视口|中间画面|中部视口|有重叠|一个可见卡片组)", item
+            )
+        ]
+        if not activity_middle_indices:
+            issues.append("missing_activity_middle")
+        activity_detail_indices = [
+            index for index, item in enumerate(subgoals)
+            if re.search(r"(?:活动|卡片|登录奖励|心愿征程).{0,32}详情|详情.{0,32}(?:活动|卡片)", item)
+            and re.search(r"(?:是否|确认|记录|读取).{0,40}(?:每日|每天|今日|身份|条目|状态)", item)
+        ]
+        if not activity_detail_indices:
+            issues.append("missing_activity_detail")
+        if not patrol_indices:
+            issues.append("missing_patrol_surface")
+        complete_discovery_indices = [
+            index
+            for index, item in enumerate(subgoals)
+            if re.search(
+                r"(?:(?:汇总|冻结).{0,96}(?:完整|全部|所有|全量|覆盖).{0,40}"
+                r"(?:清单|目标集|每日表面|日常表面|候选|条目|边界)|"
+                r"(?:覆盖所有|覆盖全部).{0,96}(?:记录|形成|冻结).{0,32}"
+                r"(?:完整|全部|全量).{0,24}(?:清单|目标集|候选|条目))",
+                item,
+                re.IGNORECASE,
+            )
+        ]
+        if not complete_discovery_indices:
+            issues.append("missing_complete_discovery")
+        if complete_discovery_indices:
+            first_manifest_index = min(complete_discovery_indices)
+            required_discovery_groups = (
+                task_surface_indices,
+                left_activity_boundary_indices,
+                activity_middle_indices,
+                right_activity_boundary_indices,
+                activity_detail_indices,
+                patrol_indices,
+            )
+            # Later final rereads legitimately mention the same surfaces.  The
+            # freeze is premature only when an entire required discovery group
+            # has no observation before the first manifest stage.
+            if any(
+                group and not any(index < first_manifest_index for index in group)
+                for group in required_discovery_groups
+            ):
+                issues.append("manifest_before_discovery_complete")
+        if re.search(
+            r"(?:没有|不存在|若无|如果没有).{0,20}单一.{0,12}(?:每日|今日).{0,8}(?:页|清单)"
+            r"|所有.{0,20}(?:独立)?表面",
+            goal,
+        ) and not (
+            re.search(
+                r"(?:多个|所有|全部|各个|多表面).{0,24}(?:独立)?(?:每日|日常|目标)?表面"
+                r"|(?:独立表面).{0,24}(?:全部|所有|边界|覆盖)"
+                r"|(?:各|多个|所有|全部)(?:个|独立)?表面(?:中)?(?:所有|全部)?",
+                joined,
+            )
+            and complete_discovery_indices
+        ):
+            issues.append("missing_multisurface_discovery")
+        execution_indices = [
+            index
+            for index, item in enumerate(subgoals)
+            if _is_stzb_execution_stage(item)
+        ]
+        if not execution_indices:
+            issues.append("missing_execution")
+        elif complete_discovery_indices:
+            first_execution_index = min(execution_indices)
+            if (
+                first_execution_index is not None
+                and first_execution_index < min(complete_discovery_indices)
+            ):
+                issues.append("execution_before_complete_discovery")
+        reread_present = re.search(
+            r"(?:重新|再次|最终).{0,32}(?:打开|进入|读取|复读|复查|确认).{0,32}"
+            r"(?:清单|目标集|列表|每日|每天|今日|条目|状态|入口)"
+            r"|(?:独立复读|独立复查|最终复读|最终复查)",
+            joined,
+            re.IGNORECASE,
+        ) is not None
+        if not reread_present:
+            issues.append("missing_final_reread")
+    return tuple(dict.fromkeys(issues))
+
+
+def _is_stzb_execution_stage(item: str) -> bool:
+    """Distinguish a physical execution goal from discovery of executability."""
+
+    if re.search(r"(?:阻塞|不可完成|条件不足|资源不足|时间未到)", item):
+        return True
+    return re.search(
+        r"(?<!可)(?<!不)(?<!未)(?:执行|领取|处理).{0,32}"
+        r"(?:任务|条目|事项|奖励|招募|占领|升级|巡察|操作|反馈|结果)"
+        r"|(?:完成|招募|占领|升级).{0,24}"
+        r"(?:任务|条目|事项|奖励|武将|土地|建筑|事件|操作|反馈|结果)",
+        item,
+        re.IGNORECASE,
+    ) is not None
+
+
+def _plan_retry_feedback(
+    issues: tuple[str, ...], rejected_subgoals: tuple[str, ...] = (),
+) -> str:
+    messages = {
+        "invalid_structure": "输出必须是1到24个非空阶段，不得加入结束或汇报阶段。",
+        "conditional_stage": "线性计划不得写若、如果、否则、如无等分支，也不要用括号内的‘如某卡片’举例；仅把含条件或举例的阶段改写成确定的单一结果。",
+        "aggregated_surface": "不同任务页签或列表边界必须拆成不同的单屏阶段；最终复读也不得用‘逐页签’合并它们。",
+        "closed_surface_navigation": "势力发展、充值好礼和活动是精彩活动面板内的页签；必须在关闭该面板之前分别查看，不得说在主界面点击它们。",
+        "misplaced_task_tab_navigation": "主要事宜、事务和名望是任务面板内的页签，既不是主导航入口也不属于精彩活动面板；先关闭精彩活动回到主界面，再用一个阶段打开任务面板，然后在面板内分别切换三个页签。",
+        "presumed_daily_identity": "任务面板、主要事宜、事务或名望只能先确认是否具有每日身份，不得预设其就是每日页；最终复读请写成‘重新打开该页，确认是否仍无每日身份并记录状态’，不要写‘无每日身份或显示当前状态’这种二选一结果。",
+        "missing_task_identity_surfaces": "普通完成目标必须保留三个独立阶段，分别写明‘确认主要事宜是否具有每日身份’、‘确认事务是否具有每日身份’和‘确认名望是否具有每日身份’，不得因当前停在活动面板就漏掉它们。",
+        "missing_activity_boundary": "普通完成目标必须在关闭精彩活动面板前，用独立阶段确认活动轮播的左右或起止边界。",
+        "missing_activity_middle": "普通完成目标必须在活动左右边界之间增加一个有重叠的中间视口阶段，记录中间卡片，禁止从起点直接跳到终点。",
+        "missing_activity_detail": "普通完成目标必须打开至少一张活动卡片详情，独立确认其是否含每日、每天或今日机制；单看卡片名称不足以关闭发现。",
+        "missing_patrol_surface": "普通完成目标必须在冻结清单前独立打开巡察入口，确认今日次数、条目和状态。",
+        "aggregated_execution": "不要把其余或全部条目合成一个逐项执行阶段；每个阶段必须能由一张截图验证。",
+        "invented_execution_slot": "初始计划尚未冻结真实清单，最多保留前三个未知条目的独立执行占位；删除第四个及以后猜出的序号执行阶段，把这些位置用于缺失的发现或最终复读。",
+        "aggregated_negative_reread": "最终复读不能把多个先前否定的页面合成一个阶段；分别重新打开主要事宜、事务和名望并记录各自是否仍无每日身份。",
+        "missing_discovery": "计划缺少发现并覆盖当前每日目标集及可见边界的阶段。",
+        "missing_complete_discovery": "必须在执行前新增一个单独阶段，明确写成‘汇总以上各独立表面，冻结并记录今天完整目标清单及覆盖边界’。",
+        "manifest_before_discovery_complete": "冻结完整清单阶段必须排在任务三页、活动左右边界、每日候选详情和巡察状态全部独立确认之后。",
+        "missing_multisurface_discovery": "目标已说明不存在单一页面时，计划必须在各页独立确认后，用一条‘汇总以上各独立表面’阶段冻结所有显式日常表面及其边界。",
+        "execution_before_complete_discovery": "将所有含执行、领取或完成物理操作的阶段，移到‘汇总以上各独立表面并冻结完整目标清单’阶段之后。",
+        "missing_discovery_record": "只发现目标必须包含完整记录或冻结已覆盖目标集的收尾阶段。",
+        "missing_execution": "普通完成目标缺少执行当前可行条目或明确保留阻塞项的阶段。",
+        "missing_final_reread": "普通完成目标缺少从新鲜画面重新打开并独立复读最终清单或目标集的阶段。",
+    }
+    detail = "".join(messages[item] for item in issues if item in messages)
+    rejected_plan = (
+        "\n上一份被拒绝计划的完整 JSON 是："
+        + json.dumps(
+            {"subgoals": list(rejected_subgoals)},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        + "。必须复制其中仍有效的阶段及其顺序，只修复上面指出的问题；"
+        "不要从头另拟整份计划。需要增加缺失阶段时，优先删除重复卡片详情或重复的"
+        "序号占位执行阶段，且总数不得超过24。"
+        if rejected_subgoals
+        else ""
+    )
+    return (
+        "\n上一份计划未完整保持原始目标：" + detail
+        + rejected_plan
+        + "仍须返回一份完整计划；不得合并不同页面、不同边界或多个执行结果。"
     )
 
 
@@ -1444,6 +2222,33 @@ def _reflection_prompt(context: ReflectionContext) -> str:
 def _stzb_daily_executor_instruction(goal: str, subgoal: str) -> str:
     if normalize_goal_family(goal) != STZB_DAILY_GOAL_FAMILY:
         return ""
+    activity_boundary = _stzb_activity_boundary_kind(goal, subgoal)
+    boundary_guidance = (
+        " For this left-boundary stage, do not terminate based only on the apparent "
+        "layout. Start on the center artwork or caption of a visible activity card and "
+        "drag the card content toward the right. Repeat on later attempts until the same "
+        "directed swipe produces no material visual change; that unchanged terminal probe "
+        "is the boundary evidence."
+        if activity_boundary == "left"
+        else
+        " For this right-boundary stage, do not terminate based only on the apparent "
+        "layout. Start on the center artwork or caption of a visible activity card and "
+        "drag the card content toward the left. Repeat on later attempts until the same "
+        "directed swipe produces no material visual change; that unchanged terminal probe "
+        "is the boundary evidence."
+        if activity_boundary == "right"
+        else ""
+    )
+    discovery_boundary = (
+        " This goal is discovery_only: actions may navigate, scroll, open a read-only "
+        "detail, or close it, but must not claim, recruit, complete, or execute a daily "
+        "item. If a visible control could trigger the item rather than inspect it, do not "
+        "press it. When the current frame already visibly proves a read/record/inspect "
+        "subgoal, terminate that subgoal with success before navigating away; do not "
+        "close or change the page until the observation subgoal has been verified."
+        if is_stzb_discovery_only_goal(goal)
+        else ""
+    )
     return (
         "\n\nSTZB daily visual boundary: a map screen with one tracked objective, "
         "progress such as 1/4, or commander/party rows is only a quick task "
@@ -1452,19 +2257,75 @@ def _stzb_daily_executor_instruction(goal: str, subgoal: str) -> str:
         "is visible. Re-ground one different affordance that is visibly part of "
         "the strip or its task row (for example a visible disclosure/detail "
         "control), and target the visible control itself rather than an estimated "
-        "location. Current screenshot evidence outranks this guidance."
+        "location. On an activity carousel, explicit cards containing 每日/每天 are "
+        "candidate daily items: open the visible card or move toward an uninspected "
+        "carousel view. For a middle-viewport stage, use one short page-wise swipe that "
+        "starts on the body of a visible activity card, not on empty background, and drags "
+        "the card content toward the left to reveal cards farther to the right. Keep some "
+        "prior cards visible, so the AFTER frame overlaps the prior viewport; do not jump "
+        "directly from the first view to the last. Do not repeat a swipe whose before/after scene is "
+        "perceptually unchanged. Current screenshot evidence outranks this guidance."
+        + boundary_guidance
+        + discovery_boundary
+    )
+
+
+def _stzb_activity_boundary_kind(goal: str, subgoal: str) -> str | None:
+    if normalize_goal_family(goal) != STZB_DAILY_GOAL_FAMILY:
+        return None
+    if re.search(r"(?:精彩活动|活动|轮播|卡片)", subgoal) is None:
+        return None
+    left = re.search(r"(?:左侧边界|左边界|最左)", subgoal) is not None
+    right = re.search(r"(?:右侧边界|右边界|最右)", subgoal) is not None
+    if left == right:
+        return None
+    return "left" if left else "right"
+
+
+def _looks_truncated_subgoal(value: str) -> bool:
+    compact = value.strip().rstrip("。.!！?？)）]】\"'”’」")
+    return bool(
+        re.search(
+            r"(?:标注为|显示为|定位到|进入到|点击到|的|与|和|或|并|在|到)$",
+            compact,
+        )
     )
 
 
 def _stzb_daily_verification_instruction(goal: str, subgoal: str) -> str:
     if normalize_goal_family(goal) != STZB_DAILY_GOAL_FAMILY:
         return ""
+    completeness_boundary = (
+        " 当前子目标明确要求完整清单、全部条目、覆盖列表边界或记录完成状态，"
+        "所以只有相关独立页面明确显示所需条目及状态、且画面证据达到该子目标要求时"
+        "才可 satisfied。"
+        if re.search(
+            r"(?:完整.{0,8}(?:清单|记录|覆盖)|全部.{0,8}(?:条目|入口|边界)|"
+            r"所有可见|各自状态|完成状态|列表.{0,8}(?:上|下|边界))",
+            subgoal,
+            re.IGNORECASE,
+        )
+        else (
+            " 当前子目标只是导航、关闭、返回、打开或切换页面时，只按该当前子目标"
+            "判断；画面已证明要求的页面状态即可 satisfied，不得因整体目标尚未完成而"
+            "降级为 progress。"
+        )
+    )
+    activity_boundary = (
+        " 活动轮播左右边界是几何和终端手势结果，不绑定任何固定卡片标题。"
+        "不得因为过去画面出现过某张卡，就要求该卡必须成为本轮第一张或最后一张；"
+        "活动内容会变化，当前方向正确的终端探测证据优先。"
+        if _stzb_activity_boundary_kind(goal, subgoal) is not None
+        else ""
+    )
     return (
         " 率土每日边界：地图上的单条追踪任务、1/4 等进度或武将/队伍行只是快捷任务条。"
-        "它可以算 progress，但对于要求完整每日清单、全部条目或完成状态的子目标绝不能算"
-        " satisfied。只有独立任务页面明确显示多项每日任务及各自状态时才可 satisfied。"
-        "“名望”“主要事宜”“事务”等通用分类本身不是每日身份；必须有当前画面可见的"
-        "每日、日常、今日或活跃栏目/页签/标题。"
+        "它可以算 progress 并作为入口或导航证据，但不能单独证明完整每日清单。"
+        "“名望”“主要事宜”“事务”等通用分类本身不是每日身份；但新版界面若同时可见"
+        "“巡察”、每日/每天刷新或今日周期证据，可证明“事务”的日常迁移身份。活动轮播中"
+        "带“每日/每天”文案的卡片可作为清单候选项，但只有覆盖边界完整时才能满足完整发现。"
+        + activity_boundary
+        + completeness_boundary
     )
 
 
@@ -1473,12 +2334,137 @@ def _stzb_daily_verdict_guard(
 ) -> tuple[str, str]:
     """Require a visible daily-category identity before checklist satisfaction."""
 
+    numeric_guard = _stzb_explicit_numeric_target_guard(
+        goal, subgoal, verdict, evidence
+    )
+    if numeric_guard is not None:
+        return numeric_guard
+
+    if (
+        normalize_goal_family(goal) == STZB_DAILY_GOAL_FAMILY
+        and verdict == "satisfied"
+        and re.search(
+            r"(?:确认|判断|查看).{0,24}(?:是否|属于|每日|每天|今日)",
+            subgoal,
+            re.IGNORECASE,
+        )
+        and re.search(
+            r"(?:(?:每日|每天|今日)(?:进入|登录|招募|刷新|重置)|"
+            r"(?:每日|每天|今日).{0,24}(?:可获得|可领取|增加.{0,6}次数))",
+            evidence,
+            re.IGNORECASE,
+        )
+    ):
+        # A detail page can prove that an activity is a daily candidate through
+        # an explicit reset/earning mechanic in its body even when its title is
+        # a seasonal event name.  This closes only the identity-inspection
+        # subgoal; it does not prove a complete checklist or task completion.
+        return verdict, evidence
+    if (
+        normalize_goal_family(goal) == STZB_DAILY_GOAL_FAMILY
+        and verdict == "satisfied"
+        and (
+            re.search(r"(?:一个|该|此).{0,64}(?:活动)?详情", subgoal)
+            or re.search(r"每日候选《登录奖励》.{0,32}详情", subgoal)
+        )
+        and re.search(r"(?:每日|每天|今日)", subgoal)
+        and re.search(
+            r"(?:(?:第一日.{0,80}第十四日|第十四日.{0,80}第一日)"
+            r".{0,80}(?:登录奖励|累计登录)|"
+            r"(?:登录奖励|累计登录).{0,80}"
+            r"(?:第一日.{0,80}第十四日|第十四日.{0,80}第一日)|"
+            r"逐日.{0,24}(?:登录|奖励|任务|刷新))",
+            evidence,
+            re.IGNORECASE,
+        )
+    ):
+        # A numbered day-by-day login schedule is explicit current-cycle
+        # identity even when the renamed detail title omits 每日/每天. This only
+        # closes the single activity-detail inspection result.
+        return verdict, evidence
+    if (
+        normalize_goal_family(goal) == STZB_DAILY_GOAL_FAMILY
+        and verdict == "satisfied"
+        and re.search(
+            r"(?:(?:进入|打开|定位).{0,32}(?:入口|页面|画面)|"
+            r"点击.{0,64}入口(?:.{0,24}(?:进入|打开).{0,24}(?:详情)?画面)?)",
+            subgoal,
+        )
+        and re.search(
+            r"(?:(?:每日|每天|巡察).{0,24}(?:或|/|、).{0,16}活动|"
+            r"活动.{0,16}(?:或|/|、).{0,24}(?:每日|每天|巡察))",
+            subgoal,
+            re.IGNORECASE,
+        )
+        and re.search(r"(?:精彩活动|活动入口|活动页|活动面板)", evidence)
+    ):
+        # An explicit navigation alternative may be satisfied by reaching the
+        # visible activity branch. This closes only that routing subgoal; later
+        # checklist/detail stages still require positive daily-cycle identity.
+        return verdict, evidence
+    candidate_marker = re.search(r"《([^》]+)》", subgoal)
+    if (
+        normalize_goal_family(goal) == STZB_DAILY_GOAL_FAMILY
+        and verdict == "satisfied"
+        and candidate_marker is not None
+        and re.search(r"(?:定位|清晰显示).{0,48}(?:每日候选|卡片)", subgoal)
+        and candidate_marker.group(1).strip() in evidence
+        and re.search(
+            r"(?:(?:每日|每天|今日)(?:进入|登录|招募|刷新|重置)|"
+            r"(?:每日|每天|今日).{0,24}(?:可获|可获得|可领取|增加.{0,6}次数))",
+            evidence,
+            re.IGNORECASE,
+        )
+    ):
+        # A candidate-location stage is complete when the exact manifest title
+        # and its visible positive daily mechanic are both on screen. This does
+        # not close the following detail inspection or any execution result.
+        return verdict, evidence
+    if (
+        normalize_goal_family(goal) == STZB_DAILY_GOAL_FAMILY
+        and verdict == "satisfied"
+        and re.search(
+            r"(?:是否|判断.{0,12}(?:性质|身份)|确认.{0,12}(?:属于|是否|性质|身份))",
+            subgoal,
+            re.IGNORECASE,
+        )
+        and re.search(
+            r"(?:不是|并非|而非|属于.{0,12}(?:主线|章节|通用)|"
+            r"(?:无|未见|没有).{0,12}(?:今日|每日|每天|日常)"
+            r".{0,8}(?:标识|身份|字样|文案|任务|条目|证据))",
+            evidence,
+            re.IGNORECASE,
+        )
+    ):
+        # A discovery walk must be able to close a negative branch.  Proving
+        # that a visible surface is *not* the daily checklist completes an
+        # identity-inspection subgoal without claiming daily identity.
+        return verdict, evidence
+    if (
+        normalize_goal_family(goal) == STZB_DAILY_GOAL_FAMILY
+        and verdict == "satisfied"
+        and re.search(
+            r"(?:带有|标注|写有).{0,24}(?:每日|每天).{0,24}(?:卡片|入口)",
+            subgoal,
+            re.IGNORECASE,
+        )
+        and re.search(
+            r"(?:内部页面|活动内部|登录奖励|俸禄).{0,80}(?:条目|第一日|第十四日|累计登录)",
+            evidence,
+            re.IGNORECASE,
+        )
+    ):
+        # Some activity cards carry the daily identity only on the outer
+        # carousel; their detail page changes the title (for example 登录奖励
+        # -> 俸禄).  Preserve that already observed parent identity while the
+        # AFTER frame proves the matching internal checklist and its states.
+        return verdict, evidence
     if (
         normalize_goal_family(goal) != STZB_DAILY_GOAL_FAMILY
         or verdict != "satisfied"
         or not re.search(r"(?:每日|日常|今日|活跃)", subgoal, re.IGNORECASE)
         or re.search(
-            r"(?:不是|并非|均非|非每日|未出现|未见|不存在|缺少).{0,16}"
+            r"(?:不是|并非|而非|均非|非每日|未出现|未见|不存在|缺少).{0,20}"
             r"(?:每日|日常|今日|活跃)?",
             subgoal,
             re.IGNORECASE,
@@ -1496,10 +2482,79 @@ def _stzb_daily_verdict_guard(
     )
     if daily_identity is not None:
         return verdict, evidence
+    migrated_affairs_identity = (
+        re.search(r"(?:事务|巡察)", evidence, re.IGNORECASE) is not None
+        and re.search(
+            r"(?:巡察|每日.{0,12}刷新|每天.{0,12}刷新|今日.{0,12}(?:次数|事务|任务)|"
+            r"每天.{0,12}(?:获得|增加).{0,12}次数)",
+            evidence,
+            re.IGNORECASE,
+        )
+        is not None
+    )
+    if migrated_affairs_identity:
+        return verdict, evidence
     return (
         "progress",
         evidence.strip()[:7_600]
         + " [STZB daily guard: no visible daily/today/activity category identity]",
+    )
+
+
+def _stzb_explicit_numeric_target_guard(
+    goal: str, subgoal: str, verdict: str, evidence: str,
+) -> tuple[str, str] | None:
+    """Reject satisfaction when fresh evidence shows a different explicit ratio.
+
+    STZB exposes many compact state counters (for example occupation ``1/4`` or
+    patrol ``2/5``).  A visual role can correctly transcribe the current value
+    in its evidence while still choosing ``satisfied`` for a subgoal that asks
+    for a different value.  The last ratio in the subgoal is treated as its
+    requested target; only an explicit contradictory current-state cue or an
+    explicit negative statement activates this guard.
+    """
+
+    if (
+        normalize_goal_family(goal) != STZB_DAILY_GOAL_FAMILY
+        or verdict != "satisfied"
+    ):
+        return None
+    requested = re.findall(r"(?<!\d)(\d{1,4})\s*/\s*(\d{1,4})(?!\d)", subgoal)
+    if not requested:
+        return None
+    target_numerator, target_denominator = requested[-1]
+    target_pattern = (
+        rf"(?<!\d){re.escape(target_numerator)}\s*/\s*"
+        rf"{re.escape(target_denominator)}(?!\d)"
+    )
+    negative_target = re.search(
+        rf"(?:未|没有|尚未|并未).{{0,28}}"
+        rf"(?:达到|变为|更新为|显示为|出现)?\s*{target_pattern}"
+        rf"|{target_pattern}.{{0,20}}(?:未达成|未出现|未显示|没有达到)",
+        evidence,
+        re.IGNORECASE,
+    )
+    visible_current = re.search(
+        rf"(?:显示|当前|仍|保持|进度|次数|条目).{{0,32}}"
+        rf"(?<!\d)(\d{{1,4}})\s*/\s*{re.escape(target_denominator)}(?!\d)",
+        evidence,
+        re.IGNORECASE,
+    )
+    conflicting_current = (
+        visible_current is not None
+        and visible_current.group(1) != target_numerator
+    )
+    if negative_target is None and not conflicting_current:
+        return None
+    guarded_verdict = (
+        "no_progress"
+        if re.search(r"(?:仍|保持|未变化|没有变化|未更新|无变化)", evidence)
+        else "progress"
+    )
+    return (
+        guarded_verdict,
+        evidence.strip()[:7_520]
+        + " [STZB numeric guard: visible ratio contradicts requested target]",
     )
 
 
@@ -1514,7 +2569,12 @@ def _stzb_daily_reflection_instruction(goal: str, subgoal: str) -> str:
         "surface is not permission to terminate the whole goal when a visible Back/Close "
         "control can return to a previously observed navigation surface. In that case, "
         "insert recovery outcomes that return to the main navigation and inspect a "
-        "currently visible activity/daily entry, while preserving the original tail. "
+        "currently visible activity/daily entry, 巡察 entry, or explicit 每日/每天 card, "
+        "while preserving the original tail. Treat 事务 alone as ambiguous, not forbidden: "
+        "accept it only with visible current-cycle evidence. "
+        "A limited-time activity is still a daily candidate when its detail body explicitly "
+        "states a 每日/每天/今日 entry, reset, attempt, earning, or reward mechanic; do not "
+        "dismiss that candidate merely because the activity itself has start and end dates. "
         "Terminate honestly only after no visible alternate navigation surface remains; "
         "never invent a hidden page or loop."
     )

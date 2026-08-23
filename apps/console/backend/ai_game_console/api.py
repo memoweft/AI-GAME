@@ -47,10 +47,12 @@ from .game_learning.profiles import stzb_game_profile
 from .game_learning.verifier import OpenAICompatibleStzbEvidenceAssessor
 from .gateway_api import (
     GatewayComposition,
+    build_gateway_composition,
     create_gateway_router,
     gateway_error_handler,
 )
 from .gateway import GatewayError
+from .kernel_canary import KernelCanaryCoordinator
 from .goal_runtime import (
     GoalPreflight,
     GoalRepairManager,
@@ -58,6 +60,7 @@ from .goal_runtime import (
     ProductionGoalRepairs,
     SQLiteGoalStore,
     SQLiteDailyChecklistStore,
+    StzbDailyProgressController,
     StructuredGoalModel,
     create_goal_router,
     goal_error_handler,
@@ -77,11 +80,18 @@ from .mobile_task_adapter import (
     MobileTaskAndroidDriver,
     OpenAICompatibleMobileRoleModel,
     OpenAICompatibleToolRoleModel,
+    _is_stzb_execution_stage,
 )
 from .mobile_task_profiles import resolve_mobile_skill_scope
 from .openai_chat import OpenAIChatProvider
 from .repository import SQLiteRepository
+from .legacy_cutover import append_mode_journal
 from .runtime_mode import RuntimeModeError, RuntimeModeGuard, validate_runtime_mode
+from .runtime_adapters.adb_executor import AdbActionExecutor
+from .runtime_adapters.android import AndroidObservationProvider
+from .runtime_adapters.artifacts import FilesystemArtifactStore
+from .runtime_adapters.sqlite import SQLiteRuntimeStore
+from .runtime_kernel import RuntimeKernel
 from .runtime_admin import LeaseAdminService, create_lease_admin_router
 from .soul_integration import SoulIntegration, SoulIntegrationError
 from .soul_application_composition import (
@@ -576,6 +586,24 @@ def create_app(
     # Phase 7: 启动期校验运行时模式（配置非法即拒绝启动，fail-fast）
     validate_runtime_mode(resolved_settings.runtime_mode)
     runtime_mode_guard = RuntimeModeGuard(resolved_settings.runtime_mode)
+    if runtime_mode_guard.is_draining() and resolved_settings.kernel_canary_enabled:
+        raise RuntimeError(
+            "Kernel canary cannot run while Legacy work is draining."
+        )
+    kernel_binding_kind = (
+        "runtime_kernel"
+        if runtime_mode_guard.is_kernel_active()
+        else "runtime_kernel_canary"
+        if resolved_settings.kernel_canary_enabled
+        else None
+    )
+    kernel_runtime_enabled = kernel_binding_kind is not None
+    append_mode_journal(
+        resolved_settings.project_root / "runtime" / "logs" / "runtime-mode.jsonl",
+        mode=resolved_settings.runtime_mode,
+        event="composition_requested",
+        details={"kernel_binding_kind": kernel_binding_kind},
+    )
     resolved_runtime_admin = runtime_admin or LeaseAdminService(
         resolved_settings.data_dir / "runtime" / "runtime.db"
     )
@@ -614,6 +642,10 @@ def create_app(
         observation_payload=lambda evidence_id: mobile_evidence.load(evidence_id).png_bytes,
     )
     structured_goal_model: StructuredGoalModel | None = None
+    role_model: Any | None = None
+    daily_checklist_store = SQLiteDailyChecklistStore(
+        resolved_settings.data_dir / "stzb-daily.db"
+    )
     mobile_role_endpoint = (
         resolved_settings.mobile_role_endpoint or resolved_settings.local_chat_endpoint
     )
@@ -626,8 +658,7 @@ def create_app(
         else resolved_settings.local_chat_api_key
     )
     if (
-        resolved_mobile_tasks is None
-        and isinstance(resolved_executor, AdbGuiExecutor)
+        isinstance(resolved_executor, AdbGuiExecutor)
         and resolved_settings.gui_executor_enabled
         and resolved_settings.adb_path
         and mobile_role_endpoint
@@ -657,24 +688,36 @@ def create_app(
         )
         if isinstance(role_model, OpenAICompatibleToolRoleModel):
             structured_goal_model = StructuredGoalModel(role_model)
-        resolved_mobile_tasks = MobileTaskRuntime(
-            resolved_settings.data_dir / "mobile-tasks.db",
-            driver=MobileTaskAndroidDriver(
-                repository=resolved_repository,
-                executor=resolved_executor,
-                evidence=mobile_evidence,
-                device_lease=device_execution_lease,
-            ),
-            model=role_model,
-            # Production tasks may span a long game session. These are only
-            # runaway guards; ordinary recovery is driven by visual progress,
-            # reflection, owner input, or an explicit stop.
-            max_reflections=64,
-            max_attempts=2_048,
-            queue_capacity=32,
-            scope_resolver=resolve_mobile_skill_scope,
-            experience=experience_service,
-        )
+        if (
+            resolved_mobile_tasks is None
+            and runtime_mode_guard.is_legacy_runtime_available()
+        ):
+            resolved_mobile_tasks = MobileTaskRuntime(
+                resolved_settings.data_dir / "mobile-tasks.db",
+                driver=MobileTaskAndroidDriver(
+                    repository=resolved_repository,
+                    executor=resolved_executor,
+                    evidence=mobile_evidence,
+                    device_lease=device_execution_lease,
+                ),
+                model=role_model,
+                # Production tasks may span a long game session. These are only
+                # runaway guards; ordinary recovery is driven by visual progress,
+                # reflection, owner input, or an explicit stop.
+                max_reflections=64,
+                max_attempts=2_048,
+                queue_capacity=32,
+                scope_resolver=resolve_mobile_skill_scope,
+                experience=experience_service,
+                progress_controller=(
+                    StzbDailyProgressController(
+                        daily_checklist_store,
+                        inspect_daily_checklist=structured_goal_model.inspect_daily_checklist,
+                        is_execution_stage=_is_stzb_execution_stage,
+                    )
+                    if structured_goal_model else None
+                ),
+            )
     resolved_automation_factory = automation_factory
     if (
         resolved_automation_factory is None
@@ -758,6 +801,42 @@ def create_app(
         or resolved_mobile_tasks
         or MobileTaskArchive(resolved_settings.data_dir / "mobile-tasks.db")
     )
+    resolved_gateway = gateway
+    kernel_coordinator: KernelCanaryCoordinator | None = None
+    if kernel_runtime_enabled:
+        if (
+            role_model is None
+            or not resolved_settings.adb_path
+            or not resolved_settings.gui_executor_enabled
+        ):
+            raise RuntimeError(
+                "Kernel-active startup requires the configured Android role model and ADB executor."
+            )
+        runtime_dir = resolved_settings.data_dir / "runtime"
+        kernel_artifacts = FilesystemArtifactStore(runtime_dir / "artifacts")
+        kernel = RuntimeKernel(
+            SQLiteRuntimeStore(runtime_dir / "runtime.db"),
+            observation_provider=AndroidObservationProvider(
+                adb_path=resolved_settings.adb_path
+            ),
+            artifact_store=kernel_artifacts,
+            action_executor=AdbActionExecutor(resolved_settings.adb_path),
+        )
+        kernel_coordinator = KernelCanaryCoordinator(
+            kernel=kernel,
+            model=role_model,
+            artifacts=kernel_artifacts,
+            evidence=mobile_evidence,
+            device_lease=device_execution_lease,
+            experience=experience_service,
+            binding_kind=kernel_binding_kind,
+        )
+        if resolved_gateway is None:
+            resolved_gateway = build_gateway_composition(
+                settings=resolved_settings,
+                kernel=kernel,
+                worker=kernel_coordinator,
+            )
     def probe_configured_mobile_target() -> tuple[bool, str, str]:
         probe = resolved_executor.probe()
         if probe.status == "ready":
@@ -774,6 +853,15 @@ def create_app(
     def promote_verified_goal_experience(
         task_id: str, goal_id: str, completion_revision: int
     ) -> None:
+        record = goal_store.inspect(goal_id)
+        if (
+            record.binding_kind in {"runtime_kernel", "runtime_kernel_canary"}
+            and kernel_coordinator is not None
+        ):
+            kernel_coordinator.confirm_goal_completion(
+                task_id, goal_id, completion_revision
+            )
+            return
         # The legacy hint and canonical ledger are independent additive writes;
         # either can be reconciled later without rewriting Goal completion.
         try:
@@ -807,6 +895,9 @@ def create_app(
         goal_store,
         mobile_runtime=resolved_mobile_tasks,
         mobile_archive=resolved_mobile_task_archive,
+        kernel_runtime=kernel_coordinator,
+        kernel_canary_enabled=(kernel_binding_kind == "runtime_kernel_canary"),
+        kernel_binding_kind=kernel_binding_kind,
         configured_serial=resolved_settings.adb_serial,
         target_probe=(
             probe_configured_mobile_target
@@ -818,8 +909,22 @@ def create_app(
                 capability_snapshot=service.runtime_probe.snapshot,
                 discover_targets=service.discover_targets,
                 lease_is_held=device_execution_lease.is_held,
-                runtime_available=lambda: resolved_mobile_tasks is not None,
+                runtime_available=lambda: (
+                    False
+                    if runtime_mode_guard.is_draining()
+                    else kernel_coordinator is not None
+                    if kernel_runtime_enabled
+                    else resolved_mobile_tasks is not None
+                ),
                 preferred_serial=resolved_settings.adb_serial,
+                runtime_kind=(
+                    kernel_binding_kind
+                    or (
+                        "runtime_transition_draining"
+                        if runtime_mode_guard.is_draining()
+                        else "mobile_task_compat"
+                    )
+                ),
             ).assess
             if resolved_mobile_tasks is None
             or isinstance(resolved_mobile_tasks, MobileTaskRuntime)
@@ -836,11 +941,10 @@ def create_app(
         promote_verified_success=(
             promote_verified_goal_experience
             if isinstance(resolved_mobile_tasks, MobileTaskRuntime)
+            or kernel_coordinator is not None
             else None
         ),
-        daily_checklist_store=SQLiteDailyChecklistStore(
-            resolved_settings.data_dir / "stzb-daily.db"
-        ),
+        daily_checklist_store=daily_checklist_store,
         inspect_daily_checklist=(
             structured_goal_model.inspect_daily_checklist
             if structured_goal_model else None
@@ -854,21 +958,36 @@ def create_app(
         try:
             service.initialize()
             resolved_cloud_configuration.start()
-            application_startup = getattr(
-                resolved_application_runtime, "startup", None
+            if runtime_mode_guard.is_legacy_runtime_available():
+                application_startup = getattr(
+                    resolved_application_runtime, "startup", None
+                )
+                if callable(application_startup):
+                    try:
+                        application_startup()
+                    except SoulApplicationUnavailable:
+                        # The archive remains usable and a later start/command
+                        # retries activation against current cloud/owner state.
+                        pass
+                chat_start_attempted = True
+                resolved_chat.start()
+                if resolved_game_learner is not None:
+                    game_start_attempted = True
+                    resolved_game_learner.start()
+            if kernel_coordinator is not None:
+                kernel_coordinator.recover()
+            append_mode_journal(
+                resolved_settings.project_root
+                / "runtime"
+                / "logs"
+                / "runtime-mode.jsonl",
+                mode=resolved_settings.runtime_mode,
+                event="runtime_started",
+                details={
+                    "kernel_binding_kind": kernel_binding_kind,
+                    "legacy_workers_started": runtime_mode_guard.is_legacy_runtime_available(),
+                },
             )
-            if callable(application_startup):
-                try:
-                    application_startup()
-                except SoulApplicationUnavailable:
-                    # The archive remains usable and a later start/command
-                    # retries activation against current cloud/owner state.
-                    pass
-            chat_start_attempted = True
-            resolved_chat.start()
-            if resolved_game_learner is not None:
-                game_start_attempted = True
-                resolved_game_learner.start()
             yield
         finally:
             # Every component gets an independent best-effort cleanup attempt,
@@ -888,17 +1007,20 @@ def create_app(
             )
             if callable(mobile_task_shutdown):
                 shutdown_callbacks.append(mobile_task_shutdown)
+            if kernel_coordinator is not None:
+                shutdown_callbacks.append(kernel_coordinator.shutdown)
             # Week 6: 停止 Lease 后台清理并关闭 runtime.db（未初始化时为空操作）
             shutdown_callbacks.append(resolved_runtime_admin.shutdown)
             # Phase 6 Week 3: 显式启用 Gateway 时关闭 gateway.db 与 Runtime 存储
-            if gateway is not None:
-                shutdown_callbacks.append(gateway.store.close)
-                shutdown_callbacks.append(gateway.kernel.close)
-            application_shutdown = getattr(
-                resolved_application_runtime, "shutdown", None
-            )
-            if callable(application_shutdown):
-                shutdown_callbacks.append(application_shutdown)
+            if resolved_gateway is not None:
+                shutdown_callbacks.append(resolved_gateway.store.close)
+                shutdown_callbacks.append(resolved_gateway.kernel.close)
+            if runtime_mode_guard.is_legacy_runtime_available():
+                application_shutdown = getattr(
+                    resolved_application_runtime, "shutdown", None
+                )
+                if callable(application_shutdown):
+                    shutdown_callbacks.append(application_shutdown)
             for shutdown_callback in shutdown_callbacks:
                 try:
                     shutdown_callback()
@@ -907,6 +1029,15 @@ def create_app(
                         cleanup_error = error
             if cleanup_error is not None and not active_error:
                 raise cleanup_error
+            append_mode_journal(
+                resolved_settings.project_root
+                / "runtime"
+                / "logs"
+                / "runtime-mode.jsonl",
+                mode=resolved_settings.runtime_mode,
+                event="runtime_stopped",
+                details={"kernel_binding_kind": kernel_binding_kind},
+            )
 
     app = FastAPI(
         title="AI-GAME Local Console",
@@ -926,19 +1057,78 @@ def create_app(
     app.state.mobile_task_runtime = resolved_mobile_tasks
     app.state.mobile_task_archive = resolved_mobile_task_archive
     app.state.goal_service = resolved_goal_service
+    app.state.kernel_canary = kernel_coordinator
+    app.state.kernel_runtime = kernel_coordinator
     app.state.application_runtime = resolved_application_runtime
     app.state.application_runtime_archive = resolved_application_archive
     app.state.runtime_admin = resolved_runtime_admin
     app.state.console_shutdown_callback = console_shutdown_callback
     # Phase 6 Week 3: Gateway 契约表面（默认 OFF，显式传入才挂载）
-    app.state.gateway = gateway
-    if gateway is not None:
+    app.state.gateway = resolved_gateway
+    if resolved_gateway is not None:
         app.add_exception_handler(GatewayError, gateway_error_handler)
 
     app.add_middleware(
         TrustedHostMiddleware,
         allowed_hosts=["127.0.0.1", "localhost", "testserver"],
     )
+
+    @app.middleware("http")
+    async def fence_legacy_device_writes(request: Request, call_next):
+        """Retire every non-Kernel physical write surface during U7.
+
+        Gateway and v2 Goal writes stay available in ``kernel_active``.  The
+        old MobileTask endpoints keep their more specific route-level error,
+        while the remaining Legacy execution islands are fenced here before a
+        handler can enqueue or dispatch work.
+        """
+        path = request.url.path
+        legacy_write = request.method == "POST" and (
+            path == "/api/v1/executor/actions"
+            or path == "/api/v1/runs"
+            or path.startswith("/api/v1/runs/")
+            or path.startswith("/api/v1/approvals/")
+            or path.startswith("/api/v1/chat/")
+            or path == "/api/v1/application-instances"
+            or path.startswith("/api/v1/application-instances/")
+            or path == "/api/v1/learning/jobs"
+            or path.startswith("/api/v1/learning/jobs/")
+            or path.startswith("/api/v1/soul/")
+            or path == "/api/v1/integrations/soul/commands"
+        )
+        legacy_admission = request.method == "POST" and (
+            path == "/api/v1/executor/actions"
+            or path == "/api/v1/runs"
+            or path.startswith("/api/v1/runs/")
+            or path.startswith("/api/v1/approvals/")
+            or path == "/api/v1/chat/sessions"
+            or (path.startswith("/api/v1/chat/sessions/") and path.endswith("/turns"))
+            or path == "/api/v1/application-instances"
+            or path == "/api/v1/learning/jobs"
+        )
+        if legacy_admission and runtime_mode_guard.is_draining():
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "error": {
+                        "code": "LEGACY_DEVICE_WRITE_DISABLED",
+                        "message": "Legacy 正在排空；不再接收新的旧运行时工作。",
+                    }
+                },
+            )
+        if legacy_write and runtime_mode_guard.is_kernel_active():
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "error": {
+                        "code": "LEGACY_DEVICE_WRITE_DISABLED",
+                        "message": (
+                            "Kernel 已拥有设备执行权；该 Legacy 写入口仅保留只读归档。"
+                        ),
+                    }
+                },
+            )
+        return await call_next(request)
 
     @app.middleware("http")
     async def require_console_client_for_writes(request: Request, call_next):
@@ -1495,6 +1685,12 @@ def create_app(
         instance_id: str,
         request: ApplicationCommandCreate,
     ):
+        if runtime_mode_guard.is_draining() and request.command != "Stop":
+            raise ControlPlaneError(
+                code="LEGACY_DEVICE_WRITE_DISABLED",
+                message="Legacy 正在排空；仅允许停止存量 Application 实例。",
+                status_code=403,
+            )
         if request.command == "Input":
             command = ApplicationInput(request.content or "")
         elif request.command == "Pause":
@@ -1585,6 +1781,29 @@ def create_app(
 
     @router.get("/tasks/{task_id}", response_model=MobileTaskSchema)
     def inspect_mobile_task(task_id: str):
+        return _mobile_task_payload(resolved_mobile_task_archive.inspect(task_id))
+
+    # U7 explicit, read-only compatibility namespace.  Once Gateway owns the
+    # canonical /api/v1/tasks paths, old MobileTask history remains reachable
+    # without payload sniffing or an ambiguous dual contract.
+    compatibility_router = APIRouter(prefix="/api/compat/v1")
+
+    @compatibility_router.get(
+        "/mobile-tasks", response_model=MobileTaskListResponse
+    )
+    def list_legacy_mobile_task_archive(
+        limit: int = Query(default=100, ge=1, le=500),
+    ):
+        items = [
+            _mobile_task_payload(item)
+            for item in resolved_mobile_task_archive.list(limit=limit)
+        ]
+        return {"items": items, "count": len(items)}
+
+    @compatibility_router.get(
+        "/mobile-tasks/{task_id}", response_model=MobileTaskSchema
+    )
+    def inspect_legacy_mobile_task_archive(task_id: str):
         return _mobile_task_payload(resolved_mobile_task_archive.inspect(task_id))
 
     @router.post(
@@ -1704,12 +1923,13 @@ def create_app(
             learner.stop(job_id), list(learner.list_profiles())
         )
 
-    # Phase 6 Week 3: Gateway 契约路由（默认 OFF）。显式启用时注册在 legacy
-    # 路由之前，冲突的 canonical 路径按注册顺序解析到新契约——预览 cutover
-    # 终态；legacy 重复实现由独立的 cutover 工单移除（§2：不做 payload 嗅探）。
-    if gateway is not None:
-        app.include_router(create_gateway_router(gateway))
+    # U7：Kernel-active 正常装配会提供 Gateway；显式注入仍用于测试/集成。
+    # 它注册在 Legacy 路由之前，使 canonical 路径稳定解析到新契约；旧历史
+    # 通过独立只读命名空间提供，不做 payload 嗅探。
+    if resolved_gateway is not None:
+        app.include_router(create_gateway_router(resolved_gateway))
     app.include_router(create_goal_router(resolved_goal_service))
+    app.include_router(compatibility_router)
     app.include_router(router)
     # Week 6: Runtime Lease 管理 API（懒初始化，不产生额外数据库文件）
     app.include_router(create_lease_admin_router(resolved_runtime_admin))

@@ -4,6 +4,9 @@ param(
     [ValidateSet("setup", "build", "start", "stop", "status", "test")]
     [string]$Action = "start",
 
+    [ValidateSet("legacy", "draining", "kernel_active")]
+    [string]$RuntimeMode = "kernel_active",
+
     [switch]$NoBrowser
 )
 
@@ -125,6 +128,22 @@ if ($Port -lt 1024 -or $Port -gt 65535) {
 function Ensure-RuntimeDirectories {
     foreach ($path in @($DataRoot, $RunRoot, $LogRoot, $EnvRoot)) {
         New-Item -ItemType Directory -Force -Path $path | Out-Null
+    }
+}
+
+function Archive-ConsoleLogs {
+    $existing = @($StdoutLog, $StderrLog) | Where-Object {
+        Test-Path -LiteralPath $_ -PathType Leaf
+    }
+    if ($existing.Count -eq 0) { return }
+    $archiveRoot = Join-Path $LogRoot "archive"
+    New-Item -ItemType Directory -Force -Path $archiveRoot | Out-Null
+    $stamp = [DateTimeOffset]::UtcNow.ToString("yyyyMMddTHHmmssfffffffZ")
+    foreach ($source in $existing) {
+        $name = [System.IO.Path]::GetFileNameWithoutExtension($source)
+        $extension = [System.IO.Path]::GetExtension($source)
+        $destination = Join-Path $archiveRoot "${name}-${RuntimeMode}-${stamp}${extension}"
+        Move-Item -LiteralPath $source -Destination $destination
     }
 }
 
@@ -290,14 +309,17 @@ function Read-ConsoleState {
         }
     }
     $schemaVersion = [int]$state.schema_version
-    if ($schemaVersion -notin @(1, 2)) {
+    if ($schemaVersion -notin @(1, 2, 3)) {
         throw "Unsupported console state version: $($state.schema_version)"
     }
-    if ($schemaVersion -eq 2 -and (
+    if ($schemaVersion -ge 2 -and (
         [string]::IsNullOrWhiteSpace([string]$state.shutdown_token) -or
         [string]$state.shutdown_token -notmatch '^[a-f0-9]{32}$'
     )) {
         throw "The console state has an invalid graceful shutdown token: $StateFile"
+    }
+    if ($schemaVersion -eq 3 -and [string]$state.runtime_mode -notin @("legacy", "draining", "kernel_active")) {
+        throw "The console state has an invalid runtime mode: $StateFile"
     }
     if (-not ([string]$state.project_root).Equals($ProjectRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "The console state belongs to another project root. No process was changed."
@@ -314,10 +336,11 @@ function Write-ConsoleState {
         [Parameter(Mandatory = $true)]$Listener,
         [Parameter(Mandatory = $true)][string]$StartedHost,
         [Parameter(Mandatory = $true)][int]$StartedPort,
-        [Parameter(Mandatory = $true)][string]$ShutdownToken
+        [Parameter(Mandatory = $true)][string]$ShutdownToken,
+        [Parameter(Mandatory = $true)][string]$StartedRuntimeMode
     )
     $state = [ordered]@{
-        schema_version = 2
+        schema_version = 3
         project_root = $ProjectRoot
         host = $StartedHost
         port = $StartedPort
@@ -326,6 +349,7 @@ function Write-ConsoleState {
         listener_pid = [int]$Listener.ProcessId
         listener_created_at = Get-ProcessCreationStamp $Listener
         shutdown_token = $ShutdownToken
+        runtime_mode = $StartedRuntimeMode
         written_at = [DateTimeOffset]::UtcNow.ToString("o")
     }
     $temporaryStateFile = "$StateFile.tmp"
@@ -372,7 +396,8 @@ function Get-OwnedConsoleInstance {
             Url = "http://${instanceHost}:${instancePort}"
             Launcher = $launcher
             Listener = $listener
-            ShutdownToken = if ([int]$state.schema_version -eq 2) { [string]$state.shutdown_token } else { $null }
+            ShutdownToken = if ([int]$state.schema_version -ge 2) { [string]$state.shutdown_token } else { $null }
+            RuntimeMode = if ([int]$state.schema_version -ge 3) { [string]$state.runtime_mode } else { "unknown" }
             Legacy = [int]$state.schema_version -eq 1
         }
     }
@@ -411,6 +436,7 @@ function Get-OwnedConsoleInstance {
         Launcher = $launcher
         Listener = $listener
         ShutdownToken = $null
+        RuntimeMode = "unknown"
         Legacy = $true
     }
 }
@@ -461,12 +487,16 @@ function Start-Console {
 
     if (-not (Test-Path -LiteralPath $PythonExe)) { Install-Backend }
     if (Test-FrontendBuildRequired) { Build-Frontend }
+    Archive-ConsoleLogs
 
     $env:AI_GAME_PROJECT_ROOT = $ProjectRoot
     $env:AI_GAME_DATA_DIR = $DataRoot
     $shutdownToken = [Guid]::NewGuid().ToString("N")
     $previousShutdownToken = [Environment]::GetEnvironmentVariable(
         "AI_GAME_CONSOLE_SHUTDOWN_TOKEN", [EnvironmentVariableTarget]::Process
+    )
+    $previousRuntimeMode = [Environment]::GetEnvironmentVariable(
+        "AI_GAME_RUNTIME_MODE", [EnvironmentVariableTarget]::Process
     )
     $arguments = @(
         "-m", "ai_game_console.main",
@@ -476,6 +506,7 @@ function Start-Console {
 
     Write-Host "Starting the local console..."
     Set-Item -Path "Env:AI_GAME_CONSOLE_SHUTDOWN_TOKEN" -Value $shutdownToken
+    Set-Item -Path "Env:AI_GAME_RUNTIME_MODE" -Value $RuntimeMode
     try {
         $process = Start-Process -FilePath $PythonExe `
             -ArgumentList $arguments `
@@ -489,6 +520,11 @@ function Start-Console {
             Remove-Item -Path "Env:AI_GAME_CONSOLE_SHUTDOWN_TOKEN" -ErrorAction SilentlyContinue
         } else {
             Set-Item -Path "Env:AI_GAME_CONSOLE_SHUTDOWN_TOKEN" -Value $previousShutdownToken
+        }
+        if ($null -eq $previousRuntimeMode) {
+            Remove-Item -Path "Env:AI_GAME_RUNTIME_MODE" -ErrorAction SilentlyContinue
+        } else {
+            Set-Item -Path "Env:AI_GAME_RUNTIME_MODE" -Value $previousRuntimeMode
         }
     }
     Set-Content -LiteralPath $PidFile -Value $process.Id -Encoding ascii
@@ -549,8 +585,8 @@ function Start-Console {
         throw "The console responded, but its launcher/listener process tree could not be verified."
     }
 
-    Write-ConsoleState $launcher $listener $HostName $Port $shutdownToken
-    Write-Host "Console is ready at $ConsoleUrl (listener PID $($listener.ProcessId))."
+    Write-ConsoleState $launcher $listener $HostName $Port $shutdownToken $RuntimeMode
+    Write-Host "Console is ready at $ConsoleUrl (listener PID $($listener.ProcessId), mode $RuntimeMode)."
     if (-not $NoBrowser) { Start-Process $ConsoleUrl }
 }
 
@@ -686,6 +722,7 @@ function Show-Status {
             Write-Host "Listener PID: $($instance.Listener.ProcessId)"
         }
         Write-Host "Version: $($health.version)"
+        Write-Host "Recorded runtime mode: $($instance.RuntimeMode)"
     } catch {
         Write-Host "Console process exists, but readiness could not be confirmed."
         Write-Host "Address: $($instance.Url)"

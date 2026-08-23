@@ -2,7 +2,11 @@
 
 ## STATUS
 
-`NOT_STARTED`
+`IN_PROGRESS`
+
+Activated on 2026-08-23 after U7 completed its real cutover, rollback, and
+owner-defined local observation gates. Activation does not by itself prove any
+U8 router, long-lived runtime, external-owner, or live-account acceptance.
 
 ## BUSINESS OUTCOME
 

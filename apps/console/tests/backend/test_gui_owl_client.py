@@ -61,6 +61,7 @@ def test_gui_owl_request_uses_one_current_image_official_envelope_and_safe_histo
     assert "step 1: transported tap" in contents[0]["text"]
     assert "Visual priority" in contents[0]["text"]
     assert "semi-transparent tutorial hand" in contents[0]["text"]
+    assert "complete its pointed prerequisite" in contents[0]["text"]
     assert "before Close/Back/Help" in contents[0]["text"]
     system = payload["messages"][0]["content"][0]["text"]
     assert '"name":"mobile_use"' in system
@@ -71,6 +72,7 @@ def test_gui_owl_request_uses_one_current_image_official_envelope_and_safe_histo
     assert "repeated taps in the same screen region" in system
     assert "semi-transparent tutorial hand" in system
     assert "fingertip target takes priority" in system
+    assert "tutorial still intercepts it" in system
     assert output.startswith("Action: tap Settings")
 
 

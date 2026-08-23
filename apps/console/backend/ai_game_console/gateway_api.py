@@ -1,9 +1,9 @@
 """HTTP surface for the frozen Gateway contract (Phase 6, Weeks 3-4).
 
-Implements the §2 canonical paths on a standalone ``APIRouter`` that the
-app factory mounts **only when a ``GatewayComposition`` is explicitly
-passed** (default OFF: the default composition stays byte-identical to
-the legacy app). When enabled, the gateway router is registered *before*
+Implements the §2 canonical paths on a standalone ``APIRouter``. The app
+factory mounts it for the normal U7 Kernel-active composition and also accepts
+an explicitly injected composition for tests/integration. The router is
+registered *before*
 the legacy router, so the conflicting canonical paths (``POST /tasks``,
 ``GET /tasks``, ``GET /tasks/{task_id}``) resolve to the new contract —
 registration-order precedence previews the cutover end state; the legacy
@@ -62,6 +62,7 @@ from .gateway import (
 )
 from .runtime_adapters.android import AndroidObservationProvider, AdbDeviceRegistry
 from .runtime_adapters.artifacts import FilesystemArtifactStore
+from .runtime_adapters.adb_executor import AdbActionExecutor
 from .runtime_adapters.sqlite import SQLiteRuntimeStore
 from .runtime_kernel import (
     ChannelAvailability,
@@ -138,6 +139,7 @@ def build_gateway_composition(
     kernel: RuntimeKernel | None = None,
     store: GatewayStore | None = None,
     device_registry: DeviceRegistry | None = None,
+    worker: Any | None = None,
 ) -> GatewayComposition:
     """Production wiring for the gateway on the shared runtime directory.
 
@@ -159,6 +161,9 @@ def build_gateway_composition(
                 else None
             ),
             artifact_store=FilesystemArtifactStore(runtime_dir / "artifacts"),
+            action_executor=(
+                AdbActionExecutor(settings.adb_path) if settings.adb_path else None
+            ),
         )
     if store is None:
         store = GatewayStore(runtime_dir / "gateway.db")
@@ -172,6 +177,7 @@ def build_gateway_composition(
         kernel=kernel,
         idempotency=IdempotencyService(store),
         device_registry=device_registry,
+        worker=worker,
     )
     return GatewayComposition(
         kernel=kernel,

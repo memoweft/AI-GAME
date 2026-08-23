@@ -19,6 +19,7 @@ from ai_game_console.mobile_agent import (
     PhysicalIntent,
     PlanDraft,
     ReflectionDecision,
+    TaskProgressDirective,
     TaskQueueFull,
     TaskRuntimeClosed,
     TransportReceipt,
@@ -176,6 +177,105 @@ def test_invalid_verifier_format_without_transport_is_retried_without_failing_ta
     assert finished.attempts[0].verification.satisfied is False
     assert finished.attempts[0].verification.uncertain is False
     assert finished.attempts[1].verification.satisfied is True
+    assert driver.intents == []
+
+
+def test_progress_controller_replaces_plan_before_any_device_decision(
+    tmp_path: Path,
+) -> None:
+    class Controller:
+        def __init__(self) -> None:
+            self.bindings = []
+            self.after = []
+            self.replaced = False
+
+        def bind(self, task_id, goal_run_id, goal):
+            self.bindings.append((task_id, goal_run_id, goal))
+
+        def before_subgoal(self, state, subgoal):
+            del state
+            if subgoal.description == "冻结前占位" and not self.replaced:
+                self.replaced = True
+                return TaskProgressDirective(
+                    "replace_plan", "持久化清单已就绪。",
+                    PlanDraft(("真实条目《登录奖励》", "独立最终复读")),
+                )
+            return None
+
+        def after_attempt(self, state, attempt):
+            self.after.append((state.task_id, attempt.attempt_id))
+
+    controller = Controller()
+    model = ScriptedModel(
+        plans=(PlanDraft(("冻结前占位",)),),
+        decisions=(
+            ActionDecision("finish", reason="真实条目已完成"),
+            ActionDecision("finish", reason="最终复读已完成"),
+        ),
+        verifications=(
+            Verification(True, True, evidence="登录奖励已完成"),
+            Verification(True, True, evidence="独立画面复读完成"),
+        ),
+    )
+    driver = RecordingDriver()
+    runtime = MobileTaskRuntime(
+        tmp_path / "mobile.db", driver=driver, model=model,
+        progress_controller=controller,
+    )
+    try:
+        accepted = runtime.start(
+            "完成率土每日任务", "progress-replan", goal_id="goal-1"
+        )
+        finished = wait_terminal(runtime, accepted.task_id)
+    finally:
+        runtime.shutdown()
+
+    assert finished.status == "completed"
+    assert controller.bindings == [
+        (accepted.task_id, "goal-1", "完成率土每日任务")
+    ]
+    assert [context.subgoal.description for context in model.decision_contexts] == [
+        "真实条目《登录奖励》", "独立最终复读",
+    ]
+    assert len(controller.after) == 1
+    assert driver.intents == []
+    assert any(event.event_type == "progress_plan_replaced" for event in finished.events)
+
+
+def test_progress_controller_failure_gate_prevents_any_device_decision(
+    tmp_path: Path,
+) -> None:
+    class Controller:
+        def bind(self, task_id, goal_run_id, goal):
+            del task_id, goal_run_id, goal
+
+        def before_subgoal(self, state, subgoal):
+            del state, subgoal
+            return TaskProgressDirective(
+                "fail", "清单尚未冻结。", error_code="checklist_not_frozen"
+            )
+
+        def after_attempt(self, state, attempt):
+            raise AssertionError((state, attempt))
+
+    model = ScriptedModel(plans=(PlanDraft(("执行占位",)),))
+    driver = RecordingDriver()
+    runtime = MobileTaskRuntime(
+        tmp_path / "mobile.db", driver=driver, model=model,
+        progress_controller=Controller(),
+    )
+    try:
+        accepted = runtime.start(
+            "完成率土每日任务", "progress-fail", goal_id="goal-1"
+        )
+        finished = wait_terminal(runtime, accepted.task_id)
+    finally:
+        runtime.shutdown()
+
+    assert finished.status == "failed"
+    assert finished.error_code == "checklist_not_frozen"
+    assert finished.attempts == ()
+    assert model.decision_contexts == []
     assert driver.intents == []
 
 

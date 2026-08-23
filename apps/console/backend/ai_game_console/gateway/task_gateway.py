@@ -61,11 +61,13 @@ class TaskGateway:
         idempotency: IdempotencyService,
         conversation: ConversationService | None = None,
         device_registry: DeviceRegistry | None = None,
+        worker: Any | None = None,
     ) -> None:
         self._kernel = kernel
         self._idempotency = idempotency
         self._conversation = conversation or ConversationService(kernel)
         self._device_registry = device_registry
+        self._worker = worker
 
     # -- create (contract §5) ------------------------------------------------
 
@@ -129,6 +131,7 @@ class TaskGateway:
             ),
             device_id=device_id,
         )
+        self._submit_worker(task)
         events = self._kernel.events(task.id)
         return {
             "task": {
@@ -242,14 +245,32 @@ class TaskGateway:
         _require(task_id, "task_id")
         _require(command, "command")
         try:
+            parsed_command = ControlCommand(command)
+            if self._worker is not None:
+                state = self._worker.control(
+                    task_id,
+                    "stop" if parsed_command is ControlCommand.CANCEL else parsed_command.value,
+                )
+                del state
+                task = self._kernel.load_task(task_id)
+                events = self._kernel.events(task_id)
+                return {
+                    "accepted": True,
+                    "task_id": task_id,
+                    "command": parsed_command.value,
+                    "status": task.status.value,
+                    "event_sequence": events[-1].sequence if events else 0,
+                }
             result = self._kernel.apply_control(
-                task_id=task_id, command=command, reason=reason
+                task_id=task_id, command=parsed_command, reason=reason
             )
         except RecordNotFound as exc:
             raise TaskNotFound(f"Task {task_id} was not found") from exc
         except InvalidControlTransition as exc:
             raise TaskNotActive(str(exc)) from exc
         except ControlError as exc:
+            raise ValidationError(str(exc)) from exc
+        except ValueError as exc:
             raise ValidationError(str(exc)) from exc
         return {
             "accepted": True,
@@ -335,6 +356,7 @@ class TaskGateway:
             ),
             device_id=device_id,
         )
+        self._submit_worker(task)
         events = self._kernel.events(task.id)
         return {
             "accepted": True,
@@ -362,3 +384,16 @@ class TaskGateway:
             return self._kernel.load_task(task_id)
         except RecordNotFound as exc:
             raise TaskNotFound(f"Task {task_id} was not found") from exc
+
+    def _submit_worker(self, task: Task) -> None:
+        if self._worker is None:
+            return
+        try:
+            self._worker.submit(task.id)
+        except Exception:
+            self._kernel.fail_task(
+                task_id=task.id,
+                code="worker_submission_failed",
+                summary="Gateway could not submit the Task to its configured worker.",
+            )
+            raise

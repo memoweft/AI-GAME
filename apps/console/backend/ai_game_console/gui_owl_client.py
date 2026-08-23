@@ -47,6 +47,10 @@ Before ordinary buttons, inspect for a semi-transparent tutorial hand, pointing
 finger, or pulsing golden ring. When one is visible, click the control directly
 under its fingertip; the fingertip target takes priority over labels, Help/Back,
 close buttons, and a guessed main control.
+Read the tutorial banner before acting and correlate its instruction with the
+pointed control. A tutorial prerequisite such as viewing rules/help must be
+completed even when another business action button is already visible; do not
+declare that business button ineffective while the tutorial still intercepts it.
 For every screen, continue with a physical action, wait, or terminate based on
 the current screenshot. If a prior action history says interact is unavailable,
 you must choose one of the allowed actions on this turn. If history reports
@@ -98,7 +102,9 @@ class OpenAICompatibleGuiOwlClient:
             f"Instruction: {goal.strip()}\n\n"
             "Visual priority: if a semi-transparent tutorial hand, pointing finger, "
             "or pulsing golden ring is visible, click the control under its fingertip "
-            "before Close/Back/Help or ordinary controls.\n\n"
+            "before Close/Back/Help or ordinary controls. Read the tutorial banner and "
+            "complete its pointed prerequisite before retrying an ordinary business "
+            "button.\n\n"
             f"Previous actions (text only):\n{previous}"
         )
         image_url = "data:image/png;base64," + base64.b64encode(image).decode("ascii")

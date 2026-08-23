@@ -1,6 +1,10 @@
-# AI-GAME canonical domain context
+# AI-GAME domain glossary
 
-> Product authority: `docs/product/00_INDEX.md`
+> **NON-AUTHORITATIVE TERMINOLOGY REFERENCE.** Product, execution, status, and
+> acceptance authority lives in `docs/product/00_INDEX.md` and its canonical
+> package. This glossary does not activate work orders or define blockers.
+>
+> [constraint-source: PRODUCT_SPEC; ref: `docs/product/00_INDEX.md` section 1]
 >
 > This context replaces the previous module-first domain glossary.
 
@@ -91,15 +95,20 @@ Measurable repeat-run improvement attributable to retrieved experience: better v
 
 These are correctness constraints even in `development_open` autonomy. Application-specific keyword bans are optional policy and are not generic Runtime invariants.
 
-## Current implementation terms during migration
+## Current implementation terms
 
 ### MobileTaskRuntime
 
-The current compatibility engine with the real general Android natural-language loop. It remains active until RuntimeKernel proves an equivalent business GoalRun and rollback.
+The retained Legacy compatibility engine and historical Android task archive.
+After U7 local cutover it is read-only in normal Kernel mode and writable only
+in explicit Legacy/Draining rollback modes.
 
 ### RuntimeKernel
 
-The target canonical task/evidence/control runtime. Current code has strong primitives but lacks a default production autonomous worker, complete model-role binding, and normal-launcher business-goal evidence.
+The current canonical bounded finite-phone task/evidence/control runtime. U7
+provides default normal-launcher, model-role, real GoalRun, control, restore,
+and rollback evidence; long-lived capability routing and production hardening
+remain later work.
 
 ### ApplicationRuntime
 

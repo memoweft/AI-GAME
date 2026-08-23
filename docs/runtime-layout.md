@@ -1,16 +1,23 @@
 # Runtime and ownership layout
 
-> **CURRENT DEPLOYMENT LAYOUT.** Paths and ownership facts remain useful until migrated, but the target product and roadmap are defined in [`product/`](product/00_INDEX.md). Separate current databases do not freeze separate user-facing products.
+> **LEGACY/MIGRATION RUNTIME LAYOUT.** Paths and ownership facts remain useful,
+> but several startup and primary-navigation statements below predate the U7
+> default Kernel cutover. Current composition and status are defined in
+> [`product/00_INDEX.md`](product/00_INDEX.md) and
+> [`product/02_CURRENT_STATE.md`](product/02_CURRENT_STATE.md) section 14.
+> Separate databases do not freeze separate user-facing products.
 
 ## Windows console runtime
 
-The console is the current runnable product boundary. It is Windows-native and
+At this migration snapshot, the console was the runnable product boundary. It is Windows-native and
 does not launch WSL, the GUI model service, MuMu, or a device during startup.
 AI-GAME is the generic `ApplicationRuntime` platform; Soul is one production
 Profile (`soul-reply-v1`), not the platform boundary. The browser has exactly
 four first-level entries: one-sentence MobileTask, Soul, Device, and Settings.
-Chat and GameLearning remain compatibility or advanced APIs/history. There is
-no universal Run or natural-language router between these domains.
+Chat and GameLearning remain compatibility or advanced APIs/history. At that
+snapshot there was no universal Run or natural-language router between these
+domains; U7 later made the Kernel-backed Goal path the normal finite-phone
+composition.
 When an ADB executor and the already-running local GUI model are configured,
 constructing `MobileTaskRuntime` performs durable recovery and starts its one
 daemon coordinator. A safely recoverable task can therefore resume model/device

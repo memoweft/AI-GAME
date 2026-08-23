@@ -25,9 +25,9 @@ Runtime / verifiers
 This was the confirmed initial split. On 2026-08-21 live discovery established an
 installed Qwen3.8 27B multimodal OpenAI-compatible binding, and the current source
 gained a provider-neutral forced-tool adapter for planner, visual action,
-verification, and reflection roles. The current development candidate therefore
-uses one Qwen process with separated role contracts; it is not yet the accepted U3
-visual default because the required serial comparison with GUI-Owl is incomplete.
+verification, and reflection roles. At that pre-U3 snapshot, the development
+candidate used one Qwen process with separated role contracts and still awaited
+the required serial comparison with GUI-Owl.
 
 U3 completed that comparison on 2026-08-21 using the same five persisted real
 MuMu frames. Qwen matched the successful action path on 5/5 frames in 34.311
@@ -36,7 +36,8 @@ of Stage finish and system Home on the last two frames. Qwen is therefore the
 accepted current visual default. GUI-Owl remains an explicit serial diagnostic/
 rollback binding, not a silent runtime fallback.
 
-If live discovery proves that the actual 27B model is multimodal, U3 benchmarks its visual grounding/action quality against GUI-Owl on identical acceptance inputs. The better evidence-backed binding becomes the configured default; this is a role-binding decision, not a change to GoalRun, Kernel, evidence, or experience contracts.
+This selection changed the configured role binding, not the GoalRun, Kernel,
+evidence, or experience contracts.
 
 ## 2. Role contracts
 

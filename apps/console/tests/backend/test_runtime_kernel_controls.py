@@ -104,13 +104,19 @@ class TestPause:
         assert kernel.load_task(task.id).status is TaskStatus.PAUSED
         assert kernel._store.list_events(task.id) == events_before
 
-    def test_pause_rejects_created_task(self, tmp_path: Path) -> None:
+    def test_pause_and_resume_created_task_preserve_preplanning_state(
+        self, tmp_path: Path
+    ) -> None:
         kernel = _kernel(tmp_path)
         task = kernel.create_task(
             goal="never started", source=_source("created"), device_id="device-c"
         )
-        with pytest.raises(InvalidControlTransition, match="CREATED cannot be paused"):
-            kernel.apply_control(task_id=task.id, command=ControlCommand.PAUSE)
+        paused = kernel.apply_control(task_id=task.id, command=ControlCommand.PAUSE)
+        assert paused.task.status is TaskStatus.PAUSED
+
+        resumed = kernel.apply_control(task_id=task.id, command=ControlCommand.RESUME)
+
+        assert resumed.task.status is TaskStatus.CREATED
         assert kernel.load_task(task.id).status is TaskStatus.CREATED
 
     def test_pause_releases_active_lease(self, tmp_path: Path) -> None:

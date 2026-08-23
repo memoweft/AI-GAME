@@ -8,7 +8,7 @@
 
 A client can submit one ordinary-language purpose and receive one durable GoalRun without choosing a runtime, profile, skill, model, device serial, or internal endpoint. The first implementation honestly binds supported Android work to the existing MobileTask execution path.
 
-## CURRENT FACTS
+## BASELINE FACTS AT ACTIVATION
 
 - `POST /api/v1/tasks` is the current real natural-language Android path.
 - `POST /api/v1/application-instances` and `/learning/jobs` are separate explicit domains.
@@ -98,7 +98,7 @@ Disable the v2 router registration and leave `goals.db` as an unused additive re
 - New v2 compatibility execution cannot pollute active successful SkillMemory before U3.
 - Restart and idempotency work.
 - Existing v1 regression stays green.
-- Contract and `02_CURRENT_STATE.md` are updated.
+- Contract and [02_CURRENT_STATE.md](../02_CURRENT_STATE.md) are updated.
 
 ## NEXT
 

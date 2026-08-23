@@ -1,10 +1,12 @@
 # AI-GAME
 
-> **产品规范入口**：当前唯一权威产品定义、目标架构、实施路线、验收规则与 AI 施工单位于 [`docs/product/00_INDEX.md`](docs/product/00_INDEX.md)。本 README 主要描述当前已经实现的组件和使用方式；如与 `docs/product/` 冲突，以新规范为准。
+> **产品规范与当前状态入口**：唯一权威产品定义、实施路线、验收规则和执行指针位于 [`docs/product/00_INDEX.md`](docs/product/00_INDEX.md)。当前默认有限手机目标路径已经在 U7 本地切换为 Kernel；准确能力与证据边界见 [`docs/product/02_CURRENT_STATE.md`](docs/product/02_CURRENT_STATE.md) 第 14 节。
 >
-> **截至 2026-08-20 的审计阶段**：历史 Runtime Kernel Foundation Phase 0-7 已形成代码和测试底座，但 Universal Agent Track U1-U9 尚未实施。审计时没有 universal goal router，默认运行路径仍是 Legacy MobileTask；不要把旧路线图的“全部完成”解释为通用手机 AI 平台已经完成。运行模式会变化，实施前必须重新核对 [`docs/product/02_CURRENT_STATE.md`](docs/product/02_CURRENT_STATE.md)，不能只信本段快照。
+> [constraint-source: PRODUCT_SPEC; ref: `docs/product/00_INDEX.md` section 1]
+>
+> **兼容文档边界**：本 README 的多数组件、命令和执行链说明保留的是 Legacy/迁移期兼容快照，不是当前默认组合或 U0-U9 状态真源。不要从下文的旧现在时推导当前 active work order、默认模型、router 缺口或验收 gate。
 
-AI-GAME 是一个通用的本机手机智能体平台。`ApplicationRuntime` 为应用 Profile 提供持久实例、顺序 observation/policy/owner/verification 周期、revision fence、no-replay 恢复和经验门控；默认用户路径仍是“一句话开始”（MobileTask），用于提交跨多个原子 GUI 动作的长时间目标。
+AI-GAME 是一个通用的本机手机智能体平台。普通有限手机目标当前经统一 GoalRun 入口绑定到 Kernel；`MobileTaskRuntime` 作为 Legacy 只读历史和显式回滚兼容路径保留。`ApplicationRuntime` 仍为长期应用 Profile 提供持久周期能力。
 
 `F:\dating-copilot` 保持独立，并且是 Soul **唯一的设备执行与物理 ledger owner**。AI-GAME 通过 `profile_id=soul-reply-v1` 负责长期应用编排、本地视觉、云端临时回复和学习 lineage；它只通过 loopback owner Interface 请求 observation、reserve、dispatch、inspect 和 managed scheduler desired state，不复制项目代码、数据库或 ADB 控制逻辑。
 
@@ -40,7 +42,7 @@ Soul 只是 AI-GAME 支持的一个应用，不是产品本身。Mobile-Agent �
 
 这是全部放开的测试模式，不是针对真实账号、付款、授权或法律确认流程的安全代理。请只在你明确授权和可控的测试目标中运行；页面内容本身不会替你停止循环，需要时应主动点击停止。
 
-当前闭环是低频、顺序、单指的离散截图—动作链路，适合菜单和普通应用操作；它不具备持续视觉状态估计、高频本地控制或多点触控，尚不能宣称能够连续游玩实时动作游戏。面向训练/自定义/沙盒的未来验收边界见 `docs/gameplay-readiness.md`。
+当前闭环是低频、顺序、单指的离散截图—动作链路，适合菜单和普通应用操作；它不具备持续视觉状态估计、高频本地控制或多点触控，尚不能宣称能够连续游玩实时动作游戏。历史/候选 readiness 设计见 `docs/gameplay-readiness.md`；它不是当前 canonical 验收 authority。
 
 ## 通用 ApplicationRuntime 平台
 
@@ -231,9 +233,9 @@ F:\AI-GAME
 
 控制台生产模式由后端在同一个本机地址提供前端页面，不需要同时维护两个端口。数据库、环境、日志和打包产物都与源代码分开保存。
 
-## 执行边界
+## Legacy MobileTask 兼容执行边界
 
-默认“一句话开始”的 MobileTask 执行链为：
+迁移期“一句话开始”的 MobileTask 执行链为：
 
 ```text
 owner goal / 追加指令 + 自动或显式作用域中的上一版 SkillMemory
@@ -258,7 +260,7 @@ MobileTask 不调用云端聊天模型：Planner、Executor、BEFORE/AFTER 摘�
 “云端对话 + 本地执行”是独立的 Chat Module：云端模型只能生成文字回复和高层目标，不能生成或发送 ADB 命令，也看不到原始截图。本地 GUI 模型一次只提出一个动作；生产 Chat 循环没有固定步骤上限，也不运行页面敏感类别分类器。它会持续到用户停止、设备/模型异常或本地模型返回 `terminate`。Provider 回复、GUI 动作提案和 `terminate` 都绑定到产生它们的 `input_revision`；若期间收到更新，旧输出会被丢弃，同一个 worker 根据最新消息重新规划。更新若在最后一次动作发送前检查之后才到达，只能影响下一次决策，不能撤回已经交给 ADB 的原子输入。Chat 的模型结束信号不是应用内部业务状态证明。
 
 相关目录规则见 [`docs/runtime-layout.md`](docs/runtime-layout.md)，MobileTask 设计与精确契约见 [`docs/mobile-task-runtime.md`](docs/mobile-task-runtime.md) 和 [`contracts/mobile-task-v1.md`](contracts/mobile-task-v1.md)，其余控制面 HTTP 与状态契约见 [`contracts/control-plane-v1.md`](contracts/control-plane-v1.md)，有界学习契约见 [`contracts/game-learning-v1.md`](contracts/game-learning-v1.md)。
-实时游戏控制尚未实现；训练/自定义/沙盒限定的目标架构、遥测要求和未来验收线见 `docs/gameplay-readiness.md`。
+实时游戏控制尚未实现；训练/自定义/沙盒限定的历史候选架构与遥测说明见 `docs/gameplay-readiness.md`，但其中的候选 gate 不自动成为 U0-U9 前置条件。
 
 ## Soul Application Profile
 

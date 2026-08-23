@@ -28,6 +28,17 @@ from test_mobile_task_api import FakeMobileTaskRuntime
 
 def _build_app(tmp_path: Path, *, runtime_mode: str) -> FastAPI:
     settings = replace(build_settings(tmp_path), runtime_mode=runtime_mode)
+    if runtime_mode == "kernel_active":
+        adb_path = tmp_path / "adb.exe"
+        adb_path.write_bytes(b"test-adb")
+        settings = replace(
+            settings,
+            gui_executor_enabled=True,
+            adb_path=str(adb_path),
+            adb_serial="emulator-5554",
+            mobile_role_endpoint="http://127.0.0.1:9/v1/chat/completions",
+            mobile_role_model="test-model",
+        )
     return create_app(
         settings=settings,
         adb_discovery=AdbTargetDiscovery(env={"PATH": ""}),
@@ -97,14 +108,9 @@ def test_draining_mode_blocks_new_tasks_allows_inflight(tmp_path: Path) -> None:
 
 
 def test_kernel_active_mode_blocks_all_legacy_writes(tmp_path: Path) -> None:
-    """KERNEL_ACTIVE：三个写端点全部 403，只读归档端点仍 200。"""
+    """KERNEL_ACTIVE：旧物理写入口 403，显式只读归档仍 200。"""
     app = _build_app(tmp_path, runtime_mode="kernel_active")
     with TestClient(app) as client:
-        created = client.post(
-            "/api/v1/tasks",
-            headers=WRITE_HEADERS,
-            json={"goal": "完成日常任务", "client_request_id": "req-1"},
-        )
         sent = client.post(
             "/api/v1/tasks/task-1/inputs",
             headers=WRITE_HEADERS,
@@ -115,18 +121,85 @@ def test_kernel_active_mode_blocks_all_legacy_writes(tmp_path: Path) -> None:
             headers=WRITE_HEADERS,
             json={"client_request_id": "stop-1"},
         )
-        listed = client.get("/api/v1/tasks")
-        inspected = client.get("/api/v1/tasks/task-1")
+        direct = client.post(
+            "/api/v1/executor/actions",
+            headers=WRITE_HEADERS,
+            json={"target_id": "device-1", "action": "home"},
+        )
+        listed = client.get("/api/compat/v1/mobile-tasks")
+        inspected = client.get("/api/compat/v1/mobile-tasks/task-1")
 
-    assert created.status_code == 403
-    assert created.json()["error"]["code"] == "LEGACY_TASK_WRITE_DISABLED"
     assert sent.status_code == 403
     assert sent.json()["error"]["code"] == "LEGACY_TASK_WRITE_DISABLED"
     assert stopped.status_code == 403
     assert stopped.json()["error"]["code"] == "LEGACY_TASK_WRITE_DISABLED"
+    assert direct.status_code == 403
+    assert direct.json()["error"]["code"] == "LEGACY_DEVICE_WRITE_DISABLED"
     # 只读归档端点在任何模式下都保持可用（数据保留为只读归档）
     assert listed.status_code == 200
     assert inspected.status_code == 200
+
+
+def test_kernel_active_fails_closed_without_autonomous_composition(
+    tmp_path: Path,
+) -> None:
+    settings = replace(build_settings(tmp_path), runtime_mode="kernel_active")
+    with pytest.raises(RuntimeError, match="Kernel-active startup requires"):
+        create_app(
+            settings=settings,
+            adb_discovery=AdbTargetDiscovery(env={"PATH": ""}),
+            mobile_task_runtime=FakeMobileTaskRuntime(),
+        )
+
+
+def test_kernel_active_does_not_start_legacy_worker_islands(tmp_path: Path) -> None:
+    class LegacyLifecycle:
+        def __init__(self) -> None:
+            self.start_calls = 0
+            self.stop_calls = 0
+
+        def start(self) -> None:
+            self.start_calls += 1
+
+        def startup(self) -> None:
+            self.start_calls += 1
+
+        def shutdown(self) -> None:
+            self.stop_calls += 1
+
+    settings = replace(build_settings(tmp_path), runtime_mode="kernel_active")
+    adb_path = tmp_path / "adb.exe"
+    adb_path.write_bytes(b"test-adb")
+    settings = replace(
+        settings,
+        gui_executor_enabled=True,
+        adb_path=str(adb_path),
+        adb_serial="emulator-5554",
+        mobile_role_endpoint="http://127.0.0.1:9/v1/chat/completions",
+        mobile_role_model="test-model",
+    )
+    chat = LegacyLifecycle()
+    game = LegacyLifecycle()
+    application = LegacyLifecycle()
+    app = create_app(
+        settings=settings,
+        adb_discovery=AdbTargetDiscovery(env={"PATH": ""}),
+        mobile_task_runtime=FakeMobileTaskRuntime(),
+        chat_coordinator=chat,
+        game_learner=game,
+        application_runtime=application,
+        application_runtime_archive=application,
+    )
+
+    with TestClient(app):
+        assert app.state.kernel_runtime is not None
+
+    assert chat.start_calls == 0
+    assert game.start_calls == 0
+    assert application.start_calls == 0
+    assert chat.stop_calls == 0
+    assert game.stop_calls == 0
+    assert application.stop_calls == 0
 
 
 @pytest.mark.parametrize("runtime_mode", ["legacy", "draining", "kernel_active"])

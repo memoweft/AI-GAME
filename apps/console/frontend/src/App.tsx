@@ -19,7 +19,6 @@ import {
   Settings,
   ShieldCheck,
   Smartphone,
-  TerminalSquare,
   X,
   XCircle,
 } from 'lucide-react';
@@ -137,8 +136,8 @@ export default function App() {
       {mobileNavOpen && <button className="mobile-nav-backdrop" aria-label="关闭导航" onClick={() => setMobileNavOpen(false)} />}
       <aside className={`sidebar ${mobileNavOpen ? 'sidebar-open' : ''}`}>
         <div className="brand">
-          <div className="brand-mark" aria-hidden="true"><TerminalSquare size={22} strokeWidth={2.2} /></div>
-          <div><strong>AI Game</strong><span>手机智能体控制台</span></div>
+          <div className="brand-mark" aria-hidden="true"><Bot size={22} strokeWidth={2.2} /></div>
+          <div><strong>AI GAME</strong><span>本地手机智能体</span></div>
           <button className="icon-button sidebar-close" aria-label="关闭导航" onClick={() => setMobileNavOpen(false)}><X size={20} /></button>
         </div>
 
@@ -174,9 +173,10 @@ export default function App() {
         <header className="topbar">
           <div className="topbar-title">
             <button className="icon-button mobile-menu" aria-label="打开导航" onClick={() => setMobileNavOpen(true)}><Menu size={21} /></button>
-            <div><h1>{currentNav.label}</h1><p>{currentNav.description}</p></div>
+            <div><span className="topbar-kicker">LOCAL COMMAND CENTER</span><h1>{currentNav.label}</h1><p>{currentNav.description}</p></div>
           </div>
           <div className="topbar-actions">
+            <div className={`topbar-live ${connected ? 'topbar-live-ready' : ''}`}><span />{loading ? '连接中' : connected ? '本地在线' : '连接异常'}</div>
             <button className="icon-button refresh-button" aria-label="刷新数据" title="刷新数据" onClick={() => void loadAll()} disabled={refreshing}>
               <RefreshCw size={18} className={refreshing ? 'spin' : ''} />
             </button>

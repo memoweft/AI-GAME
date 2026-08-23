@@ -76,11 +76,22 @@ Historical reports are retained when they prove a useful fact, for example a tes
 
 ## 7. Current execution pointer
 
+[constraint-source: USER_DECISION; ref: current execution-state instruction 2026-08-23]
+
 ```text
-Current active work order: none (U5 delivered PARTIAL)
-Next planned work order: U5_STZB_DAILY_LEARNING continuation (stabilize repeated
-Qwen dense-frame inference, then freeze one real complete daily checklist)
+Execution state: IN_PROGRESS
+Current active work order: U8_LONG_LIVED_ROUTING
+Last completed milestone: U7_REAL_KERNEL_CUTOVER (DONE)
+Current step: begin the bounded multi-capability and long-lived routing slice
+Roadmap disposition: U5 delivered PARTIAL and closed as a non-blocking
+stabilization track by explicit owner direction on 2026-08-23
 ```
+
+[constraint-source: PRODUCT_SPEC; ref: `06_IMPLEMENTATION_ROADMAP.md` U7 required sequence and section 5]
+
+The user's 2026-08-23 instruction activated the remaining U7 observation and
+ordinary U7-to-U8 advancement sequence. The 30-minute local observation passed,
+U7 is `DONE`, and `U8_LONG_LIVED_ROUTING` is now the single active work order.
 
 U1 completed against its specified gates. U2 remains PARTIAL only because its
 real rendered primary-composer refresh/close/reopen proof is unavailable; its
@@ -92,5 +103,28 @@ model-comparison evidence. U4 then completed its additive experience ledger,
 controlled cold/warm thresholds, and attributable real settings/battery warm
 run. The 2026-08-21 U5 delivery added the STZB daily family, checklist gate,
 bounded learning path, and real-device evidence, but it remains PARTIAL because
-no real daily run froze and independently reverified a complete checklist.
-U6 is therefore not permitted by the ordinary advancement rule.
+no real daily run froze and independently reverified a complete checklist. The
+latest continuation stabilized the selected Qwen dense-frame canary at a
+32,768-token context, added perceptual no-change detection and discovery-only
+contracts, and reached real daily-labelled activity details without executing
+their controls. Its terminal checklist still remained `NOT_DISCOVERED`.
+The latest takeover continuation added bounded semantic replanning for a full
+ordinary STZB goal and removed one recovery-validation false positive for a
+plan that explicitly leaves the exhausted task panel for an independent daily
+surface. Real GoalRun evidence crossed two previously failing reflection
+boundaries and found `登录奖励 / 每天登录` plus `心愿征程 / 每日招募`, but a later
+conditional recovery was correctly rejected before the checklist could freeze.
+On 2026-08-23 the owner explicitly directed the roadmap to close U5 quickly,
+reduce its blocking documentation constraints, and execute U6. This does not
+relabel U5 as DONE or waive its missing complete-manifest, whole-set reread, and
+cold/warm evidence. Those facts remain a non-blocking stabilization backlog;
+U6 then completed the bounded Kernel settings/battery canary under the same
+kind of recorded owner override previously used to advance past U2's isolated
+rendered-browser deviation. U7 cut the local normal launcher over to a real
+Kernel composition, completed a verified real-device GoalRun, exercised
+pause/resume/cancel, actual SQLite restore, guarded Legacy rollback, and a final
+default Kernel restart. Its final 30-minute local observation passed 61/61
+samples with a 3.675-second controlled restart, zero active Legacy/Kernel work
+or Leases, intact append-only logs, explicit Legacy-write rejection, and zero
+fatal errors. Packaged or production deployment acceptance belongs to U9 and
+is not a U7 completion gate.
