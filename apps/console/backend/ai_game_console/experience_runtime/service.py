@@ -76,6 +76,88 @@ class ExperienceService:
             ),
         )
 
+    def begin_application_episode(
+        self,
+        *,
+        goal_run_id: str,
+        source_instance_id: str,
+        goal_spec_revision: int,
+        frozen_criteria_ids: tuple[str, ...],
+        scope: ScopeKey,
+    ) -> ExperienceEpisode | None:
+        """Open the same canonical ledger for a long-lived capability binding."""
+
+        return self.begin_mobile_episode(
+            goal_run_id=goal_run_id,
+            source_task_id=source_instance_id,
+            goal_spec_revision=goal_spec_revision,
+            frozen_criteria_ids=frozen_criteria_ids,
+            scope=scope,
+        )
+
+    def record_delayed_outcome(
+        self,
+        *,
+        source_instance_id: str,
+        source_event_key: str,
+        kind: str,
+        source: str,
+        attribution_scope: str,
+        evidence_refs: tuple[str, ...],
+        confidence: float = 1.0,
+    ) -> OutcomeSignal | None:
+        """Record an idempotent delayed/user outcome without inventing action reward.
+
+        ``attribution_scope`` is an opaque person/conversation reference. It is
+        retained with the signal provenance so a later policy adapter cannot
+        treat one conversation's outcome as cross-person generic experience.
+        """
+
+        if not self.enabled:
+            return None
+        allowed = {
+            "delayed_positive",
+            "delayed_negative",
+            "no_response",
+            "user_approval",
+            "user_rejection",
+        }
+        if kind not in allowed:
+            raise ValueError("unsupported delayed outcome kind")
+        if not source_event_key.strip() or not source.strip() or not attribution_scope.strip():
+            raise ValueError("delayed outcome requires source and attribution scope")
+        if not evidence_refs or any(not item.strip() for item in evidence_refs):
+            raise ValueError("delayed outcome requires admissible evidence references")
+        # [constraint-source: ARCH_INVARIANT; ref: experience store confidence CHECK]
+        if isinstance(confidence, bool) or not 0 <= float(confidence) <= 1:
+            raise ValueError("delayed outcome confidence must be between zero and one")
+        try:
+            episode = self.store.episode_for_task(source_instance_id)
+        except KeyError:
+            # [constraint-source: ARCH_INVARIANT; ref: attributable experience scope]
+            return None
+        signal_id = str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"ai-game:delayed:{source_instance_id}:{source_event_key}",
+            )
+        )
+        scoped_evidence = (
+            f"attribution:{attribution_scope}",
+            *tuple(evidence_refs),
+        )
+        return self.store.put_signal(OutcomeSignal(
+            signal_id=signal_id,
+            episode_id=episode.episode_id,
+            transition_id=None,
+            kind=kind,
+            source=source,
+            evidence_refs=scoped_evidence,
+            confidence=float(confidence),
+            reward_vector_json=_reward(kind),
+            created_at=_utc_now(),
+        ))
+
     def retrieve(
         self, *, source_task_id: str, objective: str, observation: Any
     ) -> ExperiencePacket:
@@ -758,6 +840,11 @@ def _reward(outcome: str) -> str:
         "wrong_scene": {"correctness": -1, "progress": -1, "recovery": 0},
         "no_progress": {"correctness": -1, "progress": 0, "recovery": 0},
         "uncertain": {"correctness": 0, "progress": 0, "recovery": 0},
+        "delayed_positive": {"external": 1, "user": 0},
+        "delayed_negative": {"external": -1, "user": 0},
+        "no_response": {"external": -1, "user": 0},
+        "user_approval": {"external": 0, "user": 1},
+        "user_rejection": {"external": 0, "user": -1},
     }
     return json.dumps(vectors.get(outcome, {"correctness": 0, "progress": 0, "recovery": 0}),
                       sort_keys=True, separators=(",", ":"))

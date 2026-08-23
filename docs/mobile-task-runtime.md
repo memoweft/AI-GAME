@@ -6,15 +6,20 @@
 > and does not define the product entry or canonical experience contract. See
 > [`product/00_INDEX.md`](product/00_INDEX.md) and
 > [`product/02_CURRENT_STATE.md`](product/02_CURRENT_STATE.md) section 14.
+>
+> **D20 retirement override.** Every `F:\dating-copilot` or Soul-owner
+> reference below is historical compatibility evidence. That project must not
+> be started, probed, or used for current U8. A generic long-lived mobile goal
+> must not infer `soul-reply-v1` or an external owner; see product decision D22.
 
 ## Product scope
 
 AI-GAME is a general, local phone Operator and generic `ApplicationRuntime`
 platform. A `MobileTask` is one durable owner objective executed against one
-Android target across many atomic GUI actions. Soul is the production
-Application Profile `soul-reply-v1`; it does not define the product or the
-generic task state machine. `dating-copilot` remains its sole device and
-physical-ledger owner, while AI-GAME owns the application cycle.
+Android target across many atomic GUI actions. Soul is a historical
+application example implemented by Profile `soul-reply-v1`; it
+does not define the product or the generic task state machine. Its retired
+`dating-copilot` owner contract is not a current runtime dependency or U8 route.
 
 `MobileTask`, `ChatTurn`, `LearningJob`, and the legacy control-plane `Run` are
 different domain records. They are not aliases and are not flattened into a
@@ -37,9 +42,11 @@ Observation→Policy→ExecutionOwner→Verification cycle for a named Profile,
 including durable application intents, revision/dispatch fencing, inspect-only
 reconciliation and optional memory gating. `MobileTaskRuntime` remains the
 specialized Module for arbitrary owner goals, TaskPlan/Subgoal planning,
-Reflection and SkillMemory. A Soul sentence is not silently converted into a
-MobileTask; its typed workspace starts `profile_id=soul-reply-v1` through
-`/api/v1/application-instances`.
+Reflection and SkillMemory. The legacy typed Soul workspace can address
+`profile_id=soul-reply-v1` through `/api/v1/application-instances`, but a
+sentence submitted to the universal Goal composer must not be silently bound to
+that Profile. A long-lived mobile sentence requires the D22
+ApplicationRuntime-to-RuntimeKernel composition.
 
 ## Deep Module and Interface
 
@@ -270,11 +277,11 @@ opens and leases a new session. The same lease instance is shared with ordinary
 Android Chat and Game Learning Adapters; another in-process consumer of that
 serial receives `target_busy` before using the device or model.
 
-The lease does not coordinate another AI-GAME process, direct ADB commands, or
-the external `dating-copilot` controller. Soul remains an ApplicationRuntime
-Profile rather than a MobileTask hidden behind this lease. AI-GAME never opens
-a competing Soul ADB Adapter; all Soul physical work crosses the dating-copilot
-owner Interface.
+The lease does not coordinate another AI-GAME process or direct ADB commands.
+The retired `dating-copilot` contract was also outside this lease; that is a
+historical limitation, not authority to start it. Under D22, a generic
+long-lived Android application cycle must acquire the same ownership discipline
+through RuntimeKernel rather than bypassing it or inferring a specialized owner.
 
 ## Persistence, evidence, and restart recovery
 
@@ -336,8 +343,9 @@ completion.
 The default one-sentence UI does not send `skill_id`. The production
 `SkillScopeResolver` derives an internal stable scope from the normalized goal:
 
-- Soul goals return no MobileTask scope because the `soul-reply-v1`
-  Application Profile owns its separate delayed-outcome reply learning;
+- in the legacy v1 resolver, Soul goals received no MobileTask SkillMemory
+  scope because that snapshot used a separate profile store; this storage fact
+  is not a current v2 routing rule or a RuntimeKernel execution ban;
 - 率土之滨 goals use target-independent `stzb/daily-rewards/v1`,
   `stzb/tutorial/v1`, `stzb/launch/v1`, or `stzb/general/v1` scopes according
   to explicit goal terms;
@@ -390,34 +398,34 @@ production resolver normally supplies an internal automatic skill scope; an
 advanced caller may still provide legacy `skill_id`. Callers start, inspect,
 update, and stop a MobileTask through the same seam either way.
 
-Soul is one application capability, not AI-GAME itself. `ApplicationRuntime`
-owns its long-lived instance, local-vision/cloud-policy cycle and dispatch
-revision fence. Conversation observation and physical-operation truth remain
-owned by `dating-copilot` and are reached through owner
-observation/reserve/dispatch/inspect calls. AI-GAME does not copy that physical
-ledger into `mobile-tasks.db`, and an unfinished Soul intent is inspected for
-convergence rather than replayed.
+Soul is one application capability, not AI-GAME itself. The following
+`dating-copilot` observation/reserve/dispatch/inspect description is the retired
+specialized Adapter contract only. It is kept to explain existing code and
+ledger fields; it is not a current owner binding or the generic long-lived
+mobile route. A future explicitly selected compatible owner must still preserve
+its authoritative ledger and inspect unfinished intent rather than replay it.
 
-The external dating-copilot managed scheduler separately owns all-day matching,
-immediate match openers, bounded unread discovery, and zero-quota Planet
-fallback; it does not draft ordinary replies. Application Start/Pause/Resume/
-Stop contributes to a content-free durable scheduler target and a
-GET-before-PUT reconciler. All nonterminal Soul instances are aggregated:
-running demand wins over paused demand, and `stopping` retains that instance's
+Historically, the external dating-copilot managed scheduler owned all-day
+matching, immediate match openers, bounded unread discovery, and zero-quota
+Planet fallback; it did not draft ordinary replies. Application
+Start/Pause/Resume/Stop contributed to a content-free durable scheduler target
+and a GET-before-PUT reconciler. All nonterminal Soul instances were aggregated:
+running demand won over paused demand, and `stopping` retained that instance's
 pre-Stop target. Only with no running/paused demand and a Stop durably settled
-by the Application core does the matcher target stopped; failed/completed
-instances do not imply stop. AI-GAME process shutdown never changes that target
-implicitly. None of this scheduler lifecycle is a MobileTask command or record
-in `mobile-tasks.db`.
+by the Application core did the matcher target become stopped;
+failed/completed instances did not imply stop. AI-GAME process shutdown did
+not change that target implicitly. None of that retired scheduler lifecycle is
+a current MobileTask command or record in `mobile-tasks.db`.
 
-The primary browser information architecture has exactly four entries:
-one-sentence start, Soul, Device, and Settings. The first is the MobileTask
-composer/inbox; Soul is the typed ApplicationRuntime workspace.
+In this legacy snapshot, the primary browser information architecture had four entries:
+one-sentence start, Soul, Device, and Settings. The first was the MobileTask
+composer/inbox; Soul was the typed ApplicationRuntime workspace.
 Chat and Game Learning APIs/history, plus legacy Workflow, Run, and Approval
 routes/records, remain compatibility/advanced surfaces rather than primary
-navigation. The MobileTask Interface does not automatically route a sentence
+navigation. The legacy MobileTask Interface itself does not route a sentence
 into Chat, a LearningJob, or a Soul command, and its worker never claims those
-compatibility records. There is no universal Run domain object.
+compatibility records. The current v2 GoalRun is a separate universal facade;
+this legacy transport limitation does not define its routing.
 
 One supplied live record establishes only that MobileTask
 `daac81a7-1af9-47e3-9566-66e73509a0fd` completed after 23 ActionAttempts under

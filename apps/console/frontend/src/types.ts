@@ -842,6 +842,30 @@ export interface GoalCompletionAssessment {
   created_at: string;
 }
 
+export interface GoalBindingPlan {
+  revision: number;
+  route_kind: string;
+  binding_kind: string;
+  capability_ids: string[];
+  owner_kind: string | null;
+  owner_binding_ref: string | null;
+  profile_id: string | null;
+  classification: string;
+  rationale: string;
+  created_at: string;
+}
+
+export interface GoalNotification {
+  id: string;
+  kind: string;
+  summary: string;
+  evidence_refs: string[];
+  source_event_sequence: number;
+  created_at: string;
+}
+
+export type GoalControlAction = 'pause' | 'resume' | 'stop' | 'takeover';
+
 export interface GoalRun {
   id: string;
   original_goal: string;
@@ -853,6 +877,7 @@ export interface GoalRun {
   };
   execution_status: GoalExecutionStatus | string;
   control_state: string;
+  resume_execution_status: string | null;
   active_stage: string | null;
   binding: {
     kind: string;
@@ -861,6 +886,7 @@ export interface GoalRun {
     target_id: string | null;
     completion_gate: string;
   };
+  binding_plan: GoalBindingPlan | null;
   environment_state: {
     state: string;
     facts: GoalEnvironmentFact[];
@@ -874,6 +900,7 @@ export interface GoalRun {
   completion_history: GoalCompletionAssessment[];
   verified_facts: string[];
   uncompleted_items: string[];
+  notifications: GoalNotification[];
   created_at: string;
   updated_at: string;
   terminal_at: string | null;

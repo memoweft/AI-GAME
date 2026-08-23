@@ -6,13 +6,18 @@
 > [`product/00_INDEX.md`](product/00_INDEX.md) and
 > [`product/02_CURRENT_STATE.md`](product/02_CURRENT_STATE.md) section 14.
 > Separate databases do not freeze separate user-facing products.
+>
+> **D20 retirement override.** The `F:\dating-copilot` paths and owner
+> relationships below are historical layout evidence only. The retired project
+> must not be started, probed, or used for U8, and it is not a prerequisite for
+> a generic long-lived mobile GoalRun under D22.
 
 ## Windows console runtime
 
 At this migration snapshot, the console was the runnable product boundary. It is Windows-native and
 does not launch WSL, the GUI model service, MuMu, or a device during startup.
-AI-GAME is the generic `ApplicationRuntime` platform; Soul is one production
-Profile (`soul-reply-v1`), not the platform boundary. The browser has exactly
+AI-GAME is the generic `ApplicationRuntime` platform; Soul was one specialized
+Profile (`soul-reply-v1`) in this migration snapshot, not the platform boundary. The browser has exactly
 four first-level entries: one-sentence MobileTask, Soul, Device, and Settings.
 Chat and GameLearning remain compatibility or advanced APIs/history. At that
 snapshot there was no universal Run or natural-language router between these
@@ -96,7 +101,8 @@ omitted, the production resolver selects a versioned `auto:` scope from the
 normalized goal: scoped 率土之滨 launch/tutorial/daily/general families or a
 generic exact-goal hash. Target identity is intentionally not part of this
 scope, and Soul receives no MobileTask scope because `soul-reply-v1` owns its
-separate delayed-outcome reply learning.
+separate delayed-outcome reply learning in the legacy resolver. This database
+separation does not exclude Soul from the current generic RuntimeKernel path.
 
 MobileTask recovery differs from Chat recovery. Construction examines active
 Tasks before the coordinator begins normal queue processing and applies a fixed
@@ -122,7 +128,8 @@ shutdown may close it at a safe nonterminal `queued` checkpoint, and recovery
 later opens and leases a new session. Chat and GameLearning share the same lease
 inside this Python process, so those three paths cannot interleave device work.
 The lease does not coordinate another process, direct ADB, external tools, or
-the separate dating-copilot controller.
+any separately configured external owner. The historical dating-copilot
+controller is retired and excluded by D20.
 
 `application-runtime.db` is the schema-v2 store for the generic deep
 `ApplicationRuntime` Module. It contains application instances, content-bound
@@ -133,7 +140,13 @@ instances. `Input`, `Pause`, and `Stop` share the final dispatch lock with owner
 reserve/dispatch, so a command is accepted either before the physical commit
 fence or after the owner returns, never in between.
 
-The Soul gateway performs dependency probes and runtime construction outside
+### Historical specialized-owner runtime records
+
+The following databases and reconciliation rules describe the former
+`soul-reply-v1` specialized binding. No current process may use them to
+rediscover, restart, repair, or require `F:\dating-copilot`.
+
+The historical Soul gateway performed dependency probes and runtime construction outside
 its state lock so a blocking owner/model transport cannot hold the shutdown
 fence. A separate initialization lock keeps construction single-flight, and
 the closed-state fence is checked again after the probe and before publishing a
@@ -148,10 +161,10 @@ GET-only wait; a direct definite-not-sent result, once inspected as
 `terminal_no_replay`, closes the attempt nonterminally so a fresh observation
 can re-plan without replaying it. Other unresolved evidence becomes explicit
 `recovery_no_replay`, uncertainty, or failure. This generic ledger, rather than
-the old `SoulIntegration` command-receipt database, is the current Soul write
-path.
+the old `SoulIntegration` command-receipt database, was the historical
+`soul-reply-v1` write path.
 
-`soul-scheduler-lifecycle.db` is a separate content-free singleton store for
+`soul-scheduler-lifecycle.db` was a separate content-free singleton store for
 the global managed Soul matcher target. It records `requested_state`, the
 currently actionable `desired_state`, source instance, hash transition ref,
 monotonic generation and timestamp; it contains no identity or message body.
@@ -164,21 +177,21 @@ durably `stopped`; failed/completed instances therefore preserve their latest
 explicit target and cannot revive an older stopped target. Monotonic generation
 and the aggregate hash prevent stale lifecycle replay from rolling it back.
 
-The independent scheduler reconciler performs an owner GET before a necessary
-idempotent PUT. It repairs owner/dating-copilot reverse restarts and uses bounded
-retry while unreachable, without creating another Application instance. It can
-run even when cloud reply or local-vision dependencies are offline. A cold
-paused restore may converge as desired paused/effective stopped without first
-starting the matcher. AI-GAME process shutdown closes local activation, the
-interruptible monitor, and any loaded Application runtime. The reconciler
-rechecks the closed fence after owner GET and before PUT, so shutdown never
-writes external desired state `stopped` or allows a late scheduler write.
-When reply dependencies are unavailable during cold recovery, the reconciler
-delegates only an idle Stop settlement to the dependency-free Application core.
-Worker ownership and unfinished physical intents remain untouched and retain
-their pre-Stop matcher demand.
+The historical scheduler reconciler performed an owner GET before a necessary
+idempotent PUT. It reconciled owner/dating-copilot reverse restarts and used
+bounded retry while unreachable, without creating another Application
+instance. It could run even when cloud reply or local-vision dependencies were
+offline. A cold paused restore could converge as desired paused/effective
+stopped without first starting the matcher. AI-GAME process shutdown closed
+local activation, the interruptible monitor, and any loaded Application
+runtime. The reconciler rechecked the closed fence after owner GET and before
+PUT, so shutdown never wrote external desired state `stopped` or allowed a late
+scheduler write. When reply dependencies were unavailable during cold
+recovery, the reconciler delegated only an idle Stop settlement to the
+dependency-free Application core. Worker ownership and unfinished physical
+intents remained untouched and retained their pre-Stop matcher demand.
 
-`soul-reply-learning.db` is owned by the `soul-reply-v1` Adapter. It records
+`soul-reply-learning.db` was owned by the historical `soul-reply-v1` Adapter. It records
 hash-bound draft trials, transcript/pending-generation lineage, strategy and
 model versions, owner binding, physical send proof, and later interaction
 evidence. Confirmed delivery alone never changes the active reply strategy;
@@ -306,14 +319,12 @@ Keeping the model environment under `/srv/ai-game` avoids Linux virtual environm
   can outlive raw evidence.
 - The Windows `runtime` directory contains per-run screenshots, traces, and
   exported evidence; it is not source.
-- `F:\dating-copilot` remains separately owned and is never modified by model
-  bootstrap or lifecycle scripts. It is the sole Soul device/physical-ledger
-  owner. AI-GAME owns the generic application cycle and calls only its loopback
-  owner Interface for observation, reserve, dispatch, inspect, and managed
-  scheduler desired state; it neither opens a second Soul controller nor copies
-  dating-copilot's operational database under `runtime`. Explicit Application
-  Start/Pause/Resume/Stop may change the owner-exposed scheduler target, but
-  console/model scripts do not start or terminate the dating-copilot process.
+- `F:\dating-copilot` was separately owned in the historical Soul Adapter
+  layout and was never modified by model bootstrap or lifecycle scripts. D20
+  has since retired it from current use. The retained owner Interface and
+  database layout document old observation/reserve/dispatch/inspect and
+  scheduler evidence; they do not authorize any process start, probe, target
+  selection, or generic Goal routing.
 
 ## Local model profile
 
@@ -391,7 +402,9 @@ Code shape and test coverage do not establish live acceptance. One supplied
 real-task record exists for 率土之滨: Task
 `daac81a7-1af9-47e3-9566-66e73509a0fd`, 23 ActionAttempts, scope
 `auto:stzb/tutorial/v1`, completed. That evidence is task-specific and does not
-establish general gameplay ability. The new `soul-reply-v1` chain still awaits
-this round's live acceptance. This layout also does not assert that
+establish general gameplay ability. The historical `soul-reply-v1` chain has no
+current owner acceptance, and the local continuity fixture does not replace the
+still-missing real long-lived mobile acceptance; U8 remains `PARTIAL`. This
+layout also does not assert that
 Mobile-Agent is installed, that the model/device is currently reachable, or
 that the discrete loop is ready for real-time game control.

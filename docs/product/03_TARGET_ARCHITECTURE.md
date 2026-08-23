@@ -179,6 +179,7 @@ local.text_reasoning
 local.visual_grounding
 local.goal_verification
 long_lived.wait
+local.managed_notification
 external_owner.soul
 experience.retrieve
 experience.record
@@ -272,9 +273,32 @@ The broker coordinates:
 - compatibility MobileTask leases during migration;
 - GameLearning device work during migration;
 - Chat device work during migration;
-- specialized external owners such as dating-copilot.
+- explicitly bound specialized external owners.
 
-It may delegate physical action to an external owner, but the GoalRun stores that binding and reconciles the owner's authoritative ledger. It never starts a competing ADB worker for the same target.
+It may delegate physical action to an external owner, but the GoalRun stores
+that binding and reconciles the owner's authoritative ledger. For an
+external-owner plan, it first persists an opaque, plan-scoped
+`owner_binding_ref`; that reference associates later owner evidence with the
+frozen GoalRun, but is neither an endpoint, credential, nor account identity.
+
+ApplicationRuntime owns scheduling, event waits, continuation, and per-cycle
+budgets for a long-lived application GoalRun. When its target is an Android
+application, each bounded physical cycle goes through the Goal Coordinator and
+RuntimeKernel under the same Ownership Broker:
+
+```text
+ApplicationRuntime wait/event lifecycle
+-> RuntimeKernel observe/action/re-observe/verify cycle
+-> ApplicationRuntime commit/wait/continue
+```
+
+An application already logged in on the authorized device does not require a
+specialized external owner. The Registry may select such an owner only as an
+optional available capability; once selected, that adapter must satisfy its own
+binding, authorization, receipt, and reconciliation contract. The broker never
+starts a competing ADB worker for the same target.
+
+[constraint-source: USER_DECISION; ref: D22 U8 real mobile/application correction 2026-08-23]
 
 ## 9. Experience Service
 

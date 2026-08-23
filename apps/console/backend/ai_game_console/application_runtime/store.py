@@ -12,10 +12,13 @@ from typing import Any, Iterator, Mapping
 from .domain import (
     ApplicationInstance,
     ExecutionReceipt,
+    ExternalOwnerEvent,
     IdempotencyConflict,
     Intent,
     MemoryCandidate,
     Outcome,
+    OwnerEventBindingMismatch,
+    OwnerEventFenced,
     RuntimeEvent,
     RuntimeIntent,
     RuntimeNotFound,
@@ -24,7 +27,7 @@ from .domain import (
 
 
 _ACTIVE = {"queued", "running", "waiting", "paused", "stopping"}
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 
 
 def _now() -> str:
@@ -106,7 +109,9 @@ class _SQLiteApplicationStore:
                       intent_id TEXT PRIMARY KEY, instance_id TEXT NOT NULL,
                       cycle INTEGER NOT NULL, revision INTEGER NOT NULL,
                       name TEXT NOT NULL, arguments_json TEXT NOT NULL,
-                      hard_risk INTEGER NOT NULL, phase TEXT NOT NULL,
+                      hard_risk INTEGER NOT NULL,
+                      candidate_notification INTEGER NOT NULL DEFAULT 0,
+                      phase TEXT NOT NULL,
                       reservation_id TEXT, receipt_json TEXT,
                       created_at TEXT NOT NULL, finalized_at TEXT);
                     CREATE TABLE IF NOT EXISTS application_outcomes (
@@ -151,6 +156,9 @@ class _SQLiteApplicationStore:
                 if version == 1:
                     self._migrate_v1_to_v2(db)
                     version = 2
+                if version == 2:
+                    self._migrate_v2_to_v3(db)
+                    version = 3
                 if version != _SCHEMA_VERSION:
                     raise RuntimeError("unsupported application runtime database schema")
             self._initialized = True
@@ -174,6 +182,21 @@ class _SQLiteApplicationStore:
         )
         db.execute(
             "UPDATE application_runtime_schema SET version=2 WHERE singleton=1"
+        )
+
+    @staticmethod
+    def _migrate_v2_to_v3(db: sqlite3.Connection) -> None:
+        columns = {
+            str(row["name"])
+            for row in db.execute("PRAGMA table_info(application_intents)").fetchall()
+        }
+        if "candidate_notification" not in columns:
+            db.execute(
+                "ALTER TABLE application_intents "
+                "ADD COLUMN candidate_notification INTEGER NOT NULL DEFAULT 0"
+            )
+        db.execute(
+            "UPDATE application_runtime_schema SET version=3 WHERE singleton=1"
         )
 
     def accept_start(
@@ -299,6 +322,54 @@ class _SQLiteApplicationStore:
             )
         return self.inspect(instance_id), True
 
+    def accept_owner_event(
+        self,
+        instance_id: str,
+        event: ExternalOwnerEvent,
+        request_id: str,
+        digest: str,
+    ) -> tuple[ApplicationInstance, bool, bool]:
+        """Durably accept one owner-led fact and report whether it wakes a cycle.
+
+        ``application_requests`` is the durable replay ledger.  The event ID
+        itself never enters the database; the runtime passes a derived request
+        key so that the owner can replay after a launcher restart without
+        retaining source-account or conversation material here.
+        """
+
+        with self._connection() as db:
+            old = self._request(db, request_id, digest)
+            if old:
+                return self.inspect(old), False, False
+            row = self._instance(db, instance_id)
+            if row["target_id"] != event.owner_binding_ref:
+                raise OwnerEventBindingMismatch(instance_id)
+            status = str(row["status"])
+            # [constraint-source: PRODUCT_SPEC; ref: docs/product/07_ACCEPTANCE_AND_EVIDENCE.md section 6]
+            # Stop is an external-action and later-event fence for the same
+            # long-lived GoalRun.  No new owner evidence is admitted once the
+            # owner-facing instance is stopping or terminal.
+            if status in {"stopping", "stopped", "completed", "failed"}:
+                raise OwnerEventFenced(instance_id)
+            wake = status == "waiting"
+            now = _now()
+            self._event(db, instance_id, event.event_type, event.durable_data())
+            if wake:
+                db.execute(
+                    """
+                    UPDATE application_instances
+                    SET status='queued',wake_at=NULL,updated_at=?
+                    WHERE instance_id=? AND status='waiting'
+                    """,
+                    (now, instance_id),
+                )
+                self._event(db, instance_id, "owner_event_woke", {})
+            db.execute(
+                "INSERT INTO application_requests VALUES(?,?,?,?,?)",
+                (request_id, "owner_event", digest, instance_id, now),
+            )
+        return self.inspect(instance_id), True, wake
+
     def claim(self, instance_id: str, worker_token: str) -> bool:
         with self._connection() as db:
             cursor = db.execute(
@@ -376,6 +447,8 @@ class _SQLiteApplicationStore:
         revision: int,
         intent: Intent,
         persisted_intent: Intent | None = None,
+        *,
+        candidate_notification: bool = False,
     ) -> bool:
         durable = persisted_intent or intent
         with self._connection() as db:
@@ -384,8 +457,11 @@ class _SQLiteApplicationStore:
                 return False
             db.execute(
                 """
-                INSERT INTO application_intents
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,NULL)
+                INSERT INTO application_intents(
+                  intent_id,instance_id,cycle,revision,name,arguments_json,
+                  hard_risk,candidate_notification,phase,reservation_id,
+                  receipt_json,created_at,finalized_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,NULL)
                 """,
                 (
                     intent_id,
@@ -395,6 +471,7 @@ class _SQLiteApplicationStore:
                     durable.name,
                     json.dumps(dict(durable.arguments), sort_keys=True),
                     int(durable.hard_risk),
+                    int(candidate_notification),
                     "open",
                     None,
                     None,
@@ -721,6 +798,7 @@ class _SQLiteApplicationStore:
         expected_revision: int | None = None,
         replan_on_revision_change: bool = False,
         owner_settlement_priority: bool = False,
+        candidate_notification: bool = False,
     ) -> str:
         with self._connection() as db:
             now = _now()
@@ -802,6 +880,21 @@ class _SQLiteApplicationStore:
                 "cycle_finished",
                 {"cycle": cycle, "outcome": outcome.status},
             )
+            if (
+                candidate_notification
+                and outcome.confirmed_success
+                and resolved_status == "running"
+            ):
+                self._event(
+                    db,
+                    instance_id,
+                    "candidate_notified",
+                    {
+                        "evidence_refs": (
+                            [after_evidence_id] if after_evidence_id else []
+                        )
+                    },
+                )
             return resolved_status
 
     def complete_without_action(
@@ -1333,4 +1426,5 @@ class _SQLiteApplicationStore:
             ExecutionReceipt(**receipt) if receipt else None,
             row["created_at"],
             row["finalized_at"],
+            bool(row["candidate_notification"]),
         )

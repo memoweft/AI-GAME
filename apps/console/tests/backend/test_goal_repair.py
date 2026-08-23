@@ -103,4 +103,60 @@ def test_schema_v2_is_upgraded_without_losing_goal_runs(tmp_path: Path):
         version = connection.execute(
             "SELECT version FROM goal_schema WHERE singleton = 1"
         ).fetchone()[0]
-    assert version == 5
+        assert version == 7
+
+
+def test_schema_v6_backfills_external_owner_binding_ref(tmp_path: Path):
+    database = tmp_path / "goals.db"
+    store = SQLiteGoalStore(database)
+    goal, _ = store.create(goal="持续等待外部事件", idempotency_key="goal-1")
+    plan = store.record_binding_plan(
+        goal.id,
+        route_kind="long_lived_application",
+        binding_kind="application_runtime",
+        capability_ids=("long_lived.wait", "external_owner.soul"),
+        owner_kind="external_owner",
+        profile_id="soul-reply-v1",
+        classification="long_lived_application_goal",
+        rationale="test",
+    )
+    assert plan.owner_binding_ref is not None
+
+    with sqlite3.connect(database) as connection:
+        connection.executescript(
+            """
+            ALTER TABLE goal_binding_plans RENAME TO goal_binding_plans_v7;
+            CREATE TABLE goal_binding_plans (
+                goal_id TEXT NOT NULL REFERENCES goal_runs(goal_id),
+                revision INTEGER NOT NULL,
+                route_kind TEXT NOT NULL,
+                binding_kind TEXT NOT NULL,
+                capability_ids_json TEXT NOT NULL,
+                owner_kind TEXT,
+                profile_id TEXT,
+                classification TEXT NOT NULL,
+                rationale TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(goal_id, revision)
+            );
+            INSERT INTO goal_binding_plans(
+                goal_id, revision, route_kind, binding_kind, capability_ids_json,
+                owner_kind, profile_id, classification, rationale, created_at
+            )
+            SELECT goal_id, revision, route_kind, binding_kind, capability_ids_json,
+                   owner_kind, profile_id, classification, rationale, created_at
+            FROM goal_binding_plans_v7;
+            DROP TABLE goal_binding_plans_v7;
+            UPDATE goal_schema SET version = 6 WHERE singleton = 1;
+            """
+        )
+
+    reopened = SQLiteGoalStore(database)
+    restored = reopened.binding_plan(goal.id)
+    assert restored is not None
+    assert restored.owner_binding_ref == plan.owner_binding_ref
+    with sqlite3.connect(database) as connection:
+        version = connection.execute(
+            "SELECT version FROM goal_schema WHERE singleton = 1"
+        ).fetchone()[0]
+        assert version == 7

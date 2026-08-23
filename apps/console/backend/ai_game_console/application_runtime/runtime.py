@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import queue
 import threading
@@ -18,6 +19,7 @@ from .domain import (
     Decision,
     ExecutionOwner,
     ExecutionReceipt,
+    ExternalOwnerEvent,
     ExecutionReconciliation,
     Input,
     Intent,
@@ -317,6 +319,55 @@ class ApplicationRuntime:
             self._queue.put_nowait(instance_id)
         return self._store.inspect(instance_id)
 
+    def report_owner_event(
+        self, instance_id: str, event: ExternalOwnerEvent
+    ) -> ApplicationInstance:
+        """Accept an evidence-only fact from the instance's already-bound owner.
+
+        This is intentionally an internal adapter port.  It cannot issue a
+        physical command; at most it wakes the ordinary observe -> policy ->
+        intent -> dispatch cycle, which retains the existing revision and
+        pre-dispatch fences.
+        """
+
+        self._required(instance_id, "instance_id")
+        if not isinstance(event, ExternalOwnerEvent):
+            raise TypeError("event must be ExternalOwnerEvent")
+        durable_data = event.durable_data()
+        request_key = hashlib.sha256(
+            (
+                f"{instance_id}\0{event.owner_binding_ref}\0{event.owner_event_id}"
+            ).encode("utf-8")
+        ).hexdigest()
+        request_id = f"owner-event:{request_key}"
+        digest = request_digest(
+            "owner_event",
+            {
+                "instance_id": instance_id,
+                "owner_binding_ref": event.owner_binding_ref,
+                "owner_event_id": event.owner_event_id,
+                "event_type": event.event_type,
+                "data": durable_data,
+            },
+        )
+        timer: threading.Timer | None = None
+        wake = False
+        with self._dispatch_lock:
+            self._ensure_open()
+            _state, created, wake = self._store.accept_owner_event(
+                instance_id,
+                event,
+                request_id,
+                digest,
+            )
+            if created and wake:
+                timer = self._pop_timer(instance_id)
+        if timer is not None:
+            timer.cancel()
+        if created and wake:
+            self._queue.put_nowait(instance_id)
+        return self._store.inspect(instance_id)
+
     def inspect(self, instance_id: str) -> ApplicationInstance:
         return self._store.inspect(instance_id)
 
@@ -480,6 +531,7 @@ class ApplicationRuntime:
                 revision,
                 decision.intent,
                 self._project_intent(decision.intent),
+                candidate_notification=decision.candidate_notification,
             ):
                 self._store.settle_fence(instance_id, cycle)
                 return self._next_delay(instance_id)
@@ -628,6 +680,7 @@ class ApplicationRuntime:
                     )
                 ),
                 owner_settlement_priority=(desired_status == "failed"),
+                candidate_notification=decision.candidate_notification,
             )
             return 0.0 if resolved_status in {"running", "queued"} else None
         except RetryableApplicationError as exc:
@@ -733,6 +786,7 @@ class ApplicationRuntime:
                     outcome.confirmed_success or definite_not_dispatched
                 ),
                 owner_settlement_priority=(status == "failed"),
+                candidate_notification=runtime_intent.candidate_notification,
             )
             return 0.0 if resolved in {"running", "queued"} else None
         except Exception:

@@ -80,18 +80,30 @@ Historical reports are retained when they prove a useful fact, for example a tes
 
 ```text
 Execution state: IN_PROGRESS
-Current active work order: U8_LONG_LIVED_ROUTING
-Last completed milestone: U7_REAL_KERNEL_CUTOVER (DONE)
-Current step: begin the bounded multi-capability and long-lived routing slice
+Current active work order: U9_PRODUCTION_HARDENING
+Last completed milestone: U8_LONG_LIVED_ROUTING (DONE)
+Current step: U9 release-candidate artifact integrity is implemented and
+current-source verified; continue with its install-plan, disposable-install,
+upgrade/rollback, and operational-evidence gates
 Roadmap disposition: U5 delivered PARTIAL and closed as a non-blocking
 stabilization track by explicit owner direction on 2026-08-23
 ```
 
-[constraint-source: PRODUCT_SPEC; ref: `06_IMPLEMENTATION_ROADMAP.md` U7 required sequence and section 5]
+[constraint-source: USER_DECISION; ref: D22 U8 real mobile/application correction 2026-08-23]
 
 The user's 2026-08-23 instruction activated the remaining U7 observation and
-ordinary U7-to-U8 advancement sequence. The 30-minute local observation passed,
-U7 is `DONE`, and `U8_LONG_LIVED_ROUTING` is now the single active work order.
+ordinary U7-to-U8 advancement sequence. U7 passed, and U8 then completed on
+2026-08-24 with real normal-launcher GoalRun
+`5f42cc67-4baa-4e6e-ba58-42e0730000f7`: its plan preceded binding, selected no
+specialized owner, discovered the authorized logged-in Soul application,
+performed bounded at-most-once Kernel cycles, emitted a nonterminal candidate
+notification, attributed a real no-response interval separately in Experience,
+restored the same instance across normal launcher restarts without replay, and
+settled explicit stop. The transient stop-window ingress defect found during
+acceptance was repaired; a final real probe returned 409 for later message and
+outcome ingress and created no Kernel work. The historical Soul-page project
+remains excluded by D20. U8 is `DONE`; U9 is now active, but has no production
+acceptance evidence yet.
 
 U1 completed against its specified gates. U2 remains PARTIAL only because its
 real rendered primary-composer refresh/close/reopen proof is unavailable; its

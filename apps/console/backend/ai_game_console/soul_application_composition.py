@@ -505,7 +505,14 @@ class SoulApplicationRuntimeGateway:
             self._start_lifecycle_reconciler()
 
     def _start_lifecycle_reconciler(self) -> None:
-        if self._scheduler_lifecycle_store is None:
+        # With no explicitly configured owner, there is no authoritative
+        # scheduler to read or control. A durable historical desired-state row
+        # must not create a retry loop that pretends this process owns one.
+        if (
+            self._scheduler_lifecycle_store is None
+            or self._scheduler_reader is None
+            or self._scheduler_controller is None
+        ):
             return
         with self._lock:
             if self._closed:
@@ -737,14 +744,17 @@ def compose_soul_application_runtime(
 
     resolved_owner = owner_client
     if resolved_owner is None:
-        try:
-            resolved_owner = SoulOwnerClient(
-                settings.soul_console_url,
-                timeout_seconds=settings.soul_request_timeout_seconds,
-                observation_timeout_seconds=settings.soul_observation_timeout_seconds,
-            )
-        except (SoulApplicationError, ValueError):
-            setup_error = setup_error or "owner_configuration_invalid"
+        if settings.soul_console_url is None:
+            setup_error = setup_error or "owner_not_configured"
+        else:
+            try:
+                resolved_owner = SoulOwnerClient(
+                    settings.soul_console_url,
+                    timeout_seconds=settings.soul_request_timeout_seconds,
+                    observation_timeout_seconds=settings.soul_observation_timeout_seconds,
+                )
+            except (SoulApplicationError, ValueError):
+                setup_error = setup_error or "owner_configuration_invalid"
 
     resolved_vision = vision
     if resolved_vision is None:

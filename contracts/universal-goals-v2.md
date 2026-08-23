@@ -6,6 +6,13 @@ U2 additive preflight revision: 2026-08-20
 
 U3 additive completion-gate revision: 2026-08-21
 
+> **COMPATIBILITY SNAPSHOT.** This file records the U1-U3 v2 facade and has not
+> yet been expanded to the current U8 binding-plan schema. It is not current U8
+> router authority and must not be combined with control-plane v1 to infer that
+> Soul or any third-party application requires `soul-reply-v1`, an external
+> owner, or `F:\dating-copilot`. Current routing and acceptance are governed by
+> `docs/product/` and active decision D22.
+
 ## Boundary
 
 `/api/v2/goals` is the single ordinary-language ingress for a durable

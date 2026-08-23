@@ -225,7 +225,7 @@ def test_workspace_requires_status_but_degrades_other_sections() -> None:
     transport.responses[("GET", "/api/status")] = SoulHttpResponse(503, {"logs": ["secret"]})
     assert integration.workspace() == {
         "connection": "unavailable",
-        "console_url": "http://127.0.0.1:5000",
+        "console_url": None,
         "observed_at": None,
         "available_commands": [],
         "status": None,
@@ -355,7 +355,7 @@ def test_workspace_derives_only_currently_legal_commands_and_exposes_incompatibi
     transport.responses[("GET", "/api/status")] = SoulHttpResponse(200, [])
     assert integration.workspace() == {
         "connection": "incompatible",
-        "console_url": "http://127.0.0.1:5000",
+        "console_url": None,
         "observed_at": None,
         "available_commands": [],
         "status": None,

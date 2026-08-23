@@ -18,7 +18,7 @@ def resolve_mobile_skill_scope(goal: str, target_id: str | None) -> str | None:
     task remains bound to its selected target separately, so verified game
     experience can later transfer from an emulator to a compatible tablet.
     Soul is deliberately excluded because its conversation and relationship
-    learning is owned by dating-copilot rather than MobileTask.
+    learning is owned by its specialized external owner rather than MobileTask.
     """
 
     del target_id

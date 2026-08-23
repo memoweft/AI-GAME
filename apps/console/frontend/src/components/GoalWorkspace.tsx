@@ -4,12 +4,14 @@ import {
   CheckCircle2,
   ChevronRight,
   CirclePause,
+  CirclePlay,
   RefreshCw,
   Send,
   ShieldCheck,
   Smartphone,
   Sparkles,
   Square,
+  UserRound,
 } from 'lucide-react';
 import { ApiError, api, newIdempotencyKey } from '../api';
 import { formatDateTime } from '../format';
@@ -20,6 +22,9 @@ const ACTIVE_GOAL_KEY = 'ai-game.active-goal-id';
 const POLL_MS = 1200;
 const SETTLED = new Set([
   'CANDIDATE_COMPLETE', 'COMPLETED', 'PARTIAL', 'FAILED', 'CANCELLED', 'UNCERTAIN',
+]);
+const NON_USER_WAIT_CODES = new Set([
+  'TIME_OR_INBOUND_EVENT', 'long_lived_mobile_runtime_not_composed',
 ]);
 
 const STATUS: Record<string, { label: string; tone: string; detail: string }> = {
@@ -44,6 +49,16 @@ function message(error: unknown): string {
 }
 
 function statusMeta(goal: GoalRun) {
+  if (
+    goal.execution_status === 'WAITING_EXTERNAL'
+    && goal.waiting_reason?.code === 'TIME_OR_INBOUND_EVENT'
+  ) {
+    return {
+      label: '等待下一次事件',
+      tone: 'info',
+      detail: '长期目标保持活动；下一次定时唤醒或外部事件到达后会继续。',
+    };
+  }
   return STATUS[goal.execution_status] ?? STATUS.ACCEPTED;
 }
 
@@ -112,7 +127,17 @@ export function GoalWorkspace() {
   };
 
   const status = active ? statusMeta(active) : null;
-  const canStop = Boolean(active?.binding.task_id && !SETTLED.has(active.execution_status));
+  const canStop = Boolean(active && !SETTLED.has(active.execution_status));
+  const hasBoundTask = Boolean(active?.binding.task_id);
+  const richControls = Boolean(active && [
+    'runtime_kernel', 'runtime_kernel_canary', 'application_runtime',
+  ].includes(active.binding.kind));
+  const canResume = Boolean(
+    hasBoundTask && richControls && ['PAUSED', 'TAKEOVER'].includes(active?.control_state ?? ''),
+  );
+  const canPause = Boolean(
+    hasBoundTask && richControls && active?.control_state === 'AUTOMATED',
+  );
   const facts = active?.environment_state.facts ?? [];
   const options = active?.environment_state.target_options ?? [];
   const progressFacts = useMemo(
@@ -166,10 +191,15 @@ export function GoalWorkspace() {
             <div className={`agent-task-hero agent-task-hero-${status.tone}`}>
               <div className="agent-task-hero-title"><div className="agent-task-state-icon">{active.execution_status === 'COMPLETED' ? <CheckCircle2 size={22} /> : active.execution_status.startsWith('WAITING') ? <CirclePause size={22} /> : <Smartphone size={22} />}</div><div><span className={`agent-status agent-tone-${status.tone}`}>{status.label}</span><h2>{active.original_goal}</h2><p>{active.waiting_reason?.message || active.result_summary || status.detail}</p></div></div>
               <div className="agent-task-meta"><span>目标 {active.id.slice(0, 8)}</span>{active.binding.target_id && <span>设备 {active.binding.target_id.replace(/^adb:/, '')}</span>}</div>
-              {canStop && <button className="button button-secondary button-small" disabled={working} onClick={() => void act(() => api.stopGoal(active.id, newIdempotencyKey()))}><Square size={14} /> 停止</button>}
+              {canStop && <div className="goal-control-row">
+                {canPause && <button className="button button-secondary button-small" disabled={working} onClick={() => void act(() => api.controlGoal(active.id, 'pause', newIdempotencyKey()))}><CirclePause size={14} /> 暂停</button>}
+                {canPause && <button className="button button-secondary button-small" disabled={working} onClick={() => void act(() => api.controlGoal(active.id, 'takeover', newIdempotencyKey()))}><UserRound size={14} /> 接管</button>}
+                {canResume && <button className="button button-secondary button-small" disabled={working} onClick={() => void act(() => api.controlGoal(active.id, 'resume', newIdempotencyKey()))}><CirclePlay size={14} /> 继续</button>}
+                <button className="button button-secondary button-small" disabled={working} onClick={() => void act(() => api.stopGoal(active.id, newIdempotencyKey()))}><Square size={14} /> 停止</button>
+              </div>}
             </div>
 
-            {active.waiting_reason && <div className="goal-gate" role="status"><CirclePause size={20} /><div><strong>{active.waiting_reason.code === 'TARGET_SELECTION_REQUIRED' ? '请选择这次使用的设备' : '完成这一步后可以继续'}</strong><p>{active.waiting_reason.message}</p></div>{active.waiting_reason.code !== 'TARGET_SELECTION_REQUIRED' && <button className="button button-primary button-small" disabled={working} onClick={() => void act(() => api.retryGoalPreflight(active.id))}><RefreshCw size={14} /> 重新检查</button>}</div>}
+            {active.waiting_reason && <div className="goal-gate" role="status"><CirclePause size={20} /><div><strong>{active.waiting_reason.code === 'TARGET_SELECTION_REQUIRED' ? '请选择这次使用的设备' : active.waiting_reason.code === 'TIME_OR_INBOUND_EVENT' ? '正在等待事件，不需要你操作' : active.waiting_reason.code === 'long_lived_mobile_runtime_not_composed' ? '内部长期移动能力尚未组合' : '完成这一步后可以继续'}</strong><p>{active.waiting_reason.message}</p></div>{!NON_USER_WAIT_CODES.has(active.waiting_reason.code) && active.waiting_reason.code !== 'TARGET_SELECTION_REQUIRED' && <button className="button button-primary button-small" disabled={working} onClick={() => void act(() => api.retryGoalPreflight(active.id))}><RefreshCw size={14} /> 重新检查</button>}</div>}
 
             {options.length > 0 && <div className="goal-target-options">{options.map((option: GoalTargetOption) => <button key={option.target_id} disabled={working} onClick={() => void act(() => api.selectGoalTarget(active.id, option.target_id))}><Smartphone size={18} /><span><strong>{option.name}</strong><small>{option.connection}</small></span><ChevronRight size={16} /></button>)}</div>}
 
@@ -177,9 +207,11 @@ export function GoalWorkspace() {
 
             {active.verified_facts.length > 0 && <div className="goal-verified"><strong><CheckCircle2 size={16} /> 已验证结果</strong>{active.verified_facts.map((fact) => <p key={fact}>{fact}</p>)}</div>}
 
+            {active.notifications.length > 0 && <div className="goal-verified"><strong><Sparkles size={16} /> 候选里程碑</strong>{active.notifications.map((item) => <p key={item.id}>{item.summary} · {formatDateTime(item.created_at)}</p>)}</div>}
+
             {active.uncompleted_items.length > 0 && <div className="goal-uncompleted"><strong>尚未验证</strong>{active.uncompleted_items.map((item) => <p key={item}>{item}</p>)}</div>}
 
-            <details className="agent-technical-details"><summary><span>环境与完成证据</span><small>设备、模型、冻结标准和独立裁决</small></summary><div className="agent-technical-body goal-evidence-list"><section><h3>冻结成功标准</h3>{active.goal_specification.success_criteria.length ? active.goal_specification.success_criteria.map((criterion) => <article key={criterion.id}><strong>{criterion.description}</strong><span>{active.completion_assessment?.criteria.find((item) => item.criterion_id === criterion.id)?.satisfied ? '已验证' : '待验证'}</span><p>原句：{criterion.source_quote} · {criterion.evidence_requirement}</p></article>) : <p>尚未冻结成功标准。</p>}</section><section><h3>预检事实</h3>{facts.length ? facts.map((fact) => <article key={fact.capability}><strong>{fact.capability}</strong><span>{fact.state}</span><p>{fact.detail}</p></article>) : <p>尚未记录环境事实。</p>}</section><section><h3>兼容绑定</h3><p>类型：{active.binding.kind}</p><p>状态：{active.binding.state}</p><p>任务：{active.binding.task_id || '尚未创建'}</p><p>完成裁决：{active.completion_assessment ? `revision ${active.completion_assessment.revision} · ${active.completion_assessment.verdict}` : '尚未执行'}</p></section></div></details>
+            <details className="agent-technical-details"><summary><span>环境与完成证据</span><small>设备、能力、冻结标准和独立裁决</small></summary><div className="agent-technical-body goal-evidence-list"><section><h3>冻结成功标准</h3>{active.goal_specification.success_criteria.length ? active.goal_specification.success_criteria.map((criterion) => <article key={criterion.id}><strong>{criterion.description}</strong><span>{active.completion_assessment?.criteria.find((item) => item.criterion_id === criterion.id)?.satisfied ? '已验证' : '待验证'}</span><p>原句：{criterion.source_quote} · {criterion.evidence_requirement}</p></article>) : <p>尚未冻结成功标准。</p>}</section><section><h3>预检事实</h3>{facts.length ? facts.map((fact) => <article key={fact.capability}><strong>{fact.capability}</strong><span>{fact.state}</span><p>{fact.detail}</p></article>) : <p>尚未记录环境事实。</p>}</section><section><h3>能力绑定</h3><p>类型：{active.binding.kind}</p><p>状态：{active.binding.state}</p><p>任务：{active.binding.task_id || '尚未创建'}</p>{active.binding_plan && <><p>路线：{active.binding_plan.route_kind}</p><p>能力：{active.binding_plan.capability_ids.join(' · ')}</p><p>选择依据：{active.binding_plan.rationale}</p></>}<p>完成裁决：{active.completion_assessment ? `revision ${active.completion_assessment.revision} · ${active.completion_assessment.verdict}` : active.binding.completion_gate}</p></section></div></details>
           </>}
         </section>
       </div>

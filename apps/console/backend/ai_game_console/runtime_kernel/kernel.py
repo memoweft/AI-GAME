@@ -663,6 +663,13 @@ class RuntimeKernel:
                     x=action.params["x"],
                     y=action.params["y"],
                 )
+            elif action.type == ActionType.LONG_PRESS:
+                result = self._action_executor.execute_long_press(
+                    device_id=task.device_id,
+                    x=action.params["x"],
+                    y=action.params["y"],
+                    duration_ms=action.params.get("duration_ms", 600),
+                )
             elif action.type == ActionType.SWIPE:
                 result = self._action_executor.execute_swipe(
                     device_id=task.device_id,

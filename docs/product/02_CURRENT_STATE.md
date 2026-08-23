@@ -13,12 +13,18 @@ Current architecture consists of several orchestration islands:
 | Domain | Current role | Can cause physical work | Reached automatically from the primary sentence entry |
 |---|---|---:|---:|
 | Legacy `MobileTaskRuntime` | Read-only migration archive in normal Kernel mode; writable only in explicit Legacy/Draining rollback modes | Yes only in explicit rollback modes | No in normal Kernel-active startup |
-| `ApplicationRuntime` | Long-lived fixed-profile cycles; production profile is Soul | Soul through an external owner | No |
+| `ApplicationRuntime` | Durable local-managed, generic Android long-lived, and optional specialized long-lived cycles | Bounded physical work through its composed RuntimeKernel cycle; specialized owner only when explicitly bound | Yes for generic long-lived mobile/application goals through the U8 composition |
 | `GameLearner` | Bounded learning episode under an explicit profile | Yes | No |
 | `Gateway + RuntimeKernel` | Canonical bounded finite-phone execution path after U7 local cutover | Yes in normal Kernel-active mode | Yes for bounded finite phone goals |
 | Legacy Chat | Text or text-plus-device compatibility flow | Yes in configured mode | No universal routing |
 
-There is no universal goal router, runtime assembler, automatic capability selection, unified experience memory, or canonical worker that composes these domains.
+The v2 Goal composer routes bounded finite-phone, language-only, device-free
+local managed long-lived, and generic long-lived mobile/application goals. U8
+now composes ApplicationRuntime as the durable wait/event supervisor with one
+bounded RuntimeKernel cycle per physical wake for an already logged-in mobile
+application. The former generic-to-Soul external-owner default was an
+implementation gap, not a product prerequisite; specialized external owners
+remain optional and are selected only by a frozen plan.
 
 ## 2. What is currently real
 
@@ -61,16 +67,28 @@ business GoalRun; U7 proves local default ownership and read-only MobileTask
 retirement for this slice. It does not prove Soul, multi-device scheduling,
 packaged deployment, or the still-unspecified sustained observation period.
 
-### 2.3 ApplicationRuntime is a useful long-lived cycle
+### 2.3 ApplicationRuntime supplies long-lived lifecycle infrastructure
 
 `application_runtime/runtime.py` already supports a profile-provided observation, policy, execution owner, verifier, memory gate, durable instance, revision fence, wait/wake, pause, stop, and reconciliation cycle.
+
+The pre-U8 statement that it was only Soul-specific and unreachable from the
+main sentence entry is historical. Current source adds a separate
+`local-managed-v1` profile selected through the primary Goal composer for
+`long_lived_local_goal`; it uses its own runtime database so it cannot be
+recovered by the Soul coordinator.
 
 Current limits:
 
 - one runtime instance is bound to one fixed profile;
-- production composition is currently Soul-specific;
-- Soul delegates physical truth to the external `dating-copilot` owner;
-- it is not selected from the main sentence entry;
+- each profile remains independently composed;
+- `local-managed-v1` is deliberately device-free and cannot operate an Android
+  application;
+- the logical Soul profile is an optional specialized adapter and has no
+  implicit physical owner; its owner requirements apply only when that profile
+  is explicitly selected;
+- no current profile composes ApplicationRuntime lifecycle with bounded
+  RuntimeKernel phone cycles for an already logged-in application;
+- local managed long-lived work is selected from the main sentence entry;
 - its active memory path is not unified with MobileTask or GameLearning;
 - the current Soul policy uses local vision plus a cloud text provider, not the requested local Qwen orchestrator;
 - repository documentation states that the new Soul reply chain still lacks current live acceptance.
@@ -790,3 +808,250 @@ The live role endpoint also reported `qwen3.8-27b-u` with the current external
 `qwen3.8-27b`/32,768 snapshot. U7 did not change that machine-local binding and
 the real goal plus the observation passed, but without a controlled comparison
 it is runtime drift, not an accepted replacement baseline.
+
+## 15. U8 multi-capability and long-lived routing — DONE — 2026-08-24
+
+### Observable capability and artifacts
+
+The v2 Goal service now classifies and freezes a durable
+`CapabilityBindingPlan` before any executor binding. Finite phone goals bind to
+the canonical RuntimeKernel, local managed long-lived goals bind to the
+AI-GAME-owned `local-managed-v1` ApplicationRuntime profile, language-only
+  goals return through the local model, and unknown goals remain unbound in a
+  resumable wait. Generic long-lived mobile goals freeze `long_lived.wait`,
+  Android observation/action, final verification, and Experience capabilities
+  without defaulting to Soul, a profile, or an external owner. The normal
+  composition now binds ApplicationRuntime as the durable wait/event supervisor
+  and delegates each physical wake to one bounded RuntimeKernel cycle on the
+  discovered authorized Android target. Goal schema v7 adds
+binding-plan and notification ledgers, including an opaque, immutable
+`owner_binding_ref` for an external-owner plan before an ApplicationRuntime
+instance may start. That reference is a per-GoalRun association, not an
+account identity or external-owner acceptance fact. The GoalWorkspace projects the selected
+route, evidence, candidate notifications, event waits, and unified
+pause/resume/takeover/stop controls without exposing profile selection to the
+ordinary user.
+
+The Experience Service now records attributable delayed positive, negative,
+no-response, approval, and rejection signals against the correct episode and
+evidence scope. Candidate milestones notify without changing the open-ended
+GoalRun to paused or terminal. Unexpected ApplicationRuntime completion is not
+translated into successful long-lived goal completion.
+
+### Automated-test evidence
+
+Before the route correction, focused Goal/Experience/Soul/Legacy verification passed 134 tests,
+including the owner-event ingress, binding-plan, unbound-stop, Soul
+configuration, and migration cases. The pre-correction complete backend
+regression, including the new local managed profile and candidate recovery
+coverage, passed 872 tests with one pre-existing Starlette/httpx deprecation
+warning. Frontend verification passed 59 tests; TypeScript checking and the
+Vite production build also passed.
+
+After D20 excluded the retired historical owner, pre-correction focused backend
+coverage for Goal routing, Soul integration/API/composition, and settings passed
+83 tests, including the regression that an unbound GoalRun stopped in
+`WAITING_EXTERNAL` could not bind later through idempotent create replay or
+preflight retry. The frontend GoalWorkspace suite passed 7 tests,
+including Stop for an unbound long-lived wait while retaining the task binding
+requirement for pause/takeover/resume. These are artifact/automated-test facts,
+not external-owner acceptance.
+
+The generic ApplicationRuntime core now accepts a content-free
+`ExternalOwnerEvent` only when its exact `owner_binding_ref` matches the
+started instance. Its durable owner-event ID fence makes an identical replay a
+no-op, rejects a conflicting replay or mismatched binding, wakes only the
+ordinary bounded observe/policy/intent path, and fences all new owner events
+after explicit stop. No current production owner adapter supplies that event
+feed, so this is current-source and automated-test evidence only.
+
+### Current-source runtime and real-device evidence
+
+An earlier normal-launcher observation served a prior U8 source snapshot on
+`127.0.0.1:4310` in `kernel_active`, with a ready database/runtime, Legacy
+writes disabled, zero active Legacy workers, and ApplicationRuntime managed by
+the composition. Its Goal database reported schema v6 with binding-plan and
+notification tables.
+
+After the current-source D20 correction and v7 migration, the normal launcher
+again served `/health` locally with a ready database, migrated the Goal ledger
+to schema v7, and then stopped cleanly through the same operator entry. Its
+legacy read-only Soul projection truthfully returned `console_url: null` and
+`soul_owner_not_configured`; the scheduler/profile readiness surface returned
+`503 soul_application_dependencies_unavailable`. This verification did not
+construct, probe, or contact an external owner and does not establish real
+scheduler readiness.
+
+Historical long-lived GoalRun `00f1e2d7-764d-473d-b206-a13c1ffbf773` entered
+through the same `/api/v2/goals` ingress and froze route
+`long_lived_application`, binding `application_runtime`, owner
+`external_owner`, and profile `soul-reply-v1` under the now-withdrawn generic
+default. Because its owner dependency was unavailable, it remained unbound and
+projected `WAITING_EXTERNAL`.
+Its explicit stop durably produced `CANCELLED` and
+`goal_cancelled_without_binding` with `physical_binding=false`. This historical
+record does not identify or authorize a current owner. Current code preserves
+this immutable ledger but will not auto-start or replay an unbound plan of that
+legacy shape.
+
+Finite GoalRun `901e081b-2e8e-460e-b48d-8065249ffc42`, bound to Kernel Task
+`c5187ab5-17e8-4eb6-a319-89188ad58ed8`, completed through that same ingress.
+Independent post-action observations verified Settings, visible Battery data
+(91%, not charging, about one hour to full), and return to Home. Its completion
+gate is `verified`. This is real-device compatibility evidence for finite
+routing, not live long-lived acceptance.
+
+### Learning and external-outcome evidence
+
+Real GoalRun `5f42cc67-4baa-4e6e-ba58-42e0730000f7` created Experience episode
+`b0354f49-126b-47fe-9aa6-3be3d8236a57` for ApplicationRuntime instance
+`51f5dd4d-78f9-4a12-ae54-e2e31f1c2a63`. The episode scope is
+`account_scope=goal-run:<goal-id>`, `application_id=cn.soulapp.android`,
+`goal_family=long-lived/mobile`, and `device_class=android`, with seven frozen
+criteria. Immediate outcomes remain attached to their Kernel transitions.
+
+The timer-driven 00:34 Soul observation
+`b1bab7f2-5f96-4bf4-9205-a4d175fb9b7f` showed only the user's earlier greetings
+and no inbound reply. The Goal application-outcome ingress accepted event
+`u8-no-response-20260824-001` and produced Experience signal
+`f187d173-552f-5325-bd9a-05028f568258`: kind `no_response`, source
+`application_runtime`, `transition_id=null`, confidence 1.0, evidence
+`bf4a0e0aed4340c0a609de7be1662ce0` plus the observation ID, and an explicit
+GoalRun/application/conversation attribution scope. This is the required real
+delayed outcome. It is not a reply, reward for one specific tap, another
+person's intent, or a relationship/satisfaction outcome.
+
+### Deployment and remaining acceptance
+
+[constraint-source: USER_DECISION; ref: D22 U8 real mobile/application correction 2026-08-23]
+
+The earlier implicit owner endpoint at `127.0.0.1:5000` did not establish a
+connection during bounded diagnostic probes. D20 excludes that historical
+project from U8; it is neither a current target nor a substitute for the real
+mobile/application sequence. The optional `soul-reply-v1` adapter requires
+explicit owner configuration and reports `owner_not_configured` without calling
+an owner when none exists. That adapter state is not a prerequisite for generic
+RuntimeKernel operation of an already logged-in application.
+
+The supporting local continuity fixture is `local-managed-v1`: a local
+long-lived GoalRun waits for
+an authorized same-GoalRun user message, commits one bounded AI-GAME-local
+candidate milestone with a durable receipt, emits a candidate notification
+without ending, waits again, recovers from its own runtime database, and
+accepts explicit stop. It does not use the Soul scheduler, an account, device,
+network, or the retired project. Focused automated coverage proves that
+behavior, including recovery of a persisted candidate-marked intent without
+redispatch.
+
+The final supporting normal-launcher continuity run created GoalRun
+`7e3a1d78-99d6-4e43-922d-490268629813` through `/api/v2/goals`. The local model
+froze `long_lived_local_goal`; its plan (`local-managed-v1`,
+`owner_kind=local_runtime`, no external binding ref) was persisted at goal
+event cursor `2940`, before its instance bind at cursor `2942`. The same
+GoalRun entered a durable wait, accepted a user follow-up, produced exactly one
+local checkpoint intent/receipt and one nonterminal verified outcome, emitted
+one candidate notification, and entered a later wait. A second same-GoalRun
+message completed a later bounded no-action cycle and rescheduled the wait;
+the instance still had two inputs, one intent, one outcome, and one notification
+with no re-dispatch. A normal launcher stop and restart restored the same
+instance `5f868344-8ea8-42c2-8fdf-eac230db5d1a` with those same counts. Explicit
+GoalRun stop then produced `CANCELLED` / runtime `stopped`; a later message
+returned `409 goal_state_conflict`, with counts unchanged and `wake_at=null`.
+
+Experience created an episode tied to that exact GoalRun and instance with
+`application_id=local-managed`, `goal_family=long-lived/local`, and
+`device_class=local-runtime`; it correctly has zero delayed-outcome signals
+because this capability produced no reply/no-response/user-feedback fact. No
+external outcome is claimed. Full pre-correction verification after the local
+runtime gateway change passed backend `872` tests (one existing Starlette/httpx
+deprecation warning), frontend `59` tests, and the production frontend build.
+After removal of the generic-to-Soul route, corrected-source verification
+passed backend `874` tests (the same single existing warning), frontend `59`
+tests, the focused long-lived/Soul/repair/cutover suite (`69` tests), the
+GoalWorkspace suite (`7` tests), and the production frontend build. These are
+automated/source facts only; no console, device, app, or account was operated
+during the cleanup.
+
+Final current-source U8 verification passed backend `884` tests with the same
+single Starlette/httpx deprecation warning, frontend `59` tests, focused U8
+routing/composition `16` tests, TypeScript checking, and the Vite production
+build. The final tests cover the generic mobile composition, plan-before-bind,
+bounded Kernel delegation, durable trigger consumption, delayed outcome
+idempotency and attribution, transient `STOP_REQUESTED` ingress fences, stable
+terminal timestamps, restart recovery, and no replay.
+
+The supporting local fixture above remains device-free evidence only. The final
+real vertical instead used normal-launcher GoalRun
+`5f42cc67-4baa-4e6e-ba58-42e0730000f7`, instance
+`51f5dd4d-78f9-4a12-ae54-e2e31f1c2a63`, target
+`adb:127.0.0.1:16384`, and foreground `cn.soulapp.android`. Its plan was frozen
+at Goal cursor `2968`, before instance bind cursor `2975`, with no owner/profile
+selection. Kernel Task `8581c1ff-85b0-48bb-af3b-7d597db70b71` executed exactly
+one accepted tap and verified fresh post-action evidence
+`7420554531204c3ab3067218d4e82ee9`; candidate notification
+`15359636-dbba-5a50-9768-4e0fa57e8615` recorded `continues=true`. Four later
+one-action Kernel cycles and one later timer observation cycle remained bounded
+and nonterminal to the parent GoalRun.
+
+Normal launcher restarts restored the same GoalRun and ApplicationRuntime
+instance without adding task/action/execution receipts. Explicit stop settled
+the instance as `stopped`, cleared `wake_at`, and the final restart retained the
+same instance and stable terminal timestamp. A diagnostic message submitted in
+the first stop window exposed a missing Goal ingress check; it produced no
+Kernel task/action/execution. Final source now fences messages and delayed
+outcomes immediately at durable `STOP_REQUESTED`. Real final-source fence
+GoalRun `600a0041-8f5e-45e2-b284-2b2a8d8bb64b` returned 409 for both later
+ingress attempts, created zero Kernel tasks/actions/executions, and settled
+instance `2f6a5fc3-2039-480a-9180-43b10388b5f0` with `wake_at=null`.
+
+These facts close U8. `U9_PRODUCTION_HARDENING` is active next; no U9
+production deployment, fresh-install, long-run SLO, failure-injection result,
+or specialized-owner acceptance is claimed yet. U5 remains its separately
+recorded non-blocking `PARTIAL` track and U2 retains its rendered-browser
+deviation.
+
+## 16. U9 production hardening — PARTIAL — 2026-08-24
+
+### Observable capability and artifacts
+
+The first U9 slice adds a bounded local release-candidate builder and verifier:
+`ai_game_console.production_release` and
+`scripts/production-release.ps1`. The builder first requires a current browser
+bundle, then archives the console backend, browser source plus built output,
+sanitized `*.env.example` templates, normal launch scripts, and the relevant
+canonical U9 policy documents. Every included entry receives a SHA-256 digest;
+the archive carries an internal manifest and notes, while adjacent manifest and
+checksum files bind the complete archive. A candidate archive never includes
+runtime databases, real configuration, credentials, model files, screenshots,
+or logs. The manifest explicitly declares `deployment_status=NOT_DEPLOYED`.
+
+### Automated and current-source evidence
+
+Focused release-candidate tests passed `3/3` and cover inclusion/exclusion of
+deployment inputs, stale-browser-bundle refusal, immutable artifact naming,
+checksum verification, and tamper detection. The full current-source backend
+regression passed `887` tests with one existing Starlette/httpx deprecation
+warning; frontend regression passed `59` tests and the production Vite build
+passed. The normal release entry rebuilt the current Vite frontend and produced
+then verified local workspace-snapshot
+candidate `ai-game-console-backend-0.1.0-workspace_snapshot-9af42ba8a1fb`
+with archive digest
+`f9e2d45f93cd1bfd4066d266c9c1ae256fb28dce4591cde68868443bdb6adeed` and
+`1,255` manifest entries. This is current-source artifact evidence, not a
+fresh install, running deployment, device result, long-run observation, or
+external outcome.
+
+After the user's explicit restart instruction, the normal launcher stopped
+cleanly and started a new current-source listener (PID `20192`) in
+`kernel_active`; `/health` returned `ok`, the database was `ready`, Legacy
+remained non-writable, and active Kernel tasks remained `0`. No GoalRun was
+created and no event was injected by this U9 slice.
+
+### Remaining U9 acceptance
+
+No explicit production target or plan-level missing-install approval has yet
+been presented, so no install, system change, deployment, or account operation
+occurred. Fresh-install, upgrade, rollback, backup/restore, production policy,
+observability/retention, capacity, process/ADB/model/network/database/disk
+failure injection, long-run SLO, broader-application, and multi-device gates
+remain `NOT RUN`. U9 therefore remains `PARTIAL`.

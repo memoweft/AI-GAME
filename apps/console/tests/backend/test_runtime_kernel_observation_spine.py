@@ -449,6 +449,50 @@ def test_android_adapter_uses_only_explicit_read_only_commands() -> None:
     )
 
 
+def test_android_adapter_reads_android_15_top_resumed_activity_when_window_omits_focus() -> None:
+    commands: list[tuple[str, ...]] = []
+
+    def runner(
+        command: Sequence[str], _timeout: float, binary: bool
+    ) -> subprocess.CompletedProcess[str | bytes]:
+        normalized = tuple(command)
+        commands.append(normalized)
+        suffix = normalized[3:]
+        outputs: dict[tuple[str, ...], str] = {
+            ("get-state",): "device\n",
+            ("shell", "wm", "size"): "Physical size: 1280x720\n",
+            ("shell", "dumpsys", "window", "windows"): "WINDOW MANAGER WINDOWS\n",
+            (
+                "shell",
+                "dumpsys",
+                "activity",
+                "activities",
+            ): (
+                "topResumedActivity=ActivityRecord{48167963 u0 "
+                "cn.soulapp.android/.component.chat.ConversationActivity t46}\n"
+            ),
+            ("shell", "dumpsys", "input"): "SurfaceOrientation: 1\n",
+            ("shell", "dumpsys", "input_method"): "mInputShown=false\n",
+        }
+        if suffix not in outputs:
+            raise AssertionError(f"unexpected command: {normalized}")
+        return subprocess.CompletedProcess(
+            normalized,
+            0,
+            stdout=outputs[suffix],
+            stderr=b"" if binary else "",
+        )
+
+    provider = AndroidObservationProvider(
+        adb_path="C:/test/adb.exe", runner=runner, clock=_clock()
+    )
+
+    state = provider.read_device_state("adb:serial-123")
+
+    assert state.foreground_app == "cn.soulapp.android"
+    assert any(command[3:] == ("shell", "dumpsys", "activity", "activities") for command in commands)
+
+
 def test_runtime_kernel_dependency_boundary_includes_observation_code() -> None:
     source_root = Path(__file__).parents[2] / "backend" / "ai_game_console" / "runtime_kernel"
     imported_modules: set[str] = set()

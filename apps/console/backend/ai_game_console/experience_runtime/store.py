@@ -337,6 +337,15 @@ class SQLiteExperienceStore:
                 raise RuntimeError("signal write failed")
             return _signal(row)
 
+    def signals_for_episode(self, episode_id: str) -> list[OutcomeSignal]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM experience_outcomes WHERE episode_id = ? "
+                "ORDER BY created_at, signal_id",
+                (episode_id,),
+            ).fetchall()
+            return [_signal(row) for row in rows]
+
     def scenes_for_episode(self, episode_id: str) -> list[SceneState]:
         with self._connection() as connection:
             rows = connection.execute(

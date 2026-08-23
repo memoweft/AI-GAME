@@ -5994,6 +5994,13 @@ textarea::placeholder {
   min-width: 0;
 }
 
+.goal-control-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .goal-gate {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;

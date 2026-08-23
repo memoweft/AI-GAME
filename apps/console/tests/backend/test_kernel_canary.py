@@ -30,8 +30,11 @@ from ai_game_console.runtime_kernel import (
     RawUiTree,
     RuntimeKernel,
     ActionType,
+    ExecutionError,
     TaskSource,
     TaskStatus,
+    VerificationMethod,
+    VerificationVerdict,
 )
 
 
@@ -233,6 +236,191 @@ def test_restart_marks_accepted_unverified_action_uncertain_without_replay(
         assert any(
             event.type == "TaskUncertain" for event in kernel.events(task.id)
         )
+    finally:
+        coordinator.shutdown()
+        kernel.close()
+
+
+def _seed_application_cycle(kernel, coordinator, cycle_key: str):
+    task = kernel.create_task(
+        goal="bounded application cycle",
+        source=TaskSource(
+            "goal-v2-long-lived-mobile",
+            "goal:goal-1",
+            cycle_key,
+        ),
+        device_id="adb:device-1",
+    )
+    kernel.record_worker_event(
+        task_id=task.id,
+        event_type="KernelApplicationCycleAccepted",
+        payload={
+            "goal_id": "goal-1",
+            "application_instance_id": "application-1",
+            "application_cycle": 1,
+            "cycle_key": cycle_key,
+            "target_id": "adb:device-1",
+        },
+    )
+    stage = kernel.create_stage(
+        task_id=task.id,
+        objective="one bounded action",
+        completion_criteria=("fresh verified effect",),
+    )
+    kernel.start_stage(task_id=task.id, stage_id=stage.id)
+    before = coordinator._observe(task.id)
+    kernel_before = kernel.latest_observation(task.id)
+    kernel.record_worker_event(
+        task_id=task.id,
+        event_type="KernelApplicationReadinessAssessed",
+        payload={
+            "application_id": "com.android.settings",
+            "expected_application_id": "com.android.settings",
+            "ready": True,
+            "authenticated": True,
+            "application_matches_goal": True,
+            "before_observation_id": kernel_before.id,
+            "before_evidence_id": before.evidence_id,
+            "evidence": "ready",
+        },
+    )
+    action = kernel.propose_action(
+        task_id=task.id,
+        stage_id=stage.id,
+        based_on_observation_id=kernel_before.id,
+        action_type=ActionType.TAP,
+        params={"x": 0, "y": 0},
+        expected_outcome="one bounded action",
+        proposed_by_call_id=f"application-cycle:{cycle_key}",
+    )
+    return task, action, before
+
+
+def test_application_cycle_recovery_completes_durable_success_and_keeps_after_link(
+    tmp_path: Path,
+) -> None:
+    kernel, coordinator = _coordinator(tmp_path, FinishModel())
+    try:
+        cycle_key = "cycle-verified-crash-window"
+        task, action, before = _seed_application_cycle(
+            kernel, coordinator, cycle_key
+        )
+        execution = kernel.record_action_execution(
+            task_id=task.id,
+            action_id=action.id,
+            accepted=True,
+            adapter_code=0,
+            error=None,
+        )
+        after = coordinator._observe(task.id)
+        after_id = kernel.latest_observation(task.id).id
+
+        # If the process dies after the fresh re-observation but before
+        # verification, readback still exposes the durable after evidence.
+        incomplete = coordinator.inspect_application_cycle(task.id)
+        assert incomplete.execution_id == execution.id
+        assert incomplete.after_observation_id == after_id
+        assert incomplete.after_evidence_id == after.evidence_id
+
+        verification, _ = kernel.verify_action(
+            task_id=task.id,
+            action_id=action.id,
+            before_observation_id=action.based_on_observation_id,
+            after_observation_id=after_id,
+            verdict=VerificationVerdict.SUCCESS,
+            reason="fresh effect verified",
+            evidence_refs=(after.evidence_id,),
+            method=VerificationMethod.ROLE_ASSISTED,
+            complete_stage=True,
+            progress_summary="fresh effect verified",
+        )
+        assert kernel.load_task(task.id).terminal is False
+
+        recovered = coordinator.reconcile_application_cycle(cycle_key)
+        assert recovered is not None
+        assert recovered.status == "confirmed_success"
+        assert recovered.verification_id == verification.id
+        assert recovered.after_evidence_id == after.evidence_id
+        assert kernel.load_task(task.id).status is TaskStatus.COMPLETED
+        assert len(kernel.list_actions(task.id)) == 1
+    finally:
+        coordinator.shutdown()
+        kernel.close()
+
+
+def test_application_cycle_recovery_treats_retryable_receipt_as_uncertain(
+    tmp_path: Path,
+) -> None:
+    kernel, coordinator = _coordinator(tmp_path, FinishModel())
+    try:
+        cycle_key = "cycle-timeout-crash-window"
+        task, action, _before = _seed_application_cycle(
+            kernel, coordinator, cycle_key
+        )
+        execution = kernel.record_action_execution(
+            task_id=task.id,
+            action_id=action.id,
+            accepted=False,
+            adapter_code=-1,
+            error=ExecutionError(
+                "executor_action_timeout",
+                "transport timed out after dispatch began",
+                True,
+            ),
+        )
+
+        recovered = coordinator.reconcile_application_cycle(cycle_key)
+        assert recovered is not None
+        assert recovered.status == "uncertain"
+        assert recovered.execution_id == execution.id
+        assert kernel.load_task(task.id).status is TaskStatus.FAILED
+        assert len(kernel.list_actions(task.id)) == 1
+        assert any(
+            event.type == "TaskUncertain" for event in kernel.events(task.id)
+        )
+    finally:
+        coordinator.shutdown()
+        kernel.close()
+
+
+def test_next_application_cycle_receives_prior_verified_no_progress_attempt(
+    tmp_path: Path,
+) -> None:
+    kernel, coordinator = _coordinator(tmp_path, FinishModel())
+    try:
+        task, action, _before = _seed_application_cycle(
+            kernel, coordinator, "cycle-prior-no-progress"
+        )
+        kernel.record_action_execution(
+            task_id=task.id,
+            action_id=action.id,
+            accepted=True,
+            adapter_code=0,
+            error=None,
+        )
+        after = coordinator._observe(task.id)
+        after_id = kernel.latest_observation(task.id).id
+        kernel.verify_action(
+            task_id=task.id,
+            action_id=action.id,
+            before_observation_id=action.based_on_observation_id,
+            after_observation_id=after_id,
+            verdict=VerificationVerdict.FAIL,
+            reason="no material visual change",
+            evidence_refs=(after.evidence_id,),
+            method=VerificationMethod.ROLE_ASSISTED,
+        )
+
+        attempts = coordinator._application_recent_attempts(
+            goal_id="goal-1", current_task_id="new-cycle"
+        )
+
+        assert len(attempts) == 1
+        assert attempts[0].decision.intent is not None
+        assert attempts[0].decision.intent.name == "tap"
+        assert attempts[0].verification is not None
+        assert attempts[0].verification.progress is False
+        assert attempts[0].verification.evidence == "no material visual change"
     finally:
         coordinator.shutdown()
         kernel.close()

@@ -1,5 +1,11 @@
 # Mobile Task HTTP contract v1
 
+> **V1 COMPATIBILITY BOUNDARY.** This contract describes the legacy
+> `MobileTask` interface, not current U8 routing. Any Soul exclusion below is an
+> old `SkillScopeResolver` fact; it must not be combined with control-plane v1
+> to infer `soul-reply-v1`, an external owner, or `F:\dating-copilot` for a v2
+> GoalRun. D20 and D22 govern the current route.
+
 ## Scope and transport
 
 This contract defines the generic `MobileTask` Interface exposed by the local
@@ -81,8 +87,10 @@ The primary one-sentence UI omits `skill_id`. Production derives a stable,
 internal automatic skill scope from the normalized goal; Soul is excluded,
 率土之滨 uses target-independent task-kind scopes, and other goals use a
 redacted exact-goal hash. Advanced callers may still provide `skill_id`, which
-is isolated in a legacy namespace. The internal scope is not exposed by v1 and
-does not change the request or response schema.
+is isolated in a legacy namespace. “Soul is excluded” describes this v1
+automatic skill-scope resolver only; it is not a ban on generic RuntimeKernel
+operation or a requirement to use a specialized owner. The internal scope is
+not exposed by v1 and does not change the request or response schema.
 
 Acceptance means the task is durable and queued. It does not prove that the
 target, model, device action, Subgoal, or whole goal is ready or successful.
@@ -406,8 +414,9 @@ model response failure, attempt budget exhaustion, and transport uncertainty.
 This v1 contract does not claim that Mobile-Agent is installed, that legacy
 Runs are executed, that Soul state is copied into MobileTask, or that GUI-Owl is
 ready for continuous real-time games. It provides a low-frequency sequential
-screenshot/action/verification loop only. It also does not define a universal
-Run/router that turns arbitrary text into Chat, LearningJob, or Soul operations.
+screenshot/action/verification loop only. It also does not define the universal
+v2 Goal router; absence from this v1 contract is not evidence that a target
+application requires another owner.
 Support for emulator, USB, and Wi-Fi Target transport is not evidence that a
 tablet was live-tested, nor that a Soul or game objective passed current
 real-device acceptance. See

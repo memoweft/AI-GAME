@@ -9,9 +9,10 @@ import pytest
 
 from ai_game_console.application_runtime import (
     ApplicationRuntime, ApplicationRuntimeError, Decision, ExecutionReceipt,
-    ExecutionReconciliation, Input, InstanceStatus, Intent, MemoryCandidate,
-    Observation, Outcome, OutcomeStatus, Pause, Resume, RuntimeEvent,
-    RetryableApplicationError, RuntimeOutcome, Stop,
+    ExecutionReconciliation, ExternalOwnerEvent, IdempotencyConflict, Input,
+    InstanceStatus, Intent, MemoryCandidate, Observation, Outcome,
+    OutcomeStatus, OwnerEventBindingMismatch, OwnerEventFenced, Pause, Resume,
+    RuntimeEvent, RetryableApplicationError, RuntimeOutcome, Stop,
 )
 from ai_game_console.application_runtime.store import _SQLiteApplicationStore
 
@@ -160,6 +161,101 @@ def test_wait_is_persisted_and_input_interrupts_timer_without_busy_loop(tmp_path
     runtime.shutdown()
     assert done.status == "completed" and policy.calls == 2
     assert "wait_scheduled" in [event.event_type for event in done.events]
+
+
+def test_verified_nonterminal_candidate_notification_is_durable_and_continues(
+    tmp_path: Path,
+):
+    class CandidateThenWait:
+        def __init__(self): self.calls = 0
+        def decide(self, context):
+            self.calls += 1
+            if self.calls == 1:
+                return Decision(
+                    Intent("local-candidate-checkpoint"),
+                    candidate_notification=True,
+                )
+            return Decision(wait_seconds=30)
+
+    class NonterminalVerifier:
+        def verify(self, context):
+            return Outcome("confirmed_success", "fresh local checkpoint", terminal=False)
+
+    owner = Owner()
+    runtime = ApplicationRuntime(
+        tmp_path / "runtime.db",
+        profile="general-v1",
+        observation_port=Observations(),
+        policy=CandidateThenWait(),
+        execution_owner=owner,
+        verifier=NonterminalVerifier(),
+    )
+    instance = runtime.start("general-v1", "candidate-start")
+    waiting = wait_for(
+        runtime,
+        instance.instance_id,
+        lambda state: state.status == "waiting" and len(state.outcomes) == 1,
+    )
+    runtime.shutdown()
+    assert len(owner.dispatches) == 1
+    assert waiting.intents[0].candidate_notification is True
+    candidates = [event for event in waiting.events if event.event_type == "candidate_notified"]
+    assert len(candidates) == 1
+    assert candidates[0].data["evidence_refs"] == [waiting.outcomes[0].after_evidence_id]
+
+
+def test_recovery_finishes_a_persisted_candidate_intent_without_redispatch(
+    tmp_path: Path,
+):
+    database = tmp_path / "runtime.db"
+    store = _SQLiteApplicationStore(database)
+    instance, _ = store.accept_start(
+        "candidate-recovery-instance", "general-v1", None, None,
+        "candidate-recovery-start", "candidate-recovery-digest",
+    )
+    assert store.claim(instance.instance_id, "candidate-recovery-worker")
+    cycle, revision = store.begin_cycle(instance.instance_id, "candidate-recovery-worker") or (None, None)
+    assert cycle is not None
+    assert store.persist_intent(
+        "candidate-recovery-intent",
+        instance.instance_id,
+        cycle,
+        revision,
+        Intent("local-candidate-checkpoint"),
+        candidate_notification=True,
+    )
+    assert store.mark_reserved(instance.instance_id, "candidate-recovery-intent", "local-reservation")
+    assert store.mark_dispatching(instance.instance_id, "candidate-recovery-intent", revision)
+    store.release(instance.instance_id, "candidate-recovery-worker")
+
+    class ReconcilingOwner(Owner):
+        def reconcile(self, state, runtime_intent):
+            return ExecutionReconciliation(
+                Outcome("confirmed_success", "local receipt reconciled", terminal=False),
+                "local-recovery-evidence",
+                ExecutionReceipt("local-recovery-receipt", True),
+            )
+
+    class WaitAfterRecovery:
+        def decide(self, context): return Decision(wait_seconds=30)
+
+    owner = ReconcilingOwner()
+    runtime = ApplicationRuntime(
+        database,
+        profile="general-v1",
+        observation_port=Observations(),
+        policy=WaitAfterRecovery(),
+        execution_owner=owner,
+        verifier=SuccessVerifier(),
+    )
+    recovered = wait_for(
+        runtime,
+        instance.instance_id,
+        lambda state: state.status == "waiting" and len(state.outcomes) == 1,
+    )
+    runtime.shutdown()
+    assert owner.dispatches == []
+    assert [event.event_type for event in recovered.events].count("candidate_notified") == 1
 
 
 def test_pause_and_stop_cancel_a_waiting_timer(tmp_path: Path):
@@ -1052,6 +1148,140 @@ def test_nonterminal_verified_action_requeues_and_memory_reward_is_not_assumed(t
     assert waiting.memory_version == 0 and row == (1,0) and policy.calls == 2
 
 
+def test_bound_owner_event_persists_and_wakes_a_normal_bounded_cycle(tmp_path: Path):
+    class WaitThenAct:
+        def __init__(self): self.calls=0
+        def decide(self, context):
+            self.calls += 1
+            if self.calls == 1: return Decision(wait_seconds=30)
+            return Decision(Intent("reply-after-owner-event"))
+    policy=WaitThenAct(); owner=Owner()
+    runtime=ApplicationRuntime(tmp_path / "runtime.db", profile="soul", observation_port=Observations(), policy=policy, execution_owner=owner, verifier=SuccessVerifier())
+    instance=runtime.start("soul","start-1",target_id="owner-binding-1")
+    wait_for(runtime,instance.instance_id,lambda value:value.status == "waiting")
+    event=ExternalOwnerEvent(
+        owner_binding_ref="owner-binding-1",
+        owner_event_id="owner-event-1",
+        event_type="candidate_notified",
+        evidence_refs=("candidate-proof-1",),
+    )
+    runtime.report_owner_event(instance.instance_id,event)
+    completed=wait_for(runtime,instance.instance_id,lambda value:value.terminal)
+    runtime.shutdown()
+    persisted=[item for item in completed.events if item.event_type == "candidate_notified"]
+    assert completed.status == "completed" and policy.calls == 2
+    assert owner.dispatches == [("reserve-1","reply-after-owner-event")]
+    assert len(completed.intents) == 1 and len(completed.outcomes) == 1
+    assert len(persisted) == 1 and persisted[0].data == {"evidence_refs":["candidate-proof-1"]}
+    assert [item.event_type for item in completed.events].count("owner_event_woke") == 1
+
+
+def test_identical_owner_event_replay_is_idempotent_without_extra_event_or_dispatch(tmp_path: Path):
+    class WaitThenAct:
+        def __init__(self): self.calls=0
+        def decide(self, context):
+            self.calls += 1
+            if self.calls == 1: return Decision(wait_seconds=30)
+            return Decision(Intent("reply-once"))
+    policy=WaitThenAct(); owner=Owner()
+    runtime=ApplicationRuntime(tmp_path / "runtime.db", profile="soul", observation_port=Observations(), policy=policy, execution_owner=owner, verifier=SuccessVerifier())
+    instance=runtime.start("soul","start-1",target_id="owner-binding-1")
+    wait_for(runtime,instance.instance_id,lambda value:value.status == "waiting")
+    event=ExternalOwnerEvent(
+        owner_binding_ref="owner-binding-1",
+        owner_event_id="owner-event-1",
+        event_type="candidate_notified",
+        evidence_refs=("candidate-proof-1",),
+    )
+    runtime.report_owner_event(instance.instance_id,event)
+    completed=wait_for(runtime,instance.instance_id,lambda value:value.terminal)
+    event_count=len(completed.events)
+    replayed=runtime.report_owner_event(instance.instance_id,event)
+    after=runtime.inspect(instance.instance_id)
+    runtime.shutdown()
+    assert replayed.events == completed.events == after.events
+    assert len(after.events) == event_count and policy.calls == 2
+    assert owner.dispatches == [("reserve-1","reply-once")]
+
+
+def test_same_owner_event_id_with_different_payload_is_an_idempotency_conflict(tmp_path: Path):
+    class WaitThenAct:
+        def __init__(self): self.calls=0
+        def decide(self, context):
+            self.calls += 1
+            if self.calls == 1: return Decision(wait_seconds=30)
+            return Decision(Intent("reply-once"))
+    policy=WaitThenAct(); owner=Owner()
+    runtime=ApplicationRuntime(tmp_path / "runtime.db", profile="soul", observation_port=Observations(), policy=policy, execution_owner=owner, verifier=SuccessVerifier())
+    instance=runtime.start("soul","start-1",target_id="owner-binding-1")
+    wait_for(runtime,instance.instance_id,lambda value:value.status == "waiting")
+    accepted=ExternalOwnerEvent(
+        owner_binding_ref="owner-binding-1",
+        owner_event_id="owner-event-1",
+        event_type="candidate_notified",
+        evidence_refs=("candidate-proof-1",),
+    )
+    runtime.report_owner_event(instance.instance_id,accepted)
+    completed=wait_for(runtime,instance.instance_id,lambda value:value.terminal)
+    conflicting=ExternalOwnerEvent(
+        owner_binding_ref="owner-binding-1",
+        owner_event_id="owner-event-1",
+        event_type="candidate_notified",
+        evidence_refs=("different-candidate-proof",),
+    )
+    with pytest.raises(IdempotencyConflict):
+        runtime.report_owner_event(instance.instance_id,conflicting)
+    after=runtime.inspect(instance.instance_id)
+    runtime.shutdown()
+    assert after.events == completed.events and policy.calls == 2
+    assert owner.dispatches == [("reserve-1","reply-once")]
+
+
+def test_owner_event_with_a_different_binding_is_rejected_without_waking_or_dispatching(tmp_path: Path):
+    class AlwaysWait:
+        def decide(self, context): return Decision(wait_seconds=30)
+    owner=Owner()
+    runtime=ApplicationRuntime(tmp_path / "runtime.db", profile="soul", observation_port=Observations(), policy=AlwaysWait(), execution_owner=owner, verifier=SuccessVerifier())
+    instance=runtime.start("soul","start-1",target_id="owner-binding-1")
+    waiting=wait_for(runtime,instance.instance_id,lambda value:value.status == "waiting")
+    mismatched=ExternalOwnerEvent(
+        owner_binding_ref="different-owner-binding",
+        owner_event_id="owner-event-1",
+        event_type="candidate_notified",
+        evidence_refs=("candidate-proof-1",),
+    )
+    with pytest.raises(OwnerEventBindingMismatch):
+        runtime.report_owner_event(instance.instance_id,mismatched)
+    rejected=runtime.inspect(instance.instance_id)
+    runtime.command(instance.instance_id,Stop(),"stop-1")
+    runtime.shutdown()
+    assert rejected.status == "waiting" and rejected.events == waiting.events
+    assert owner.dispatches == []
+
+
+def test_stop_fences_new_owner_event_without_persisting_or_dispatching(tmp_path: Path):
+    class AlwaysWait:
+        def decide(self, context): return Decision(wait_seconds=30)
+    owner=Owner()
+    runtime=ApplicationRuntime(tmp_path / "runtime.db", profile="soul", observation_port=Observations(), policy=AlwaysWait(), execution_owner=owner, verifier=SuccessVerifier())
+    instance=runtime.start("soul","start-1",target_id="owner-binding-1")
+    wait_for(runtime,instance.instance_id,lambda value:value.status == "waiting")
+    stopped=runtime.command(instance.instance_id,Stop(),"stop-1")
+    event_count=len(stopped.events)
+    event=ExternalOwnerEvent(
+        owner_binding_ref="owner-binding-1",
+        owner_event_id="owner-event-after-stop",
+        event_type="candidate_notified",
+        evidence_refs=("candidate-proof-after-stop",),
+    )
+    with pytest.raises(OwnerEventFenced):
+        runtime.report_owner_event(instance.instance_id,event)
+    after=runtime.inspect(instance.instance_id)
+    runtime.shutdown()
+    assert stopped.status == "stopped" and after.status == "stopped"
+    assert len(after.events) == event_count and owner.dispatches == []
+
+
 def test_explicit_memory_scope_is_used_for_reads(tmp_path: Path):
     database=tmp_path / "runtime.db"; store=_SQLiteApplicationStore(database)
     store.promote_memory("seed-instance","candidate",MemoryCandidate("soul-reply-v1",{"hint":"old"},("proof",)),Outcome("confirmed_success"),{"hint":"active"})
@@ -1143,7 +1373,9 @@ def test_v1_database_is_migrated_in_place_for_wait_reward_and_terminal_fields(tm
         instance_columns={row[1] for row in conn.execute("PRAGMA table_info(application_instances)")}
         outcome_columns={row[1] for row in conn.execute("PRAGMA table_info(application_outcomes)")}
         candidate_columns={row[1] for row in conn.execute("PRAGMA table_info(application_memory_candidates)")}
-    assert version == 2
+        intent_columns={row[1] for row in conn.execute("PRAGMA table_info(application_intents)")}
+    assert version == 3
     assert "wake_at" in instance_columns
     assert "terminal" in outcome_columns
     assert "reward_required" in candidate_columns
+    assert "candidate_notification" in intent_columns

@@ -56,6 +56,32 @@ class GoalRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class CapabilityBindingPlan:
+    goal_id: str
+    revision: int
+    route_kind: str
+    binding_kind: str
+    capability_ids: tuple[str, ...]
+    owner_kind: str | None
+    owner_binding_ref: str | None
+    profile_id: str | None
+    classification: str
+    rationale: str
+    created_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class GoalNotification:
+    notification_id: str
+    goal_id: str
+    source_event_sequence: int
+    kind: str
+    summary: str
+    evidence_refs: tuple[str, ...]
+    created_at: str
+
+
+@dataclass(frozen=True, slots=True)
 class StoredEvent:
     cursor: int
     goal_id: str

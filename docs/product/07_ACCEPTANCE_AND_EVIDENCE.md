@@ -134,20 +134,42 @@ Evidence package:
 
 Acceptance combines resettable fixtures for repeatability and real daily states over time. One day cannot prove a seven-day trend.
 
-## 6. Real-device scenario C: long-lived application goal
+## 6. Real-device scenario C: long-lived mobile/application goal
 
-A long-lived goal must demonstrate:
+One newly created long-lived GoalRun must demonstrate:
 
-- same universal ingress;
-- explicit internal capability/owner binding;
-- wait and wake from an external event;
-- durable conversation/task continuity;
-- no duplicate physical send after timeout or restart;
-- immediate send truth separated from delayed outcome;
-- candidate/result summary grounded in evidence;
-- candidate notification does not automatically pause or terminate the active goal;
-- continued operation until explicit user stop/takeover/revision, with bounded per-cycle work, event waits, and backoff;
-- clear takeover and user-confirmation semantics for outcomes outside the phone's control.
+- the same universal sentence ingress and original frozen success criteria;
+- automatic discovery of the authorized Android target, target application,
+  and current logged-in/readiness state before physical work;
+- a durable capability binding plan persisted before any runtime or device
+  mutation;
+- ApplicationRuntime-owned scheduling, wait/wake, continuation, and bounded
+  per-cycle budgets;
+- at least one real RuntimeKernel fresh observation followed by one bounded
+  application action, a fresh post-action observation, and effect verification;
+- an at-most-once physical or external effect with a durable receipt or
+  equivalent authoritative evidence;
+- immediate action/send truth kept separate from a later inbound message,
+  reply, no-response interval, or explicit user-feedback outcome;
+- Experience attribution to the exact GoalRun, target/application scope,
+  action episode, and delayed outcome;
+- candidate/result notification grounded in real application evidence without
+  automatically pausing or terminating the active goal;
+- at least one later bounded event cycle while the same GoalRun remains active;
+- normal-launcher restart restoring the same GoalRun and instance without
+  duplicating the prior physical effect; and
+- explicit stop fencing later events, wakes, RuntimeKernel actions, and any
+  specialized-owner dispatch.
+
+A user follow-up and device-free local checkpoint may prove lifecycle plumbing,
+but cannot substitute for the real application event, device action,
+post-action evidence, or delayed outcome above. A specialized external owner is
+optional for generic Android operation. Only when the frozen binding plan
+actually selects such an adapter must the acceptance package also contain that
+adapter's current authorization/account scope, readiness, reservation/receipt,
+and ledger reconciliation evidence.
+
+[constraint-source: USER_DECISION; ref: D22 U8 real mobile/application correction 2026-08-23]
 
 For social goals, matching and conversation are controllable stages. Another person's relationship decision is not a result the platform can manufacture or guarantee.
 

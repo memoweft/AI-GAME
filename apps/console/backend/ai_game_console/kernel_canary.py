@@ -10,8 +10,9 @@ from __future__ import annotations
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable, Mapping
 from uuid import uuid4
 
 from .device_lease import DeviceExecutionLease, DeviceLeaseHandle
@@ -55,6 +56,28 @@ class KernelCanaryError(RuntimeError):
     code = "kernel_canary_error"
 
 
+@dataclass(frozen=True, slots=True)
+class KernelApplicationCycleResult:
+    """Durable projection of one subordinate long-lived application cycle."""
+
+    task_id: str
+    cycle_key: str
+    target_id: str
+    status: str
+    application_id: str | None
+    application_ready: bool
+    before_observation_id: str | None
+    before_evidence_id: str | None
+    action_id: str | None
+    execution_id: str | None
+    after_observation_id: str | None
+    after_evidence_id: str | None
+    verification_id: str | None
+    verdict: str | None
+    evidence: str
+    physical_action_sent: bool
+
+
 class KernelCanaryCoordinator:
     """One serial plan/observe/act/verify worker over RuntimeKernel facts."""
 
@@ -71,6 +94,10 @@ class KernelCanaryCoordinator:
         max_reflections: int = 16,
         experience: Any | None = None,
         binding_kind: str = "runtime_kernel_canary",
+        application_readiness_assessor: Callable[
+            [str, RoleObservation, str], Mapping[str, Any]
+        ]
+        | None = None,
     ) -> None:
         self.kernel = kernel
         self.model = model
@@ -82,6 +109,7 @@ class KernelCanaryCoordinator:
         self.max_reflections = max_reflections
         self.experience = experience
         self.binding_kind = binding_kind
+        self.application_readiness_assessor = application_readiness_assessor
         self.acceptance_event_type = (
             "KernelTaskAccepted"
             if binding_kind == "runtime_kernel"
@@ -92,6 +120,538 @@ class KernelCanaryCoordinator:
         self._schedule_lock = threading.RLock()
         self._dispatch_lock = threading.RLock()
         self._closed = False
+
+    def execute_application_cycle(
+        self,
+        *,
+        goal: str,
+        goal_id: str,
+        application_instance_id: str,
+        application_cycle: int,
+        cycle_key: str,
+        target_id: str,
+        expected_application_id: str,
+    ) -> KernelApplicationCycleResult:
+        """Execute at most one physical RuntimeKernel action synchronously.
+
+        The ApplicationRuntime dispatch fence owns this call.  A repeated
+        ``cycle_key`` is never executed again: recovery must use
+        :meth:`reconcile_application_cycle`, which reads the same durable
+        Task/Action/Execution/Verification rows and cannot dispatch.
+
+        [constraint-source: USER_DECISION; ref: D22 U8 real mobile/application]
+        """
+
+        with self._schedule_lock:
+            if self._closed:
+                raise KernelCanaryError("kernel coordinator is closed")
+        existing = self._application_task(cycle_key)
+        if existing is not None:
+            raise KernelCanaryError(
+                "application cycle already exists and requires reconciliation"
+            )
+        device_id = _canonical_device_id(target_id)
+        task = self.kernel.create_task(
+            goal=goal,
+            source=TaskSource(
+                client_id="goal-v2-long-lived-mobile",
+                conversation_id=f"goal:{goal_id}",
+                initial_message_id=cycle_key,
+            ),
+            device_id=device_id,
+        )
+        self.kernel.record_worker_event(
+            task_id=task.id,
+            event_type="KernelApplicationCycleAccepted",
+            payload={
+                "goal_id": goal_id,
+                "application_instance_id": application_instance_id,
+                "application_cycle": int(application_cycle),
+                "cycle_key": cycle_key,
+                "target_id": device_id,
+            },
+        )
+        lease = self.device_lease.acquire(device_id.removeprefix("adb:"))
+        if lease is None:
+            self.kernel.fail_task(
+                task_id=task.id,
+                code="target_busy",
+                summary="目标设备正由另一个运行时持有；长期周期未抢占设备。",
+            )
+            return self.inspect_application_cycle(task.id)
+        try:
+            before = self._observe(task.id)
+            kernel_before = self.kernel.latest_observation(task.id)
+            if kernel_before is None:
+                raise KernelCanaryError("kernel before observation is missing")
+            foreground = str(
+                kernel_before.device_state.foreground_app or ""
+            ).strip()
+            readiness: Mapping[str, Any]
+            if foreground != expected_application_id:
+                readiness = {
+                    "ready": False,
+                    "authenticated": False,
+                    "application_matches_goal": False,
+                    "evidence": "foreground application changed before dispatch",
+                }
+            elif self.application_readiness_assessor is None:
+                readiness = {
+                    "ready": False,
+                    "authenticated": False,
+                    "application_matches_goal": False,
+                    "evidence": "application readiness assessor is not configured",
+                }
+            else:
+                readiness = self.application_readiness_assessor(
+                    goal, before, expected_application_id
+                )
+            ready = bool(readiness.get("ready"))
+            authenticated = bool(readiness.get("authenticated"))
+            application_matches_goal = bool(
+                readiness.get("application_matches_goal")
+            )
+            readiness_evidence = str(
+                readiness.get("evidence") or "application readiness was not established"
+            )[:1_000]
+            self.kernel.record_worker_event(
+                task_id=task.id,
+                event_type="KernelApplicationReadinessAssessed",
+                payload={
+                    "application_id": foreground or None,
+                    "expected_application_id": expected_application_id,
+                    "ready": ready,
+                    "authenticated": authenticated,
+                    "application_matches_goal": application_matches_goal,
+                    "before_observation_id": kernel_before.id,
+                    "before_evidence_id": before.evidence_id,
+                    "evidence": readiness_evidence,
+                },
+            )
+            if not ready or not authenticated or not application_matches_goal:
+                self.kernel.fail_task(
+                    task_id=task.id,
+                    code="application_not_ready",
+                    summary="目标应用登录态或交互 readiness 未由新鲜画面证明。",
+                )
+                return self.inspect_application_cycle(task.id)
+
+            objective = (
+                "在当前已登录目标应用的真实界面中，只执行一个可验证的原子动作，"
+                "推进候选发现、候选判断或当前对话；动作后立即交回长期调度器。"
+            )
+            stage = self.kernel.create_stage(
+                task_id=task.id,
+                objective=objective,
+                completion_criteria=("一个真实原子动作产生可验证的候选或对话推进",),
+            )
+            stage = self.kernel.start_stage(task_id=task.id, stage_id=stage.id)
+            inputs = _inputs(task.goal, task.created_at, self.kernel.events(task.id))
+            recent_attempts = self._application_recent_attempts(
+                goal_id=goal_id, current_task_id=task.id
+            )
+            consecutive_no_progress = 0
+            for prior in reversed(recent_attempts):
+                if prior.verification is None or prior.verification.progress:
+                    break
+                consecutive_no_progress += 1
+            subgoal = Subgoal(0, objective, "active")
+            decision = self.model.decide(
+                DecisionContext(
+                    task_id=task.id,
+                    goal=task.goal,
+                    target_id=task.device_id,
+                    plan_revision=1,
+                    subgoal=subgoal,
+                    input_revision=len(inputs),
+                    owner_inputs=inputs,
+                    observation=before,
+                    strategy="bounded-application-cycle",
+                    consecutive_no_progress=consecutive_no_progress,
+                    recent_attempts=recent_attempts,
+                    skill_memory=None,
+                    experience_hints=(),
+                )
+            )
+            self.kernel.record_worker_event(
+                task_id=task.id,
+                event_type="KernelApplicationCycleDecision",
+                payload={"kind": decision.kind, "reason": decision.reason[:1_000]},
+            )
+            if decision.kind != "act" or decision.intent is None:
+                self.kernel.fail_task(
+                    task_id=task.id,
+                    code="bounded_cycle_no_physical_action",
+                    summary="当前画面没有形成一个可安全验证的原子设备动作。",
+                )
+                return self.inspect_application_cycle(task.id)
+            try:
+                action_type, params = _kernel_action(decision.intent)
+            except (KeyError, TypeError, ValueError, KernelCanaryError):
+                self.kernel.fail_task(
+                    task_id=task.id,
+                    code="bounded_cycle_invalid_action",
+                    summary="本地模型没有形成 RuntimeKernel 可验证的原子动作。",
+                )
+                return self.inspect_application_cycle(task.id)
+            if action_type in {ActionType.WAIT, ActionType.SCREENSHOT}:
+                self.kernel.fail_task(
+                    task_id=task.id,
+                    code="bounded_cycle_no_physical_action",
+                    summary="长期周期拒绝把等待或截图伪装成物理推进。",
+                )
+                return self.inspect_application_cycle(task.id)
+            with self._dispatch_lock:
+                current = self.kernel.load_task(task.id)
+                if current.status is not TaskStatus.RUNNING:
+                    return self.inspect_application_cycle(task.id)
+                action = self.kernel.propose_action(
+                    task_id=task.id,
+                    stage_id=stage.id,
+                    based_on_observation_id=current.last_observation_id or "",
+                    action_type=action_type,
+                    params=params,
+                    expected_outcome=objective,
+                    proposed_by_call_id=f"application-cycle:{cycle_key}",
+                )
+                execution = self.kernel.execute_action(
+                    task_id=task.id, action_id=action.id
+                )
+            if not execution.accepted:
+                code = execution.error.code if execution.error else "action_rejected"
+                if (
+                    execution.error is not None
+                    and execution.error.retryable
+                ) or "uncertain" in code.casefold() or "timeout" in code.casefold():
+                    self.kernel.mark_task_uncertain(
+                        task_id=task.id,
+                        code=code,
+                        summary="动作下发结果不确定；该周期不会重放。",
+                    )
+                else:
+                    self.kernel.fail_task(
+                        task_id=task.id,
+                        code=code,
+                        summary="设备执行器明确未接受该原子动作。",
+                    )
+                return self.inspect_application_cycle(task.id)
+            if self.settle_seconds > 0:
+                time.sleep(self.settle_seconds)
+            after = self._observe(task.id)
+            verification = self.model.verify(
+                VerificationContext(
+                    task_id=task.id,
+                    goal=task.goal,
+                    subgoal=subgoal,
+                    decision=decision,
+                    before=before,
+                    transport=TransportReceipt(
+                        "accepted",
+                        receipt_id=execution.id,
+                        detail="fresh verification follows",
+                    ),
+                    after=after,
+                    input_revision=len(inputs),
+                    owner_inputs=inputs,
+                    plan_revision=1,
+                    recent_attempts=recent_attempts,
+                )
+            )
+            if verification.uncertain:
+                verdict = VerificationVerdict.UNCERTAIN
+            elif verification.satisfied or verification.progress:
+                verdict = VerificationVerdict.SUCCESS
+            else:
+                verdict = VerificationVerdict.FAIL
+            persisted_verification, _ = self.kernel.verify_action(
+                task_id=task.id,
+                action_id=action.id,
+                before_observation_id=action.based_on_observation_id,
+                after_observation_id=self.kernel.load_task(task.id).last_observation_id
+                or "",
+                verdict=verdict,
+                reason=verification.evidence or "role-assisted application cycle verdict",
+                evidence_refs=(after.evidence_id,),
+                method=VerificationMethod.ROLE_ASSISTED,
+                complete_stage=(verdict is VerificationVerdict.SUCCESS),
+                progress_summary=(
+                    verification.evidence
+                    if verdict is VerificationVerdict.SUCCESS
+                    else None
+                ),
+            )
+            self.kernel.record_worker_event(
+                task_id=task.id,
+                event_type="KernelRoleVerdict",
+                payload={
+                    "action_id": action.id,
+                    "satisfied": verification.satisfied,
+                    "progress": verification.progress,
+                    "uncertain": verification.uncertain,
+                    "evidence": verification.evidence,
+                },
+            )
+            if verdict is VerificationVerdict.SUCCESS:
+                self.kernel.complete_task(
+                    task_id=task.id,
+                    evidence_refs=persisted_verification.evidence_refs,
+                    summary="One bounded long-lived application cycle completed.",
+                )
+            elif verdict is VerificationVerdict.UNCERTAIN:
+                self.kernel.mark_task_uncertain(
+                    task_id=task.id,
+                    code="verification_uncertain",
+                    summary="新鲜动作后画面仍不足以确认效果；该周期不会重放。",
+                )
+            else:
+                self.kernel.fail_task(
+                    task_id=task.id,
+                    code="verification_failed",
+                    summary="新鲜动作后画面没有证明本周期取得进展。",
+                )
+            result = self.inspect_application_cycle(task.id)
+            if self.experience is not None and result.action_id is not None:
+                try:
+                    state = self.inspect(task.id)
+                    attempt = next(
+                        item
+                        for item in state.attempts
+                        if item.attempt_id == result.action_id
+                    )
+                    self.experience.record_mobile_attempt(
+                        source_task_id=application_instance_id,
+                        objective=objective,
+                        attempt=attempt,
+                    )
+                except Exception:
+                    pass
+            return result
+        finally:
+            lease.release()
+
+    def reconcile_application_cycle(
+        self, cycle_key: str
+    ) -> KernelApplicationCycleResult | None:
+        """Converge one prior cycle from durable facts without device work."""
+
+        task = self._application_task(cycle_key)
+        if task is None:
+            return None
+        actions = self.kernel.list_actions(task.id)
+        if not actions:
+            if not task.terminal:
+                self.kernel.fail_task(
+                    task_id=task.id,
+                    code="application_cycle_not_dispatched",
+                    summary="持久账本证明该周期没有形成物理动作。",
+                )
+            return self.inspect_application_cycle(task.id)
+        action = actions[-1]
+        execution, verification = self._application_action_facts(action)
+        if action.status in {ActionStatus.PROPOSED, ActionStatus.EXECUTED}:
+            self.kernel.mark_task_uncertain(
+                task_id=task.id,
+                code="application_cycle_unsettled_action",
+                summary="发现未结算动作；重启恢复只隔离，不重放。",
+            )
+        elif action.status is ActionStatus.VERIFIED and not task.terminal:
+            if (
+                verification is None
+                or verification.verdict is not VerificationVerdict.SUCCESS
+            ):
+                self.kernel.mark_task_uncertain(
+                    task_id=task.id,
+                    code="application_cycle_verification_missing",
+                    summary="动作状态与验证账本不一致；恢复时隔离且不重放。",
+                )
+            else:
+                self.kernel.complete_task(
+                    task_id=task.id,
+                    evidence_refs=verification.evidence_refs,
+                    summary="Recovered one verified bounded application cycle.",
+                )
+        elif action.status is ActionStatus.UNCERTAIN and not task.terminal:
+            self.kernel.mark_task_uncertain(
+                task_id=task.id,
+                code="application_cycle_uncertain",
+                summary="动作结果不确定；重启恢复不重放。",
+            )
+        elif action.status is ActionStatus.FAILED and not task.terminal:
+            if (
+                execution is not None
+                and not execution.accepted
+                and execution.error is not None
+                and execution.error.retryable
+            ):
+                # The transport's durable receipt says the effect may have
+                # crossed the process boundary.  This is the crash-safe source
+                # of truth even if the coordinator died before terminalizing
+                # the Task as UNCERTAIN.
+                self.kernel.mark_task_uncertain(
+                    task_id=task.id,
+                    code=execution.error.code,
+                    summary="旧动作的持久回执不确定；恢复时不重放。",
+                )
+            else:
+                self.kernel.fail_task(
+                    task_id=task.id,
+                    code="application_cycle_failed",
+                    summary="旧周期已明确失败；没有重复下发动作。",
+                )
+        return self.inspect_application_cycle(task.id)
+
+    def inspect_application_cycle(
+        self, task_id: str
+    ) -> KernelApplicationCycleResult:
+        task = self.kernel.load_task(task_id)
+        events = self.kernel.events(task_id)
+        accepted = next(
+            (item for item in events if item.type == "KernelApplicationCycleAccepted"),
+            None,
+        )
+        if accepted is None:
+            raise KernelCanaryError("task is not a long-lived application cycle")
+        readiness = next(
+            (item for item in events if item.type == "KernelApplicationReadinessAssessed"),
+            None,
+        )
+        links = {
+            str(item.payload.get("kernel_observation_id")): str(
+                item.payload.get("evidence_id")
+            )
+            for item in events
+            if item.type == "KernelObservationLinked"
+        }
+        actions = self.kernel.list_actions(task_id)
+        action = actions[-1] if actions else None
+        execution = None
+        verification = None
+        if action is not None:
+            execution, verification = self._application_action_facts(action)
+        physical = bool(
+            action is not None
+            and action.type not in {ActionType.WAIT, ActionType.SCREENSHOT}
+            and execution is not None
+            and execution.accepted
+        )
+        if (
+            task.status is TaskStatus.COMPLETED
+            and physical
+            and verification is not None
+            and verification.verdict is VerificationVerdict.SUCCESS
+        ):
+            status = "confirmed_success"
+        elif (
+            action is not None and action.status is ActionStatus.UNCERTAIN
+        ) or (
+            task.failure_state is not None
+            and task.failure_state.last_verdict == "UNCERTAIN"
+        ):
+            status = "uncertain"
+        elif task.terminal:
+            status = "confirmed_failure"
+        else:
+            status = "incomplete"
+        before_id = action.based_on_observation_id if action is not None else (
+            str(readiness.payload.get("before_observation_id"))
+            if readiness is not None
+            else None
+        )
+        after_id = verification.after_observation_id if verification else (
+            task.last_observation_id
+            if action is not None
+            and execution is not None
+            and execution.accepted
+            and task.last_observation_id != before_id
+            else None
+        )
+        evidence = (
+            verification.reason
+            if verification is not None
+            else task.failure_state.summary
+            if task.failure_state is not None
+            else "application cycle remains incomplete"
+        )
+        return KernelApplicationCycleResult(
+            task_id=task.id,
+            cycle_key=str(accepted.payload.get("cycle_key") or ""),
+            target_id=task.device_id,
+            status=status,
+            application_id=(
+                str(readiness.payload.get("application_id"))
+                if readiness is not None
+                and readiness.payload.get("application_id") is not None
+                else None
+            ),
+            application_ready=bool(
+                readiness is not None
+                and readiness.payload.get("ready")
+                and readiness.payload.get("authenticated")
+                and readiness.payload.get("application_matches_goal")
+            ),
+            before_observation_id=before_id,
+            before_evidence_id=links.get(str(before_id)) if before_id else None,
+            action_id=action.id if action is not None else None,
+            execution_id=execution.id if execution is not None else None,
+            after_observation_id=after_id,
+            after_evidence_id=links.get(str(after_id)) if after_id else None,
+            verification_id=verification.id if verification is not None else None,
+            verdict=(verification.verdict.value if verification else None),
+            evidence=evidence,
+            physical_action_sent=physical,
+        )
+
+    def _application_action_facts(self, action: Any) -> tuple[Any | None, Any | None]:
+        """Load the ledger rows required by an Application cycle's Action state.
+
+        A missing row is legitimate only before the corresponding atomic state
+        transition.  Once the Action state says execution or verification was
+        committed, every storage error (including a missing row) must surface;
+        otherwise a ledger outage could be misreported as "no physical action".
+        """
+
+        execution = None
+        verification = None
+        if action.status is ActionStatus.PROPOSED:
+            return execution, verification
+
+        execution = self.kernel.load_action_execution(action.id)
+        if action.status is ActionStatus.EXECUTED:
+            return execution, verification
+        if action.status is ActionStatus.FAILED and not execution.accepted:
+            return execution, verification
+
+        verification = self.kernel.load_verification(action.id)
+        return execution, verification
+
+    def _application_task(self, cycle_key: str) -> Any | None:
+        matches = tuple(
+            item
+            for item in self.kernel.list_tasks()
+            if item.source.client_id == "goal-v2-long-lived-mobile"
+            and item.source.initial_message_id == cycle_key
+        )
+        if len(matches) > 1:
+            raise KernelCanaryError("duplicate application cycle correlation")
+        return matches[0] if matches else None
+
+    def _application_recent_attempts(
+        self, *, goal_id: str, current_task_id: str
+    ) -> tuple[ActionAttempt, ...]:
+        """Carry durable prior-cycle results into the next bounded decision."""
+
+        attempts: list[ActionAttempt] = []
+        for prior in sorted(
+            self.kernel.list_tasks_by_conversation(f"goal:{goal_id}"),
+            key=lambda item: (item.created_at, item.id),
+        ):
+            if (
+                prior.id == current_task_id
+                or prior.source.client_id != "goal-v2-long-lived-mobile"
+            ):
+                continue
+            attempts.extend(self.inspect(prior.id).attempts)
+        return tuple(attempts[-8:])
 
     def start(
         self,
@@ -285,7 +845,11 @@ class KernelCanaryCoordinator:
         inputs = _inputs(task.goal, task.created_at, events)
         attempts: list[ActionAttempt] = []
         for sequence, action in enumerate(self.kernel.list_actions(task_id), start=1):
-            before = _role_observation(action.based_on_observation_id, links)
+            before = _role_observation(
+                action.based_on_observation_id,
+                links,
+                self.kernel.load_observation(action.based_on_observation_id),
+            )
             execution = None
             verification = None
             try:
@@ -297,7 +861,11 @@ class KernelCanaryCoordinator:
             except Exception:
                 pass
             after = (
-                _role_observation(verification.after_observation_id, links)
+                _role_observation(
+                    verification.after_observation_id,
+                    links,
+                    self.kernel.load_observation(verification.after_observation_id),
+                )
                 if verification is not None
                 else None
             )
@@ -775,7 +1343,18 @@ def _canonical_device_id(target_id: str | None) -> str:
 def _kernel_action(intent: PhysicalIntent) -> tuple[ActionType, dict[str, Any]]:
     args = dict(intent.arguments)
     if intent.name == "tap":
-        return ActionType.TAP, {"x": int(args["x"]), "y": int(args["y"])}
+        return ActionType.TAP, {
+            "x": int(args["x"]),
+            "y": int(args["y"]),
+            **_semantic_target(args),
+        }
+    if intent.name == "long_press":
+        return ActionType.LONG_PRESS, {
+            "x": int(args["x"]),
+            "y": int(args["y"]),
+            "duration_ms": int(args.get("duration_ms", 600)),
+            **_semantic_target(args),
+        }
     if intent.name == "swipe":
         return ActionType.SWIPE, {
             "start_x": int(args.get("x", args.get("start_x"))),
@@ -815,9 +1394,22 @@ def _decision_from_action(action: Any) -> ActionDecision:
     return ActionDecision("act", PhysicalIntent(name, arguments), action.expected_outcome)
 
 
-def _role_observation(kernel_id: str, links: dict[str, str]) -> RoleObservation:
+def _semantic_target(arguments: Mapping[str, Any]) -> dict[str, str]:
+    description = arguments.get("target_description")
+    if isinstance(description, str) and description.strip():
+        return {"target_description": description.strip()[:200]}
+    return {}
+
+
+def _role_observation(
+    kernel_id: str, links: dict[str, str], observation: Any
+) -> RoleObservation:
     evidence_id = links.get(kernel_id, kernel_id)
-    return RoleObservation(evidence_id, f"Kernel observation {kernel_id}")
+    width, height = observation.device_state.screen_size
+    return RoleObservation(
+        evidence_id,
+        f"fresh Android frame {width}x{height}; Kernel observation {kernel_id}",
+    )
 
 
 def _inputs(goal: str, created_at: str, events: tuple[Any, ...]) -> tuple[InputRevision, ...]:

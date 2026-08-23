@@ -159,11 +159,140 @@ mode-log sequence, Legacy 403 fences before and after restart, stable read
 surfaces, zero active tasks/Leases, and zero fatal errors. U7 closed and U8 was
 activated under the ordinary advancement rule.
 
+### D18 — U8 Soul test-account full-autonomy authorization
+
+Confirmed by the user on 2026-08-23 for the currently configured Soul test
+account and the active U8 acceptance run:
+
+- AI-GAME may read, analyze, retain the already-defined bounded evidence, and
+  display conversation material from this test account when it is relevant to
+  U8 verification;
+- the long-lived application may autonomously discover candidates, classify
+  compatibility, generate replies, and send through the controlled capability
+  selected by the frozen GoalRun binding plan, without per-message user
+  approval or a manual-chat prerequisite; an already logged-in Android
+  application does not thereby require a specialized external owner;
+- candidate notification remains informational and must not pause the GoalRun;
+- this content and account-operation authorization does not remove runtime
+  correctness invariants: one physical execution owner, explicit stop/takeover fences,
+  current conversation/revision validation, at-most-once send, no uncertain
+  replay, and durable evidence remain mandatory;
+- scope ends when U8 acceptance ends, the configured account changes, or the
+  user revokes the authorization. Extending the same policy to a production or
+  personal account requires a new explicit decision.
+
+[constraint-source: USER_DECISION; ref: U8 Soul test-account full-autonomy instruction 2026-08-23]
+
+This decision removes user-approval and privacy-display gates for the named
+test scope. It does not lower U8 evidence thresholds or authorize bypassing a
+frozen/uncertain physical-action ledger merely to obtain a passing result.
+
+D22 corrects only the implementation assumption formerly embedded in this
+decision: the authorization is attached to the account and GoalRun scope, not
+to `soul-reply-v1` or any external-owner architecture. A specialized adapter
+adds its own authorization/readiness gate only when the frozen plan selects it.
+
+The rejected `local-managed-v1` checkpoint did not itself end this
+authorization. Current applicability must be determined from D18's original
+account, U8-scope, change, and revocation conditions. D20 prevents transferring
+it to another owner endpoint or account by implication.
+
+### D19 — Project-wide autonomous operation policy
+
+Confirmed by the user on 2026-08-23 for AI-GAME as a whole:
+
+- supported goals run without step-by-step permission prompts, per-message
+  approval, manual-chat prerequisites, or content-display restrictions;
+- the system may observe, reason, select capabilities, communicate, and
+  continue work autonomously within the account, device, and external services
+  placed in the active goal's scope;
+- user interaction is reserved for missing external authority or a genuinely
+  material product choice that cannot be derived from the goal and evidence;
+- runtime correctness remains part of the requested product outcome rather
+  than an optional permission boundary: ownership, stop/takeover fences,
+  current-target validation, at-most-once external effects, uncertain-result
+  reconciliation, and truthful evidence cannot be disabled by an execution
+  policy.
+
+[constraint-source: USER_DECISION; ref: project-wide no-human-boundary instruction 2026-08-23]
+
+This decision applies to product interaction and autonomous execution. It does
+not redefine a duplicate, cross-target, post-stop, or unverified side effect as
+acceptable behavior, because doing so would make goal completion and U8/U9
+acceptance unprovable.
+
+### D20 — Retired historical Soul-page owner is excluded from U8
+
+Confirmed by the user on 2026-08-23:
+
+- the historical `F:\dating-copilot` Soul-page project is retired and must not
+  be started, probed, or treated as the external owner for U8 acceptance;
+- D18 does not transfer its historical test-account authorization to a new
+  owner, endpoint, or account by implication;
+- `soul-reply-v1` may remain an internal optional profile. If a future frozen
+  plan actually selects that specialized adapter, the adapter requires its own
+  current configuration and authorization; generic RuntimeKernel operation of
+  an already logged-in application does not require a replacement owner service;
+- D20 does not nominate a replacement owner/account and does not make any
+  external adapter a universal prerequisite for the core U8 route.
+
+[constraint-source: USER_DECISION; ref: retired Soul-page project correction 2026-08-23]
+
+User outcome requested: continue U8 according to AI-GAME's universal-goal
+vision, rather than reviving an older page project. Technical consequence: the
+normal launcher has no implicit legacy-owner endpoint; an absent current owner
+is represented as `owner_not_configured` without an owner call. Affected
+documents: the U8 work order, current-state/roadmap/index, and ownership
+architecture. Effective milestone: U8. Evidence: the user explicitly marked
+the historical Soul-page project obsolete before further U8 action.
+
+### D21 — WITHDRAWN: device-free local checkpoint is not U8 acceptance
+
+Status: `WITHDRAWN` by the user's current correction on 2026-08-23. This entry
+is retained only as audit history and has no normative effect.
+
+Historical error: the prior D21 treated one `local-managed-v1` checkpoint run
+as the U8 long-lived application/social acceptance and used it to mark U8
+`DONE` and activate U9. That run is valid lifecycle infrastructure evidence,
+but it used no device, network, target application state, real application
+event, or delayed reply/no-response outcome. The user rejected that
+interpretation as product-route drift.
+
+### D22 — U8 requires a real long-lived mobile/application vertical
+
+Confirmed by the user's route correction on 2026-08-23:
+
+- `local-managed-v1` continuity evidence remains valid supporting evidence; it
+  does not establish mobile/application/social U8 acceptance;
+- on an authorized device with an already logged-in application,
+  ApplicationRuntime owns the long-lived wait/event/continuation lifecycle and
+  RuntimeKernel owns each bounded observe/action/re-observe/verify cycle;
+- a specialized external owner is an optional capability, not a prerequisite
+  for generic Android operation;
+- only when the frozen binding plan actually selects a specialized owner do
+  that adapter's current authorization, account scope, receipt, at-most-once,
+  and reconciliation requirements apply;
+- D20 continues to exclude `F:\dating-copilot` and does not nominate a
+  replacement owner;
+- one physical owner, current-target/revision validation, fresh post-action
+  evidence, no uncertain replay, bounded recovery, durable evidence, candidate
+  continuation, restart continuity, and explicit stop/takeover fences remain
+  mandatory; and
+- at the time of this correction U8 remained `PARTIAL` and U9 was
+  `NOT_STARTED`; the required real evidence later passed on 2026-08-24, so U8
+  is now `DONE` and U9 is active without changing this route decision.
+
+[constraint-source: USER_DECISION; ref: U8 real mobile/application correction 2026-08-23]
+
 ## 2. Current open decisions
 
-There is no currently recorded product decision blocking the activated U8 work
-order. Live external-owner, authorized-account, and external-outcome
-availability still need current inspection under that work order.
+No unresolved product choice blocks U9 activation. U8's final accepted plan
+selected the generic authorized Android path and no specialized owner; the real
+device/application/login, bounded-cycle, delayed-outcome, restart, and stop
+evidence is recorded in the U8 work order and current-state document. U9 still
+must establish its own production targets and acceptance evidence. A
+specialized adapter may not be inferred or selected merely because the target
+is a third-party app.
 
 ## 3. Decisions that implementation must not invent
 

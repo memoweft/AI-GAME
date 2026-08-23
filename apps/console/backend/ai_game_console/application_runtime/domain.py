@@ -32,6 +32,14 @@ class QueueFull(ApplicationRuntimeError):
     code = "application_runtime_queue_full"
 
 
+class OwnerEventBindingMismatch(ApplicationRuntimeError):
+    code = "application_runtime_owner_event_binding_mismatch"
+
+
+class OwnerEventFenced(ApplicationRuntimeError):
+    code = "application_runtime_owner_event_fenced"
+
+
 class RetryableApplicationError(ApplicationRuntimeError):
     """A transient pre-intent dependency failure with a bounded retry delay.
 
@@ -78,6 +86,7 @@ class Decision:
     complete: bool = False
     detail: str = ""
     memory_candidate: "MemoryCandidate | None" = None
+    candidate_notification: bool = False
     wait_seconds: float | None = None
 
     def __post_init__(self) -> None:
@@ -89,6 +98,8 @@ class Decision:
                 raise ValueError("decision wait_seconds must be between 0.2 and 900")
             if self.memory_candidate is not None:
                 raise ValueError("waiting decision cannot include a memory candidate")
+        if self.candidate_notification and self.intent is None:
+            raise ValueError("candidate notification requires an intent")
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +157,68 @@ class Stop:
 Command = Input | Pause | Resume | Stop
 
 
+_OWNER_EVENT_TYPES = {
+    "candidate_notified",
+    "delayed_positive",
+    "delayed_negative",
+    "no_response",
+    "user_approval",
+    "user_rejection",
+}
+_ATTRIBUTED_OWNER_EVENT_TYPES = _OWNER_EVENT_TYPES - {"candidate_notified"}
+
+
+@dataclass(frozen=True, slots=True)
+class ExternalOwnerEvent:
+    """One evidence-only event accepted from an already-bound owner.
+
+    This is an internal runtime port, not a Goal API request.  It deliberately
+    carries only opaque IDs and evidence references: adapters must keep source
+    text, screenshots, drafts, account identities, and raw owner payloads in
+    their own protected ledger.
+    """
+
+    owner_binding_ref: str
+    owner_event_id: str
+    event_type: str
+    evidence_refs: tuple[str, ...]
+    attribution_scope: str | None = None
+    confidence: float | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.owner_binding_ref, str) or not self.owner_binding_ref.strip():
+            raise ValueError("owner_binding_ref must not be blank")
+        if not isinstance(self.owner_event_id, str) or not self.owner_event_id.strip():
+            raise ValueError("owner_event_id must not be blank")
+        if self.event_type not in _OWNER_EVENT_TYPES:
+            raise ValueError("owner event type is not supported")
+        if not isinstance(self.evidence_refs, tuple) or not self.evidence_refs:
+            raise ValueError("owner event requires evidence references")
+        if any(not isinstance(item, str) or not item.strip() for item in self.evidence_refs):
+            raise ValueError("owner event evidence references must be non-blank strings")
+        if self.event_type in _ATTRIBUTED_OWNER_EVENT_TYPES:
+            if not isinstance(self.attribution_scope, str) or not self.attribution_scope.strip():
+                raise ValueError("attributed owner event requires attribution_scope")
+            if (
+                isinstance(self.confidence, bool)
+                or self.confidence is None
+                or not 0.0 <= float(self.confidence) <= 1.0
+            ):
+                raise ValueError("attributed owner event confidence must be between 0 and 1")
+        elif self.confidence is not None:
+            raise ValueError("candidate owner event cannot carry confidence")
+
+    def durable_data(self) -> Mapping[str, Any]:
+        """Return the allow-listed, content-free projection for the event log."""
+
+        data: dict[str, Any] = {"evidence_refs": list(self.evidence_refs)}
+        if self.attribution_scope is not None:
+            data["attribution_scope"] = self.attribution_scope
+        if self.confidence is not None:
+            data["confidence"] = float(self.confidence)
+        return data
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeEvent:
     sequence: int
@@ -165,6 +238,7 @@ class RuntimeIntent:
     receipt: ExecutionReceipt | None
     created_at: str
     finalized_at: str | None
+    candidate_notification: bool = False
 
 
 @dataclass(frozen=True, slots=True)

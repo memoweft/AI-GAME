@@ -2,7 +2,18 @@
 
 ## STATUS
 
-`NOT_STARTED`
+`PARTIAL`
+
+Activated on 2026-08-24 after U8 passed its real generic long-lived
+mobile/application device, continuity, delayed-outcome, restart, and final-source
+stop-fence evidence. The first U9 slice now produces a hash-verified local
+installation-candidate archive containing current console source, built browser
+assets, sanitized configuration templates, and policy artifacts. Its manifest
+truthfully records `NOT_DEPLOYED`; it does not claim a fresh install, production
+deployment, long-run SLO, failure injection, upgrade/rollback, or
+broader-application acceptance.
+
+[constraint-source: USER_DECISION; ref: D22 U8 real mobile/application correction 2026-08-23]
 
 ## BUSINESS OUTCOME
 
@@ -47,6 +58,17 @@ Decision D12 in `../09_DECISIONS_AND_OPEN_QUESTIONS.md` allows automatic handlin
 ## VERIFY
 
 Define a release candidate matrix for supported host/device/model bindings, then run full automated, current-source, real-device, long-run, failure-injection, fresh-install, upgrade, rollback, and restore gates. Verify that one plan confirmation completes the approved workflow without step-by-step prompts, the same GoalRun resumes, and a materially expanded plan requests a new confirmation before writes. Unavailable gates remain explicit blockers to a production claim.
+
+### Initial release-candidate matrix — 2026-08-24
+
+| Gate | Candidate scope | State | Evidence / next proof |
+|---|---|---|---|
+| Archive integrity | Current local Windows source snapshot | `PASS` | `scripts/production-release.ps1 build` produced a per-file manifest and SHA-256 companion; `verify` passed against the archive. |
+| Fresh installation | Disposable Windows environment | `NOT RUN` | Needs the persisted install-plan/approval workflow and a clean target. |
+| Existing-install upgrade | Disposable copy of a prior supported release | `NOT RUN` | Needs versioned upgrade migration and preserved Goal/evidence verification. |
+| Rollback and restore | Same disposable environment | `NOT RUN` | Needs versioned data backup/restore and post-rollback service/target checks. |
+| Runtime, device, model binding | Explicitly approved production target | `NOT RUN` | No production target has been selected or operated. |
+| Failure injection and long-run SLO | Explicitly approved production target | `NOT RUN` | No process, ADB, model, database, disk, stale-owner, or network fault campaign has run. |
 
 ## ROLLBACK
 

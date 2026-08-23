@@ -920,7 +920,7 @@ class SoulAutomationJobSchema(ApiModel):
 
 class SoulWorkspaceResponse(ApiModel):
     connection: Literal["ready", "unavailable", "incompatible"]
-    console_url: str
+    console_url: str | None
     observed_at: str | None
     available_commands: list[SoulCommandName]
     status: SoulStatusSchema | None

@@ -93,6 +93,12 @@ class StructuredGoalModel:
                 "你是独立目标规格层。必须调用 record_goal_specification。原始目标不可修改。"
                 "把每个并列、顺序和结果要求分别变成可验证成功标准；不得因为执行困难而省略。"
                 "每个标准的 source_quote 必须逐字摘自原始目标，并使用稳定英文小写 id。"
+                "只要求一次有界手机结果时，无论目标是哪一个应用，都分类为 finite_phone_goal。"
+                "若持续目标只要求 AI-GAME 本机持久等待、用户后续消息、提醒或候选里程碑，"
+                "且不需要操作手机应用、外部服务或现实环境，分类为 long_lived_local_goal。"
+                "若目标需要在手机应用或外部服务中长期观察、等待事件，并在多个有界周期中"
+                "继续操作，分类为 long_lived_application_goal。分类只描述目标生命周期和"
+                "环境，不得选择或臆造 owner、profile 或账号门禁。"
             ),
             prompt=f"原始目标：{original_goal}",
             observations=(),
@@ -102,7 +108,15 @@ class StructuredGoalModel:
                 "type": "object",
                 "additionalProperties": False,
                 "properties": {
-                    "classification": {"type": "string"},
+                    "classification": {
+                        "type": "string",
+                        "enum": [
+                            "finite_phone_goal",
+                            "long_lived_local_goal",
+                            "long_lived_application_goal",
+                            "language_only_goal",
+                        ],
+                    },
                     "outcome": {"type": "string"},
                     "success_criteria": {
                         "type": "array",
@@ -137,7 +151,12 @@ class StructuredGoalModel:
         raw_criteria = decoded.get("success_criteria")
         if (
             not isinstance(classification, str)
-            or not classification.strip()
+            or classification.strip() not in {
+                "finite_phone_goal",
+                "long_lived_local_goal",
+                "long_lived_application_goal",
+                "language_only_goal",
+            }
             or not isinstance(outcome, str)
             or not outcome.strip()
             or not isinstance(raw_criteria, list)
@@ -163,6 +182,134 @@ class StructuredGoalModel:
             ),
             tuple(criteria),
         )
+
+    def answer_language(self, original_goal: str) -> str:
+        decoded = self._role_model.call_tool(
+            # [constraint-source: PRODUCT_SPEC; ref: U8 OUT OF SCOPE and D10]
+            system=(
+                "你是本地语言结果能力。必须调用 record_language_result。"
+                "只完成用户要求的纯语言任务；不得声称访问了设备、账号、实时网络或外部世界。"
+            ),
+            prompt=f"原始目标：{original_goal}",
+            observations=(),
+            tool_name="record_language_result",
+            description="Return the requested local language-only result",
+            parameters={
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {"result": {"type": "string", "minLength": 1}},
+                "required": ["result"],
+            },
+            max_tokens=2_048,
+            reasoning_effort="low",
+            reasoning_budget=0,
+        )
+        result = decoded.get("result")
+        if not isinstance(result, str) or not result.strip():
+            raise ValueError("invalid language result response")
+        return result.strip()
+
+    def assess_mobile_application_readiness(
+        self,
+        original_goal: str,
+        observation: Observation,
+        expected_application_id: str,
+    ) -> dict[str, Any]:
+        """Assess login/interaction readiness from the persisted pre-action frame.
+
+        The package identity comes from Android device state; this visual role
+        only decides whether the current frame shows an account-scoped,
+        interaction-ready application surface.  It cannot select an account,
+        owner, or physical action.
+        """
+
+        decoded = self._role_model.call_tool(
+            # [constraint-source: USER_DECISION; ref: D22 U8 readiness before action]
+            system=(
+                "你是移动应用只读 readiness 验证层。必须调用 "
+                "record_application_readiness，禁止输出坐标、点击、文本输入或任何设备动作。"
+                "只根据这一张当前截图判断：目标应用是否已进入可交互业务界面，以及是否"
+                "显示登录后的账号会话状态，并核对画面是否与原始目标点名或描述的应用一致。"
+                "登录页、注册页、验证码页、权限阻塞、断线遮罩、空白/黑屏、应用不匹配或"
+                "无法读清时都不能判 ready。不得猜测具体账号身份。"
+            ),
+            prompt=(
+                f"原始长期目标：{original_goal}\n"
+                f"Android 当前前台应用：{expected_application_id}\n"
+                "给出当前画面的 readiness、登录后会话判断和简短可复核证据。"
+            ),
+            observations=(observation,),
+            tool_name="record_application_readiness",
+            description="Record a read-only pre-action application readiness verdict",
+            parameters={
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "ready": {"type": "boolean"},
+                    "authenticated": {"type": "boolean"},
+                    "application_matches_goal": {"type": "boolean"},
+                    "blocking_state": {
+                        "type": "string",
+                        "enum": [
+                            "none",
+                            "login_required",
+                            "registration_required",
+                            "permission_blocked",
+                            "connection_blocked",
+                            "unreadable",
+                            "other",
+                        ],
+                    },
+                    "evidence": {"type": "string", "minLength": 1},
+                },
+                "required": [
+                    "ready",
+                    "authenticated",
+                    "application_matches_goal",
+                    "blocking_state",
+                    "evidence",
+                ],
+            },
+            max_tokens=512,
+            reasoning_effort="low",
+            reasoning_budget=0,
+        )
+        ready = decoded.get("ready")
+        authenticated = decoded.get("authenticated")
+        application_matches_goal = decoded.get("application_matches_goal")
+        blocking_state = decoded.get("blocking_state")
+        evidence = decoded.get("evidence")
+        if (
+            not isinstance(ready, bool)
+            or not isinstance(authenticated, bool)
+            or not isinstance(application_matches_goal, bool)
+            or blocking_state
+            not in {
+                "none",
+                "login_required",
+                "registration_required",
+                "permission_blocked",
+                "connection_blocked",
+                "unreadable",
+                "other",
+            }
+            or not isinstance(evidence, str)
+            or not evidence.strip()
+        ):
+            raise ValueError("invalid application readiness response")
+        if ready and (
+            not authenticated
+            or not application_matches_goal
+            or blocking_state != "none"
+        ):
+            raise ValueError("application readiness response is contradictory")
+        return {
+            "ready": ready,
+            "authenticated": authenticated,
+            "application_matches_goal": application_matches_goal,
+            "blocking_state": blocking_state,
+            "evidence": evidence.strip()[:1_000],
+        }
 
     def inspect_daily_checklist(
         self, original_goal: str, observations: tuple[Observation, ...]

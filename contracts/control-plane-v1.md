@@ -1,5 +1,11 @@
 # Control-plane HTTP contract v1
 
+> **V1 COMPATIBILITY CONTRACT / D20 OVERRIDE.** The Soul owner and scheduler
+> routes below preserve a historical specialized-Adapter interface. They are
+> not current U8 routing authority and must not be used to start, probe, or
+> depend on `F:\dating-copilot`. A generic long-lived mobile GoalRun does not
+> infer `soul-reply-v1` or an external owner; see product decision D22.
+
 The console exposes a loopback-only JSON API under `/api/v1`. The browser UI and
 typed resource Adapters use this Interface; SQLite, ADB discovery, model probes,
 and process details stay behind the control-plane Module.
@@ -15,8 +21,8 @@ and accepts only localhost Host values.
 - `MobileTask` is the primary generic Android task Interface. It is distinct
   from Chat, GameLearning, Soul, and legacy Run records.
 - `ApplicationRuntime` is the generic long-lived application-cycle Interface.
-  Soul is one production Profile (`soul-reply-v1`), not the AI-GAME product
-  boundary and not a special universal Run.
+  Soul has one retained optional Profile (`soul-reply-v1`), not the AI-GAME
+  product boundary, a special universal Run, or the generic mobile default.
 - `202 Accepted` from a MobileTask POST means the request is durably accepted;
   it is not proof that planning began, an action was transported, a Subgoal was
   verified, or the Task completed.
@@ -32,10 +38,10 @@ and accepts only localhost Host values.
 - A late `Input`, `Pause`, or `Stop` cannot rewrite a physical operation that
   already crossed the owner dispatch fence as not sent. Owner settlement or
   physical uncertainty wins, and later policy cycles observe the command.
-- Soul matcher scheduling and Soul reply execution are separate facts. The
-  managed dating-copilot scheduler owns all-day matching and immediate match
-  openers; the `soul-reply-v1` Application owns ordinary replies and delayed
-  reply-strategy learning.
+- In the historical specialized Soul contract, matcher scheduling and reply
+  execution were separate facts: the retired owner scheduler handled matching
+  and openers while `soul-reply-v1` handled replies and delayed learning. This
+  is not a current owner-readiness claim.
 - A confirmed Soul send is delivery proof, not a learning reward. Only later
   admissible interaction or no-response evidence may update reply strategy;
   an uncertain send is neither a positive example nor permission to resend.
@@ -289,14 +295,15 @@ second and any later GET reconcile the authoritative settlement. Without
 credible proof of confirmed delivery or definite non-dispatch, the cycle
 remains `uncertain` or closes as `recovery_no_replay`.
 
-### Soul `soul-reply-v1` Profile and matcher lifecycle
+### Historical Soul `soul-reply-v1` Profile and matcher lifecycle
 
-Soul is one ApplicationRuntime Profile, not the platform identity. AI-GAME owns
+Soul is one optional ApplicationRuntime Profile, not the platform identity. In
+the historical specialized integration, AI-GAME owned
 the long-lived reply cycle, local visual-fact extraction, transient cloud reply
 policy, revision fence, owner-proof verification, and delayed reply-strategy
-learning. `F:\dating-copilot` remains the sole Soul device and physical-ledger
-owner. AI-GAME calls only its loopback owner Interface; it does not import that
-project, open its database, or issue competing Soul ADB input.
+learning, while `F:\dating-copilot` owned the Soul device ledger. D20 retired
+that project from current U8; the following routes remain interface evidence,
+not instructions to configure, start, or probe it.
 
 The owner captures one stable transcript/revision/PNG observation. The raw PNG
 is consumed only by the loopback local visual Adapter and removed before cloud
@@ -307,7 +314,7 @@ same immutable draft and `conversation_revision`; owner preflight rechecks both
 before at most one physical send. Active or uncertain operations are inspected,
 never sent again.
 
-The managed dating-copilot scheduler remains responsible for:
+In that historical contract, the managed dating-copilot scheduler was responsible for:
 
 - matching throughout the day, with preferred hours changing cadence rather
   than becoming a hard off-window stop;
@@ -315,14 +322,14 @@ The managed dating-copilot scheduler remains responsible for:
 - bounded unread discovery needed to surface reply work; and
 - Planet outreach only after trustworthy same-day match quota exhaustion.
 
-It does not draft or send ordinary replies. `soul-reply-v1` owns those replies
-and their learning. A confirmed send stores hash-bound trial lineage and send
+It did not draft or send ordinary replies. `soul-reply-v1` handled those replies
+and their learning. A confirmed send stored hash-bound trial lineage and send
 proof, but does not immediately promote strategy. Only later admissible inbound
 engagement, or a complete delayed no-response result, may change strategy.
 
-The browser controls the reply instance and matcher together only through
-Application lifecycle commands. Each nonterminal Soul instance contributes a
-demand to the one shared matcher target:
+In that historical binding, the browser controlled the reply instance and
+matcher together only through Application lifecycle commands. Each nonterminal
+Soul instance contributed a demand to the one shared matcher target:
 
 - `queued`, `running`, or `waiting` contributes `running`;
 - `paused` contributes `paused`; a cold paused restore may have
@@ -481,10 +488,10 @@ and optional error/detail and SkillMemory version. `completed`, `failed`,
 schema-v2 `skill_scope_id` is deliberately not projected. When `skill_id` is
 omitted, the production resolver may select a versioned automatic scope from
 the normalized goal, so a completed Task can report a positive
-`skill_memory_version` while `skill_id` remains null. Soul objectives receive no
-MobileTask scope because the `soul-reply-v1` Application Profile owns a separate
-delayed-outcome reply-learning store; dating-copilot remains the sole device and
-physical-ledger owner.
+`skill_memory_version` while `skill_id` remains null. In this v1 compatibility
+resolver, Soul objectives received no MobileTask scope because
+`soul-reply-v1` owned a separate delayed-outcome store. That historical
+exclusion neither defines the v2 Goal route nor requires the retired owner.
 
 Mid-task input uses the plural `/inputs` route:
 
@@ -792,7 +799,8 @@ route, and leaves `local_chat` available.
 These routes remain because persisted older clients and records may still read
 them. They are not first-level browser workspaces, are not claimed by the
 MobileTask or ApplicationRuntime coordinators, and must not be used as the seam
-for a new Adapter. There is no universal Run/router across these resources.
+for a new Adapter. The v2 GoalRun router is separate from these legacy
+resources; its absence from this appendix is not a routing prohibition.
 
 ### Workflows
 
@@ -854,8 +862,9 @@ truth.
 Both POST routes always return HTTP `410` with stable code
 `legacy_soul_write_disabled`. The former `start/pause/resume/stop`, mode, and
 inventory command bodies and their receipt ledger are not a supported write
-path. Current code must use `/api/v1/application-instances` and Profile
-`soul-reply-v1`.
+path. The only retained v1 path for a current specialized Adapter that has been
+explicitly configured and selected is `/api/v1/application-instances` with
+Profile `soul-reply-v1`. The universal v2 Goal composer must not infer it.
 
 ### Legacy Run state machine
 

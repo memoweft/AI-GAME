@@ -105,6 +105,37 @@ def test_soul_workspace_is_a_200_offline_snapshot(tmp_path) -> None:
     assert response.json()["available_commands"] == []
 
 
+def test_unconfigured_soul_owner_is_truthful_and_does_not_require_a_loopback_endpoint(
+    tmp_path,
+) -> None:
+    app = create_app(settings=build_settings(tmp_path))
+
+    with TestClient(app) as client:
+        workspace = client.get("/api/v1/integrations/soul")
+        conversation = client.get("/api/v1/integrations/soul/conversations/7")
+
+    assert workspace.status_code == 200
+    assert workspace.json() == {
+        "connection": "unavailable",
+        "console_url": None,
+        "observed_at": None,
+        "available_commands": [],
+        "status": None,
+        "matches": [],
+        "rankings": [],
+        "metrics": [],
+        "automation_jobs": [],
+        "section_errors": {"status": "soul_owner_not_configured"},
+    }
+    assert conversation.status_code == 503
+    assert conversation.json() == {
+        "error": {
+            "code": "soul_owner_not_configured",
+            "message": "Soul 外部 owner 尚未配置。",
+        }
+    }
+
+
 def test_soul_api_accepts_real_health_event_shapes(tmp_path) -> None:
     transport = _workspace_transport()
     transport.responses[("GET", "/api/status")].payload["health"].update(

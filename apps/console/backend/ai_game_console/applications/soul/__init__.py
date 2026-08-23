@@ -1,6 +1,7 @@
 """Soul reply application for the generic AI-GAME ApplicationRuntime.
 
-The dating-copilot owner remains the sole device/page/send-ledger authority.
+The explicitly configured external owner remains the sole device/page/send-ledger
+authority.
 This package owns reply policy, proof verification, and delayed-outcome
 learning without persisting screenshots, message bodies, or identity fields.
 """

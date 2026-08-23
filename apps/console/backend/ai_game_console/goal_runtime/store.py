@@ -10,10 +10,12 @@ from pathlib import Path
 from typing import Any
 
 from .domain import (
+    CapabilityBindingPlan,
     GoalCompletionAssessment,
     GoalIdempotencyConflict,
     GoalNotFound,
     GoalRecord,
+    GoalNotification,
     GoalSpecificationDraft,
     StoredEvent,
 )
@@ -24,7 +26,7 @@ CREATE TABLE IF NOT EXISTS goal_schema (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     version INTEGER NOT NULL
 );
-INSERT OR IGNORE INTO goal_schema(singleton, version) VALUES (1, 5);
+INSERT OR IGNORE INTO goal_schema(singleton, version) VALUES (1, 7);
 
 CREATE TABLE IF NOT EXISTS goal_runs (
     goal_id TEXT PRIMARY KEY,
@@ -118,6 +120,34 @@ CREATE TABLE IF NOT EXISTS goal_completion_assessments (
     PRIMARY KEY(goal_id, revision),
     UNIQUE(goal_id, revision)
 );
+
+CREATE TABLE IF NOT EXISTS goal_binding_plans (
+    goal_id TEXT NOT NULL REFERENCES goal_runs(goal_id),
+    revision INTEGER NOT NULL,
+    route_kind TEXT NOT NULL,
+    binding_kind TEXT NOT NULL,
+    capability_ids_json TEXT NOT NULL,
+    owner_kind TEXT,
+    owner_binding_ref TEXT,
+    profile_id TEXT,
+    classification TEXT NOT NULL,
+    rationale TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(goal_id, revision)
+);
+
+CREATE TABLE IF NOT EXISTS goal_notifications (
+    notification_id TEXT PRIMARY KEY,
+    goal_id TEXT NOT NULL REFERENCES goal_runs(goal_id),
+    source_event_sequence INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    evidence_refs_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(goal_id, source_event_sequence, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_goal_notifications_goal_created
+ON goal_notifications(goal_id, created_at);
 """
 
 
@@ -223,7 +253,65 @@ class SQLiteGoalStore:
                         UPDATE goal_schema SET version = 5 WHERE singleton = 1;
                     """)
                     stored_version = 5
-                if stored_version != 5:
+                if stored_version == 5:
+                    connection.executescript("""
+                        CREATE TABLE IF NOT EXISTS goal_binding_plans (
+                            goal_id TEXT NOT NULL REFERENCES goal_runs(goal_id),
+                            revision INTEGER NOT NULL,
+                            route_kind TEXT NOT NULL,
+                            binding_kind TEXT NOT NULL,
+                            capability_ids_json TEXT NOT NULL,
+                            owner_kind TEXT,
+                            profile_id TEXT,
+                            classification TEXT NOT NULL,
+                            rationale TEXT NOT NULL,
+                            created_at TEXT NOT NULL,
+                            PRIMARY KEY(goal_id, revision)
+                        );
+                        CREATE TABLE IF NOT EXISTS goal_notifications (
+                            notification_id TEXT PRIMARY KEY,
+                            goal_id TEXT NOT NULL REFERENCES goal_runs(goal_id),
+                            source_event_sequence INTEGER NOT NULL,
+                            kind TEXT NOT NULL,
+                            summary TEXT NOT NULL,
+                            evidence_refs_json TEXT NOT NULL,
+                            created_at TEXT NOT NULL,
+                            UNIQUE(goal_id, source_event_sequence, kind)
+                        );
+                        CREATE INDEX IF NOT EXISTS idx_goal_notifications_goal_created
+                        ON goal_notifications(goal_id, created_at);
+                        UPDATE goal_schema SET version = 6 WHERE singleton = 1;
+                    """)
+                    stored_version = 6
+                if stored_version == 6:
+                    columns = {
+                        str(row["name"])
+                        for row in connection.execute(
+                            "PRAGMA table_info(goal_binding_plans)"
+                        ).fetchall()
+                    }
+                    if "owner_binding_ref" not in columns:
+                        connection.execute(
+                            "ALTER TABLE goal_binding_plans "
+                            "ADD COLUMN owner_binding_ref TEXT"
+                        )
+                    rows = connection.execute(
+                        "SELECT goal_id FROM goal_binding_plans "
+                        "WHERE owner_kind='external_owner' "
+                        "AND owner_binding_ref IS NULL"
+                    ).fetchall()
+                    for row in rows:
+                        goal_id = str(row["goal_id"])
+                        connection.execute(
+                            "UPDATE goal_binding_plans SET owner_binding_ref=? "
+                            "WHERE goal_id=? AND owner_binding_ref IS NULL",
+                            (_owner_binding_ref(goal_id), goal_id),
+                        )
+                    connection.execute(
+                        "UPDATE goal_schema SET version = 7 WHERE singleton = 1"
+                    )
+                    stored_version = 7
+                if stored_version != 7:
                     raise RuntimeError("unsupported goal database schema")
             self._initialized = True
 
@@ -247,7 +335,7 @@ class SQLiteGoalStore:
             connection.execute(
                 "INSERT INTO goal_runs(goal_id, original_goal, execution_status, "
                 "control_state, binding_kind, binding_state, created_at, updated_at) "
-                "VALUES (?, ?, 'ACCEPTED', 'AUTOMATED', 'mobile_task_compat', "
+                "VALUES (?, ?, 'ACCEPTED', 'AUTOMATED', 'unclassified', "
                 "'PLANNED', ?, ?)",
                 (goal_id, goal, now, now),
             )
@@ -266,10 +354,125 @@ class SQLiteGoalStore:
                 connection,
                 goal_id,
                 "goal_accepted",
-                {"binding_kind": "mobile_task_compat", "specification_revision": 1},
+                {"binding_kind": "unclassified", "specification_revision": 1},
                 now,
             )
             return self._get(connection, goal_id), True
+
+    def record_binding_plan(
+        self,
+        goal_id: str,
+        *,
+        route_kind: str,
+        binding_kind: str,
+        capability_ids: tuple[str, ...],
+        owner_kind: str | None,
+        owner_binding_ref: str | None = None,
+        profile_id: str | None,
+        classification: str,
+        rationale: str,
+    ) -> CapabilityBindingPlan:
+        """Freeze the selected capability route before executor side effects."""
+
+        self.initialize()
+        if not route_kind or not binding_kind or not capability_ids or not classification:
+            raise ValueError("binding plan requires a route, binding and capabilities")
+        if owner_kind == "external_owner" and owner_binding_ref is None:
+            owner_binding_ref = _owner_binding_ref(goal_id)
+        if owner_binding_ref is not None and not owner_binding_ref.strip():
+            raise ValueError("owner binding reference must not be blank")
+        now = _now()
+        with self._lock, self._connection(write=True) as connection:
+            record = self._get(connection, goal_id)
+            existing = connection.execute(
+                "SELECT * FROM goal_binding_plans WHERE goal_id = ? "
+                "ORDER BY revision DESC LIMIT 1",
+                (goal_id,),
+            ).fetchone()
+            if existing is not None:
+                plan = _binding_plan(existing)
+                proposed = (
+                    route_kind,
+                    binding_kind,
+                    capability_ids,
+                    owner_kind,
+                    owner_binding_ref,
+                    profile_id,
+                    classification,
+                )
+                current = (
+                    plan.route_kind,
+                    plan.binding_kind,
+                    plan.capability_ids,
+                    plan.owner_kind,
+                    plan.owner_binding_ref,
+                    plan.profile_id,
+                    plan.classification,
+                )
+                if proposed != current:
+                    raise GoalIdempotencyConflict(
+                        "GoalRun 已冻结另一条能力绑定计划。"
+                    )
+                return plan
+            if record.bound_task_id is not None:
+                raise GoalIdempotencyConflict(
+                    "GoalRun 已产生执行绑定，不能补写另一条能力计划。"
+                )
+            connection.execute(
+                "INSERT INTO goal_binding_plans(goal_id, revision, route_kind, "
+                "binding_kind, capability_ids_json, owner_kind, owner_binding_ref, "
+                "profile_id, classification, rationale, created_at) "
+                "VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    goal_id,
+                    route_kind,
+                    binding_kind,
+                    _json(capability_ids),
+                    owner_kind,
+                    owner_binding_ref,
+                    profile_id,
+                    classification,
+                    rationale,
+                    now,
+                ),
+            )
+            connection.execute(
+                "UPDATE goal_runs SET binding_kind = ?, binding_state = 'PLANNED', "
+                "updated_at = ? WHERE goal_id = ?",
+                (binding_kind, now, goal_id),
+            )
+            self._event(
+                connection,
+                goal_id,
+                "goal_binding_plan_frozen",
+                {
+                    "revision": 1,
+                    "route_kind": route_kind,
+                    "binding_kind": binding_kind,
+                    "capability_ids": list(capability_ids),
+                    "owner_kind": owner_kind,
+                    "owner_binding_ref": owner_binding_ref,
+                    "profile_id": profile_id,
+                    "classification": classification,
+                },
+                now,
+            )
+            row = connection.execute(
+                "SELECT * FROM goal_binding_plans WHERE goal_id = ? AND revision = 1",
+                (goal_id,),
+            ).fetchone()
+            return _binding_plan(row)
+
+    def binding_plan(self, goal_id: str) -> CapabilityBindingPlan | None:
+        self.initialize()
+        with self._connection() as connection:
+            self._get(connection, goal_id)
+            row = connection.execute(
+                "SELECT * FROM goal_binding_plans WHERE goal_id = ? "
+                "ORDER BY revision DESC LIMIT 1",
+                (goal_id,),
+            ).fetchone()
+            return _binding_plan(row) if row is not None else None
 
     def inspect(self, goal_id: str) -> GoalRecord:
         self.initialize()
@@ -292,6 +495,15 @@ class SQLiteGoalStore:
             binding_state="WAITING_CONFIGURATION",
             waiting_reason={"code": code, "message": message},
             event_type="goal_waiting_configuration",
+        )
+
+    def mark_waiting_external(self, goal_id: str, *, code: str, message: str) -> None:
+        self._update_projection(
+            goal_id,
+            execution_status="WAITING_EXTERNAL",
+            binding_state="WAITING_EXTERNAL",
+            waiting_reason={"code": code, "message": message},
+            event_type="goal_waiting_external",
         )
 
     def begin_preflight(self, goal_id: str) -> None:
@@ -358,6 +570,23 @@ class SQLiteGoalStore:
             event_type="goal_binding_failed",
         )
 
+    def record_experience_unavailable(
+        self, goal_id: str, *, error_type: str
+    ) -> None:
+        """Keep an additive learning failure visible without rewriting execution."""
+
+        self.initialize()
+        now = _now()
+        with self._lock, self._connection(write=True) as connection:
+            self._get(connection, goal_id)
+            self._event(
+                connection,
+                goal_id,
+                "goal_experience_unavailable",
+                {"error_type": error_type},
+                now,
+            )
+
     def bind_task(
         self,
         goal_id: str,
@@ -379,16 +608,53 @@ class SQLiteGoalStore:
                 (task_id, target_id, binding_kind, now, goal_id),
             )
             if record.bound_task_id is None:
+                event_type = (
+                    "kernel_task_bound"
+                    if binding_kind in {"runtime_kernel", "runtime_kernel_canary"}
+                    else "application_instance_bound"
+                    if binding_kind in {
+                        "application_runtime",
+                        "long_lived_mobile_composition",
+                    }
+                    else "language_task_bound"
+                    if binding_kind == "local_language"
+                    else "compatibility_task_bound"
+                )
                 self._event(
                     connection,
                     goal_id,
-                    "kernel_task_bound"
-                    if binding_kind in {"runtime_kernel", "runtime_kernel_canary"}
-                    else "compatibility_task_bound",
+                    event_type,
                     {"binding_kind": binding_kind, "task_id": task_id,
                      "target_id": target_id, "completion_gate": "pending_u3"},
                     now,
                 )
+
+    def complete_language_result(self, goal_id: str, *, result_summary: str) -> GoalRecord:
+        self.initialize()
+        summary = result_summary.strip()
+        if not summary:
+            raise ValueError("language result must not be blank")
+        now = _now()
+        with self._lock, self._connection(write=True) as connection:
+            record = self._get(connection, goal_id)
+            if record.binding_kind != "local_language" or record.bound_task_id is None:
+                raise GoalIdempotencyConflict("GoalRun 尚未绑定本地语言能力。")
+            if record.execution_status == "COMPLETED":
+                return record
+            connection.execute(
+                "UPDATE goal_runs SET execution_status = 'COMPLETED', "
+                "binding_state = 'BOUND', result_summary = ?, waiting_reason_json = NULL, "
+                "error_json = NULL, updated_at = ?, terminal_at = ? WHERE goal_id = ?",
+                (summary, now, now, goal_id),
+            )
+            self._event(
+                connection,
+                goal_id,
+                "goal_language_result_completed",
+                {"binding_kind": "local_language"},
+                now,
+            )
+            return self._get(connection, goal_id)
 
     def add_message(self, goal_id: str, *, content: str, idempotency_key: str) -> tuple[int, bool]:
         self.initialize()
@@ -450,8 +716,77 @@ class SQLiteGoalStore:
                 "VALUES (?, ?, ?, ?, ?)",
                 (scope, idempotency_key, digest, goal_id, now),
             )
-            self._event(connection, goal_id, "goal_stop_requested", {}, now)
+            if action == "stop":
+                # [constraint-source: ARCH_INVARIANT; ref: user stop durable fence]
+                # Persist the supervisor-facing stop intent in the same
+                # transaction as idempotency admission.  Launcher recovery can
+                # therefore fence the ApplicationRuntime before any worker is
+                # allowed to resume, even if the process died before the
+                # downstream Stop command was delivered.
+                connection.execute(
+                    "UPDATE goal_runs SET control_state = 'STOP_REQUESTED', "
+                    "updated_at = ? WHERE goal_id = ?",
+                    (now, goal_id),
+                )
+            self._event(
+                connection,
+                goal_id,
+                {
+                    "pause": "goal_pause_requested",
+                    "resume": "goal_resume_requested",
+                    "stop": "goal_stop_requested",
+                    "takeover": "goal_takeover_requested",
+                }.get(action, "goal_control_requested"),
+                {"action": action},
+                now,
+            )
             return True
+
+    def settle_takeover(self, goal_id: str) -> None:
+        self.initialize()
+        now = _now()
+        with self._lock, self._connection(write=True) as connection:
+            self._get(connection, goal_id)
+            connection.execute(
+                "UPDATE goal_runs SET control_state = 'TAKEOVER', updated_at = ? "
+                "WHERE goal_id = ?",
+                (now, goal_id),
+            )
+            self._event(connection, goal_id, "goal_takeover_settled", {}, now)
+
+    # [constraint-source: ARCH_INVARIANT; ref: one owner, user stop, durable terminal state]
+    def cancel_unbound(self, goal_id: str) -> GoalRecord:
+        """Settle user stop when no executor/owner was ever bound."""
+
+        self.initialize()
+        now = _now()
+        with self._lock, self._connection(write=True) as connection:
+            record = self._get(connection, goal_id)
+            if record.bound_task_id is not None:
+                raise GoalIdempotencyConflict(
+                    "GoalRun 已绑定执行 owner，必须由 owner 确认停止。"
+                )
+            if record.execution_status == "CANCELLED":
+                return record
+            if record.execution_status in {
+                "COMPLETED", "PARTIAL", "FAILED", "UNCERTAIN"
+            }:
+                raise GoalIdempotencyConflict("终态 GoalRun 不能改写为取消。")
+            connection.execute(
+                "UPDATE goal_runs SET execution_status = 'CANCELLED', "
+                "control_state = 'AUTOMATED', binding_state = 'CANCELLED', "
+                "waiting_reason_json = NULL, updated_at = ?, terminal_at = ? "
+                "WHERE goal_id = ?",
+                (now, now, goal_id),
+            )
+            self._event(
+                connection,
+                goal_id,
+                "goal_cancelled_without_binding",
+                {"physical_binding": False},
+                now,
+            )
+            return self._get(connection, goal_id)
 
     def sync_mobile_projection(self, goal_id: str, state: Any) -> GoalRecord:
         status = str(_value(state, "status", "failed"))
@@ -512,6 +847,172 @@ class SQLiteGoalStore:
                      "source_status": status}, now,
                 )
             return self._get(connection, goal_id)
+
+    def source_event_cursor(self, goal_id: str) -> int:
+        self.initialize()
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT source_event_cursor FROM goal_runs WHERE goal_id = ?",
+                (goal_id,),
+            ).fetchone()
+            if row is None:
+                raise GoalNotFound("未找到该 GoalRun。")
+            return int(row["source_event_cursor"])
+
+    def sync_application_projection(self, goal_id: str, state: Any) -> GoalRecord:
+        """Project one long-lived ApplicationRuntime instance into GoalRun truth."""
+
+        status = str(_value(state, "status", "failed"))
+        execution, control, terminal = {
+            "queued": ("ACCEPTED", "AUTOMATED", False),
+            "running": ("RUNNING", "AUTOMATED", False),
+            "waiting": ("WAITING_EXTERNAL", "AUTOMATED", False),
+            "paused": ("RUNNING", "PAUSED", False),
+            "stopping": ("RUNNING", "STOP_REQUESTED", False),
+            "stopped": ("CANCELLED", "AUTOMATED", True),
+            # [constraint-source: PRODUCT_SPEC; ref: D14]
+            # A continuous long-lived binding may not silently turn an owner
+            # cycle completion into the user's terminal external outcome.
+            "completed": ("FAILED", "AUTOMATED", True),
+            "failed": ("FAILED", "AUTOMATED", True),
+        }.get(status, ("FAILED", "AUTOMATED", True))
+        now = _now()
+        with self._lock, self._connection(write=True) as connection:
+            record = self._get(connection, goal_id)
+            if record.binding_kind not in {
+                "application_runtime",
+                "long_lived_mobile_composition",
+            }:
+                raise GoalIdempotencyConflict("GoalRun 不是长期运行绑定。")
+            source_cursor = int(connection.execute(
+                "SELECT source_event_cursor FROM goal_runs WHERE goal_id = ?",
+                (goal_id,),
+            ).fetchone()["source_event_cursor"])
+            for source_event in _value(state, "events", ()):
+                sequence = int(_value(source_event, "sequence", 0))
+                if sequence <= source_cursor:
+                    continue
+                source_type = str(_value(source_event, "event_type", "unknown"))
+                source_data = _value(source_event, "data", {})
+                self._event(
+                    connection,
+                    goal_id,
+                    "application_event",
+                    {
+                        "source": "application_runtime",
+                        "source_sequence": sequence,
+                        "source_event_type": source_type,
+                    },
+                    str(_value(source_event, "created_at", now)),
+                )
+                if source_type == "candidate_notified":
+                    data = source_data if isinstance(source_data, dict) else {}
+                    summary = str(data.get("summary") or "已发现一个候选里程碑；长期目标继续运行。")[:500]
+                    evidence_refs = tuple(
+                        str(item)[:256]
+                        for item in data.get("evidence_refs", ())
+                        if isinstance(item, str) and item.strip()
+                    )[:16]
+                    notification_id = str(
+                        data.get("notification_id")
+                        or uuid.uuid5(
+                            uuid.NAMESPACE_URL,
+                            f"ai-game:{goal_id}:candidate:{sequence}",
+                        )
+                    )
+                    connection.execute(
+                        "INSERT OR IGNORE INTO goal_notifications(notification_id, goal_id, "
+                        "source_event_sequence, kind, summary, evidence_refs_json, created_at) "
+                        "VALUES (?, ?, ?, 'candidate', ?, ?, ?)",
+                        (
+                            notification_id,
+                            goal_id,
+                            sequence,
+                            summary,
+                            _json(evidence_refs),
+                            str(_value(source_event, "created_at", now)),
+                        ),
+                    )
+                    self._event(
+                        connection,
+                        goal_id,
+                        "goal_candidate_notified",
+                        {
+                            "notification_id": notification_id,
+                            "source_event_sequence": sequence,
+                            "continues": True,
+                        },
+                        str(_value(source_event, "created_at", now)),
+                    )
+                source_cursor = sequence
+            if status == "paused" and record.control_state == "TAKEOVER":
+                control = "TAKEOVER"
+            waiting_reason = (
+                {
+                    "code": "TIME_OR_INBOUND_EVENT",
+                    "message": "长期目标正在等待下一次定时唤醒或授权入站事件。",
+                }
+                if status == "waiting"
+                else None
+            )
+            detail = _value(state, "detail")
+            error_code = _value(state, "error_code")
+            if status == "completed":
+                error_code = "long_lived_runtime_completed_unexpectedly"
+                detail = "长期运行能力提前结束，未把外部候选或一次循环伪装成用户目标完成。"
+            error = (
+                {
+                    "code": str(error_code or "application_runtime_failed"),
+                    "message": str(detail or "长期运行能力失败。"),
+                }
+                if execution == "FAILED"
+                else None
+            )
+            changed = (
+                record.execution_status != execution
+                or record.control_state != control
+            )
+            connection.execute(
+                "UPDATE goal_runs SET execution_status = ?, control_state = ?, "
+                "waiting_reason_json = ?, error_json = ?, result_summary = ?, "
+                "source_event_cursor = ?, updated_at = ?, terminal_at = ? "
+                "WHERE goal_id = ?",
+                (
+                    execution,
+                    control,
+                    _json(waiting_reason) if waiting_reason else None,
+                    _json(error) if error else None,
+                    str(detail) if detail else None,
+                    source_cursor,
+                    now,
+                    (record.terminal_at or now) if terminal else record.terminal_at,
+                    goal_id,
+                ),
+            )
+            if changed:
+                self._event(
+                    connection,
+                    goal_id,
+                    "goal_projection_changed",
+                    {
+                        "execution_status": execution,
+                        "control_state": control,
+                        "source_status": status,
+                    },
+                    now,
+                )
+            return self._get(connection, goal_id)
+
+    def notifications(self, goal_id: str) -> list[GoalNotification]:
+        self.initialize()
+        with self._connection() as connection:
+            self._get(connection, goal_id)
+            rows = connection.execute(
+                "SELECT * FROM goal_notifications WHERE goal_id = ? "
+                "ORDER BY created_at, source_event_sequence",
+                (goal_id,),
+            ).fetchall()
+            return [_notification(row) for row in rows]
 
     def events(self, goal_id: str, *, after: int, limit: int) -> list[StoredEvent]:
         self.initialize()
@@ -817,6 +1318,14 @@ def _digest(value: Any) -> str:
     return hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
 
 
+def _owner_binding_ref(goal_id: str) -> str:
+    """Stable opaque owner-binding handle for a frozen external-owner plan."""
+
+    return "owner-binding:v1:" + hashlib.sha256(
+        f"ai-game:goal-owner-binding:{goal_id}".encode("utf-8")
+    ).hexdigest()
+
+
 def _repair_payload(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "repair_key": str(row["repair_key"]),
@@ -843,6 +1352,38 @@ def _completion_payload(row: sqlite3.Row) -> dict[str, Any]:
         "result_summary": str(row["result_summary"]),
         "created_at": str(row["created_at"]),
     }
+
+
+def _binding_plan(row: sqlite3.Row) -> CapabilityBindingPlan:
+    return CapabilityBindingPlan(
+        goal_id=str(row["goal_id"]),
+        revision=int(row["revision"]),
+        route_kind=str(row["route_kind"]),
+        binding_kind=str(row["binding_kind"]),
+        capability_ids=tuple(json.loads(row["capability_ids_json"])),
+        owner_kind=str(row["owner_kind"]) if row["owner_kind"] is not None else None,
+        owner_binding_ref=(
+            str(row["owner_binding_ref"])
+            if row["owner_binding_ref"] is not None
+            else None
+        ),
+        profile_id=str(row["profile_id"]) if row["profile_id"] is not None else None,
+        classification=str(row["classification"]),
+        rationale=str(row["rationale"]),
+        created_at=str(row["created_at"]),
+    )
+
+
+def _notification(row: sqlite3.Row) -> GoalNotification:
+    return GoalNotification(
+        notification_id=str(row["notification_id"]),
+        goal_id=str(row["goal_id"]),
+        source_event_sequence=int(row["source_event_sequence"]),
+        kind=str(row["kind"]),
+        summary=str(row["summary"]),
+        evidence_refs=tuple(json.loads(row["evidence_refs_json"])),
+        created_at=str(row["created_at"]),
+    )
 
 
 def _now() -> str:

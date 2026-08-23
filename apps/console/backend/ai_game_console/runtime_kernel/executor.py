@@ -44,6 +44,17 @@ class ActionExecutorPort(Protocol):
         """在设备坐标 (x, y) 处执行点击"""
         ...
 
+    def execute_long_press(
+        self,
+        device_id: str,
+        x: int,
+        y: int,
+        duration_ms: int = 600,
+        timeout_ms: int = 5000,
+    ) -> ActionExecutionResult:
+        """在设备坐标 (x, y) 处执行长按"""
+        ...
+
     def execute_swipe(
         self,
         device_id: str,

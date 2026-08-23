@@ -137,6 +137,25 @@ class AndroidObservationProvider:
             if window_result.returncode == 0
             else None
         )
+        if foreground_app is None:
+            # Android 15 builds may omit mCurrentFocus/mFocusedApp from the
+            # window dump while exposing the same read-only fact as
+            # topResumedActivity in the activity dump.
+            activity_result = self._run(
+                (
+                    self._adb(),
+                    "-s",
+                    serial,
+                    "shell",
+                    "dumpsys",
+                    "activity",
+                    "activities",
+                )
+            )
+            if activity_result.returncode == 0:
+                foreground_app = _parse_foreground_app(
+                    _text(activity_result.stdout)
+                )
 
         input_result = self._run(
             (self._adb(), "-s", serial, "shell", "dumpsys", "input")
@@ -287,6 +306,7 @@ def _parse_foreground_app(output: str) -> str | None:
     patterns = (
         r"mCurrentFocus=.*?\s(?:u\d+\s+)?([A-Za-z0-9_.]+)/(?:[A-Za-z0-9_.$]+)",
         r"mFocusedApp=.*?\s(?:u\d+\s+)?([A-Za-z0-9_.]+)/(?:[A-Za-z0-9_.$]+)",
+        r"(?:topResumedActivity|mResumedActivity|ResumedActivity).*?\su\d+\s+([A-Za-z0-9_.]+)/",
     )
     for pattern in patterns:
         match = re.search(pattern, output)

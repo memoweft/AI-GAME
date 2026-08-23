@@ -203,7 +203,17 @@ The platform is proved through three different verticals, not through three sepa
 
 1. **General phone operation**: a settings/battery goal demonstrates goal-to-device generality without application-specific scripting.
 2. **Repeat-run learning**: a user-authorized STZB daily goal demonstrates exploration, verification, recovery, memory promotion, and measurable improvement over repeated runs.
-3. **Long-lived external outcome**: a social-application goal demonstrates scheduling, incoming-event waits, conversation continuity, delayed outcome learning, candidate notification without automatic termination, continuous operation until explicit stop, and optional user takeover.
+3. **Long-lived mobile/application outcome**: a real application or social goal
+   demonstrates automatic discovery of the authorized device and logged-in app,
+   scheduling and incoming-event waits, bounded RuntimeKernel phone cycles,
+   fresh post-action verification, conversation/task continuity, delayed
+   outcome learning, candidate notification without automatic termination,
+   restart continuity, and continuous operation until explicit stop. A
+   specialized external owner is optional; its separate account, receipt, and
+   reconciliation requirements apply only when the frozen binding plan actually
+   selects that adapter.
+
+[constraint-source: USER_DECISION; ref: D22 U8 real mobile/application correction 2026-08-23]
 
 Passing one vertical does not imply passing the others.
 

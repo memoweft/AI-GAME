@@ -310,7 +310,7 @@ def test_production_composition_is_lazy_uses_runtime_data_dir_and_live_cloud_res
     assert runtime.shutdown_calls == 1
 
 
-def test_production_defaults_reuse_loopback_owner_and_local_gui_configuration(
+def test_production_explicit_owner_configuration_uses_loopback_owner_and_local_gui_configuration(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -319,6 +319,7 @@ def test_production_defaults_reuse_loopback_owner_and_local_gui_configuration(
         local_chat_endpoint="http://localhost:4243/v1",
         local_chat_model="configured-gui-model",
         local_chat_api_key="local-key",
+        soul_console_url="http://127.0.0.1:5000",
     )
     cloud = _MutableCloudConfiguration()
     cloud.provider = object()
@@ -371,6 +372,34 @@ def test_production_defaults_reuse_loopback_owner_and_local_gui_configuration(
     assert observation_port.vision.model == "configured-gui-model"
     assert observation_port.vision.api_key == "local-key"
     assert owner.capability_calls == 1
+    composition.runtime.shutdown()
+
+
+def test_production_composition_requires_an_explicit_owner_configuration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = replace(
+        build_settings(tmp_path),
+        local_chat_endpoint="http://127.0.0.1:4243/v1",
+        local_chat_model="configured-gui-model",
+    )
+    cloud = _MutableCloudConfiguration()
+    cloud.provider = object()
+
+    def unexpected_owner_factory(*_args, **_kwargs):
+        raise AssertionError("an unconfigured owner must not be constructed")
+
+    monkeypatch.setattr(composition_module, "SoulOwnerClient", unexpected_owner_factory)
+    composition = compose_soul_application_runtime(settings, cloud)
+
+    composition.runtime.startup()
+    assert composition.runtime._lifecycle_thread is None
+
+    with pytest.raises(SoulApplicationUnavailable) as captured:
+        composition.runtime.start(PROFILE_ID, "start-without-owner")
+
+    assert captured.value.reason == "owner_not_configured"
     composition.runtime.shutdown()
 
 
@@ -895,7 +924,7 @@ def test_lifecycle_reconciler_repairs_dating_restart_without_new_instance(
     assert ("PUT", "running") in owner.scheduler_calls
     first_running_puts = owner.scheduler_calls.count(("PUT", "running"))
 
-    # Simulate a reverse restart: dating-copilot lost its in-memory worker,
+    # Simulate a reverse restart: the external owner lost its in-memory worker,
     # while the AI core and durable desired receipt remain alive.
     owner.scheduler_desired_state = "stopped"
     owner.scheduler_effective_state = "stopped"
@@ -2080,6 +2109,7 @@ def test_default_lifespan_recovers_same_active_instance_when_dependencies_are_re
         cloud_chat_endpoint="https://cloud.example.test/v1/chat/completions",
         cloud_chat_model="cloud-model",
         cloud_chat_api_key="cloud-key",
+        soul_console_url="http://127.0.0.1:5000",
     )
     application_db = settings.data_dir / APPLICATION_DATABASE_FILENAME
     _SQLiteApplicationStore(application_db).accept_start(

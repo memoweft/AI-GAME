@@ -60,6 +60,41 @@ class GoalControlCreate(_ApiModel):
         return _inert_key(value)
 
 
+class GoalApplicationOutcomeCreate(_ApiModel):
+    event_id: str = Field(min_length=1, max_length=128)
+    event_type: Literal[
+        "delayed_positive",
+        "delayed_negative",
+        "no_response",
+        "user_approval",
+        "user_rejection",
+    ]
+    evidence_refs: list[str] = Field(min_length=1, max_length=16)
+    attribution_scope: str = Field(min_length=1, max_length=512)
+    confidence: float = Field(ge=0.0, le=1.0)
+
+    @field_validator("event_id")
+    @classmethod
+    def normalize_event_id(cls, value: str) -> str:
+        return _inert_key(value)
+
+    @field_validator("evidence_refs")
+    @classmethod
+    def normalize_evidence_refs(cls, value: list[str]) -> list[str]:
+        normalized = [item.strip() for item in value]
+        if any(not item or len(item) > 512 for item in normalized):
+            raise ValueError("evidence_refs must contain non-blank values up to 512 characters")
+        return normalized
+
+    @field_validator("attribution_scope")
+    @classmethod
+    def normalize_attribution_scope(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("must not be blank")
+        return value
+
+
 class GoalTargetSelection(_ApiModel):
     target_id: str = Field(min_length=1, max_length=512)
 
@@ -98,6 +133,22 @@ def create_goal_router(service: GoalService) -> APIRouter:
             service.send_message(goal_id, request.content, request.idempotency_key), service
         )
 
+    @router.post("/{goal_id}/application-outcomes", status_code=202)
+    def report_application_outcome(
+        goal_id: str, request: GoalApplicationOutcomeCreate
+    ) -> dict[str, Any]:
+        return _payload(
+            service.report_application_outcome(
+                goal_id,
+                event_id=request.event_id,
+                event_type=request.event_type,
+                evidence_refs=tuple(request.evidence_refs),
+                attribution_scope=request.attribution_scope,
+                confidence=request.confidence,
+            ),
+            service,
+        )
+
     @router.post("/{goal_id}/controls", status_code=202)
     def control_goal(goal_id: str, request: GoalControlCreate) -> dict[str, Any]:
         return _payload(
@@ -130,6 +181,8 @@ def create_goal_router(service: GoalService) -> APIRouter:
 
 def _payload(record: GoalRecord, service: GoalService) -> dict[str, Any]:
     completion = service.store.completion(record.id)
+    binding_plan = service.store.binding_plan(record.id)
+    notifications = service.store.notifications(record.id)
     daily_checklist = service.daily_checklist(record.id)
     incomplete = []
     if completion is not None:
@@ -159,10 +212,43 @@ def _payload(record: GoalRecord, service: GoalService) -> dict[str, Any]:
             "task_id": record.bound_task_id,
             "target_id": record.target_id,
             "completion_gate": (
+                "verified_language_result"
+                if record.binding_kind == "local_language"
+                and record.execution_status == "COMPLETED"
+                else (
+                    "continuous_external_outcome"
+                    if binding_plan is not None
+                    and binding_plan.owner_kind == "external_owner"
+                    else "continuous_managed_goal"
+                )
+                if record.binding_kind == "application_runtime"
+                else (
+                    "continuous_mobile_goal"
+                    if record.bound_task_id is not None
+                    else "continuous_mobile_goal_pending_runtime"
+                )
+                if record.binding_kind == "long_lived_mobile_composition"
+                else
                 "verified" if completion and completion["verdict"] == "verified"
                 else completion["verdict"] if completion else "pending_u3"
             ),
         },
+        "binding_plan": (
+            {
+                "revision": binding_plan.revision,
+                "route_kind": binding_plan.route_kind,
+                "binding_kind": binding_plan.binding_kind,
+                "capability_ids": list(binding_plan.capability_ids),
+                "owner_kind": binding_plan.owner_kind,
+                "owner_binding_ref": binding_plan.owner_binding_ref,
+                "profile_id": binding_plan.profile_id,
+                "classification": binding_plan.classification,
+                "rationale": binding_plan.rationale,
+                "created_at": binding_plan.created_at,
+            }
+            if binding_plan is not None
+            else None
+        ),
         "environment_state": service.store.environment(record.id),
         "repair_attempts": service.store.repairs(record.id),
         "waiting_reason": record.waiting_reason,
@@ -173,6 +259,17 @@ def _payload(record: GoalRecord, service: GoalService) -> dict[str, Any]:
         "verified_facts": completion["verified_facts"] if completion else [],
         "daily_checklist": daily_checklist,
         "uncompleted_items": incomplete,
+        "notifications": [
+            {
+                "id": item.notification_id,
+                "kind": item.kind,
+                "summary": item.summary,
+                "evidence_refs": list(item.evidence_refs),
+                "source_event_sequence": item.source_event_sequence,
+                "created_at": item.created_at,
+            }
+            for item in notifications
+        ],
         "created_at": record.created_at,
         "updated_at": record.updated_at,
         "terminal_at": record.terminal_at,

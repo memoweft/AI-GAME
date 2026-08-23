@@ -9,6 +9,12 @@
 > migration-era facts, not current blockers or product boundaries.
 >
 > [constraint-source: PRODUCT_SPEC; ref: `product/00_INDEX.md` section 1]
+>
+> **D20 retirement override.** References below to `F:\dating-copilot`, its
+> scheduler, or its Soul owner contract are historical implementation evidence.
+> That project must not be started, probed, or selected for current U8. Generic
+> long-lived mobile goals must not infer `soul-reply-v1` or an external owner;
+> D22 requires ApplicationRuntime lifecycle plus bounded RuntimeKernel cycles.
 
 ## Product boundary
 
@@ -46,12 +52,8 @@ Control-plane HTTP Adapter
         |      +-- content-bound start and command idempotency
         |      +-- one serialized coordinator + revision/dispatch fence
         |      +-- inspect-only unfinished-intent reconciliation / no replay
-        |      `-- soul-reply-v1 Profile
-        |             +-- dating-copilot owner observation/reserve/dispatch/inspect
-        |             +-- loopback local visual-facts Adapter
-        |             +-- transient cloud reply Policy
-        |             +-- owner-proof Verifier
-        |             `-- delayed-outcome reply strategy store
+        |      `-- historical soul-reply-v1 specialized-owner compatibility
+        |             `-- retired D20-excluded owner wire contract; not active composition
         +-- MobileTaskRuntime Module
         |      +-- durable TaskState / TaskPlan / Subgoal ledger
         |      +-- one coordinator and bounded task queue
@@ -343,20 +345,25 @@ verification, and Reflection; Chat and Learning hold it for their own physical
 session boundaries. A held target fails with `target_busy` before a competing
 path calls its device/model loop, so these three paths cannot interleave on one
 target inside this Python process. This lease is process-local only: it does not
-coordinate another console process, direct ADB, external device tools, or the
-separately owned dating-copilot controller.
+coordinate another console process, direct ADB, or external device tools. The
+retired dating-copilot controller was also outside this lease; that historical
+fact is not current execution authority.
 
-Soul is the production `ApplicationRuntime` Profile `soul-reply-v1`. AI-GAME
-owns the long-lived instance, observation/policy/verification loop, local visual
-interpretation, transient cloud draft, revision fence and delayed reply-strategy
-learning. `F:\dating-copilot` remains the sole device and physical-ledger owner;
-it owns stable transcript/revision capture, exact conversation identity,
-pre-click validation, one physical send, echo proof and uncertain-send
-reconciliation. Neither process opens the other's database or controls the
-other's process lifecycle. Explicit Application lifecycle commands may change
-only the scheduler desired state exposed by the owner HTTP contract.
+### Historical Soul specialized-owner contract
 
-The Soul gateway keeps dependency probe and runtime factory calls outside its
+`soul-reply-v1` is a retained optional `ApplicationRuntime` Adapter contract,
+not the current generic long-lived mobile composition. In its historical
+integration, AI-GAME owned the long-lived instance,
+observation/policy/verification loop, local visual interpretation, transient
+cloud draft, revision fence and delayed reply-strategy learning, while
+`F:\dating-copilot` owned the specialized device ledger, stable
+transcript/revision capture, exact conversation identity, pre-click validation,
+one physical send, echo proof and uncertain-send reconciliation. D20 retired
+that owner from current use. These retained seams must not be read as a live
+owner, a scheduler-readiness claim, or a prerequisite for RuntimeKernel
+operation of an already logged-in application.
+
+The retained Soul gateway code keeps dependency probe and runtime factory calls outside its
 state lock so those transports cannot hold the shutdown fence. A dedicated
 initialization lock makes construction single-flight. Closed state is checked
 after the probe and again before publication; if shutdown wins the race, the
@@ -424,11 +431,12 @@ settles through an owner GET returning `terminal_no_replay`; the resulting
 nonterminal `confirmed_failure` permits a fresh observation/re-plan without
 replaying the old intent or draft.
 
-The scheduler and reply loop have independent responsibilities. The managed
-dating-copilot scheduler uses match opportunities throughout the day, opens a
-successful match immediately, performs bounded unread discovery, and reaches
-Planet only after trustworthy same-day zero quota. It does not draft or send
-ordinary replies; `soul-reply-v1` owns that work and delayed learning.
+In the retired integration, the scheduler and reply loop had independent
+responsibilities. The managed dating-copilot scheduler used match opportunities
+throughout the day, opened a successful match immediately, performed bounded
+unread discovery, and reached Planet only after trustworthy same-day zero
+quota. It did not draft or send ordinary replies; `soul-reply-v1` handled that
+work and delayed learning.
 
 `soul-scheduler-lifecycle.db` is a content-free singleton control receipt. The
 complete Soul archive is aggregated across instances: any nonterminal
@@ -469,8 +477,9 @@ at the owner, local owner-binding and send-proof writes are best-effort; their
 failure leaves repairable lineage and cannot downgrade delivery, suppress the
 one core-fenced dispatch, or authorize a second reserve/send.
 
-The browser manages Soul through `/api/v1/application-instances` and reads the
-separate safe scheduler projection at
+The compatibility browser surface can describe an explicitly configured
+specialized Soul Adapter through `/api/v1/application-instances` and read its
+safe scheduler projection at
 `GET /api/v1/application-profiles/soul-reply-v1/scheduler`. That projection
 contains only profile, `state`, desired/effective states, controller match,
 stable code, and observation time; it has no scheduler write route, controller
@@ -539,10 +548,12 @@ raw frames.
 
 Completing the final Subgoal may atomically add `max(version)+1` SkillMemory.
 An explicit public `skill_id` maps to an internal `legacy:` scope. If it is
-omitted, the production `SkillScopeResolver` selects an `auto:` namespace from
-the normalized goal: scoped 率土之滨 launch/tutorial/daily/general families or a
-generic exact-goal hash; it returns no MobileTask scope for Soul because the
-`soul-reply-v1` Profile owns separate delayed-outcome reply learning. Automatic
+omitted, the legacy `SkillScopeResolver` selects an `auto:` namespace from the
+normalized goal: scoped 率土之滨 launch/tutorial/daily/general families or a
+generic exact-goal hash. That v1 resolver returned no MobileTask SkillMemory
+scope for Soul because the snapshot used a separate profile store. This storage
+rule does not prohibit a universal GoalRun or RuntimeKernel from operating an
+authorized Soul application. Automatic
 scope ignores `target_id` by
 policy, permitting procedure reuse across targets without claiming those
 targets were tested. Procedure, strategy, and evidence come only from
@@ -640,13 +651,12 @@ client whose endpoint resolves syntactically to loopback.
   future training/custom/sandbox acceptance line is documented in
   `docs/gameplay-readiness.md`.
 
-The primary browser information architecture has exactly four entries:
-one-sentence start, Soul, Device, and Settings. Chat and
-GameLearning APIs/history, and legacy Workflow, Run, and Approval routes and
-records, remain backend compatibility Interfaces rather than first-level
-workspaces and are not executed by MobileTask. There is no implemented
-universal Run or router that converts an arbitrary MobileTask sentence into
-Chat, LearningJob, or Soul operations. Source code, automated tests, built assets,
+In this legacy snapshot, the primary browser information architecture had four
+entries: one-sentence start, Soul, Device, and Settings. The current v2
+universal GoalRun ingress and binding-plan router now exist. The remaining U8
+gap is the real long-lived-mobile ApplicationRuntime-to-RuntimeKernel
+composition and acceptance, not a requirement to restore the typed Soul owner
+workspace. Source code, automated tests, built assets,
 code loaded by a running process, real-device verification,
 SkillMemory/PolicyMemory promotion, and gameplay-readiness evidence remain
 separate facts. This
@@ -655,4 +665,5 @@ particular local model/device is currently ready. One supplied real-task record
 does establish only this narrow fact: Task
 `daac81a7-1af9-47e3-9566-66e73509a0fd` completed after 23 ActionAttempts under
 `auto:stzb/tutorial/v1`. It does not establish general 率土之滨 competence. The
-new `soul-reply-v1` reply chain still requires this round's live acceptance.
+optional `soul-reply-v1` compatibility chain has no current live acceptance;
+that does not block or define the generic long-lived-mobile route.

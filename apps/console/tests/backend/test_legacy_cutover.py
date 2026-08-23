@@ -152,7 +152,9 @@ def test_kernel_active_fails_closed_without_autonomous_composition(
         )
 
 
-def test_kernel_active_does_not_start_legacy_worker_islands(tmp_path: Path) -> None:
+def test_kernel_active_starts_u8_application_capability_not_legacy_worker_islands(
+    tmp_path: Path,
+) -> None:
     class LegacyLifecycle:
         def __init__(self) -> None:
             self.start_calls = 0
@@ -196,10 +198,10 @@ def test_kernel_active_does_not_start_legacy_worker_islands(tmp_path: Path) -> N
 
     assert chat.start_calls == 0
     assert game.start_calls == 0
-    assert application.start_calls == 0
+    assert application.start_calls == 1
     assert chat.stop_calls == 0
     assert game.stop_calls == 0
-    assert application.stop_calls == 0
+    assert application.stop_calls == 1
 
 
 @pytest.mark.parametrize("runtime_mode", ["legacy", "draining", "kernel_active"])

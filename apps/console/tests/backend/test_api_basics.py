@@ -145,6 +145,20 @@ def test_settings_honor_project_and_data_overrides(tmp_path: Path) -> None:
     )
 
 
+def test_settings_require_an_explicit_soul_owner_endpoint(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    unconfigured = Settings.from_env({"AI_GAME_PROJECT_ROOT": str(project_root)})
+    configured = Settings.from_env(
+        {
+            "AI_GAME_PROJECT_ROOT": str(project_root),
+            "AI_GAME_SOUL_CONSOLE_URL": "http://127.0.0.1:5000/",
+        }
+    )
+
+    assert unconfigured.soul_console_url is None
+    assert configured.soul_console_url == "http://127.0.0.1:5000"
+
+
 def test_settings_load_explicit_loopback_mobile_role_binding_without_echoing_key(
     tmp_path: Path,
 ) -> None:

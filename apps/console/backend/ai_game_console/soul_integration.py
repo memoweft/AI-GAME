@@ -211,32 +211,45 @@ class SoulIntegration:
     ``workspace()``, ``conversation()`` and ``command()`` are the only public
     interface. They own upstream endpoint selection, field filtering, partial
     read degradation and command idempotency so AI-GAME routes never proxy raw
-    dating-copilot payloads.
+    historical-owner payloads.
     """
 
     def __init__(
         self,
-        transport: SoulTransport,
+        transport: SoulTransport | None,
         *,
-        console_url: str = "http://127.0.0.1:5000",
+        console_url: str | None = None,
         receipt_store: SoulReceiptStore | None = None,
     ) -> None:
         self._transport = transport
-        self._console_url = _validated_loopback_url(console_url)
+        self._console_url = (
+            _validated_loopback_url(console_url)
+            if console_url is not None
+            else None
+        )
         self._receipt_store = receipt_store or SoulReceiptStore()
 
     @classmethod
     def from_settings(cls, settings: Any) -> "SoulIntegration":
+        console_url = settings.soul_console_url
         return cls(
-            LoopbackSoulHttpTransport(
-                settings.soul_console_url,
-                timeout_seconds=settings.soul_request_timeout_seconds,
+            (
+                LoopbackSoulHttpTransport(
+                    console_url,
+                    timeout_seconds=settings.soul_request_timeout_seconds,
+                )
+                if console_url is not None
+                else None
             ),
-            console_url=settings.soul_console_url,
+            console_url=console_url,
             receipt_store=SoulReceiptStore(settings.data_dir / "soul-integration.db"),
         )
 
     def workspace(self) -> dict[str, Any]:
+        if self._transport is None:
+            return _unavailable_workspace(
+                "unavailable", "soul_owner_not_configured", self._console_url
+            )
         try:
             status_response = self._request("GET", "/api/status")
         except (SoulTransportTimeout, SoulTransportUnavailable):
@@ -278,6 +291,12 @@ class SoulIntegration:
                 code="soul_conversation_invalid",
                 message="Soul 对话标识无效。",
                 status_code=422,
+            )
+        if self._transport is None:
+            raise SoulIntegrationError(
+                code="soul_owner_not_configured",
+                message="Soul 外部 owner 尚未配置。",
+                status_code=503,
             )
         try:
             response = self._request("GET", f"/api/matches/{conversation_id}")
@@ -354,6 +373,8 @@ class SoulIntegration:
         path: str,
         body: dict[str, Any],
     ) -> dict[str, Any]:
+        if self._transport is None:
+            return _command_receipt(command, client_request_id, "rejected")
         try:
             response = self._request("POST", path, body)
         except (SoulTransportTimeout, SoulTransportUnavailable):
@@ -373,6 +394,8 @@ class SoulIntegration:
         path: str,
         body: dict[str, Any] | None = None,
     ) -> SoulHttpResponse:
+        if self._transport is None:
+            raise SoulTransportUnavailable()
         return self._transport.request(method, path, body)
 
 
@@ -511,7 +534,7 @@ def _is_success_value(value: Any) -> bool:
 def _unavailable_workspace(
     connection: Literal["unavailable", "incompatible"],
     status_error: str,
-    console_url: str,
+    console_url: str | None,
 ) -> dict[str, Any]:
     return {
         "connection": connection,

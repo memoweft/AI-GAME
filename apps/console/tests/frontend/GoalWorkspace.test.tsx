@@ -29,11 +29,13 @@ function goal(overrides: Record<string, unknown> = {}) {
     },
     execution_status: 'WAITING_CONFIGURATION',
     control_state: 'AUTOMATED',
+    resume_execution_status: null,
     active_stage: null,
     binding: {
       kind: 'mobile_task_compat', state: 'WAITING_CONFIGURATION',
       task_id: null, target_id: null, completion_gate: 'pending_u3',
     },
+    binding_plan: null,
     environment_state: {
       state: 'WAITING_CONFIGURATION',
       facts: [{ capability: 'android.discovery', state: 'WAITING_CONFIGURATION', detail: '未找到设备' }],
@@ -47,6 +49,7 @@ function goal(overrides: Record<string, unknown> = {}) {
     completion_history: [],
     verified_facts: [],
     uncompleted_items: [],
+    notifications: [],
     created_at: '2026-08-20T00:00:00Z',
     updated_at: '2026-08-20T00:00:01Z',
     terminal_at: null,
@@ -190,5 +193,147 @@ describe('U2 统一目标入口', () => {
     expect(screen.getByText('已验证结果')).toBeInTheDocument();
     expect(screen.getByText('电量84%')).toBeInTheDocument();
     expect(screen.getByText('已返回桌面')).toBeInTheDocument();
+  });
+});
+
+describe('U8 长期目标投影', () => {
+  it('自动事件等待不冒充人工门禁，并显示候选通知和统一控制', async () => {
+    const user = userEvent.setup();
+    let controlAction: string | null = null;
+    const longLived = goal({
+      original_goal: '通过已显式绑定的专用适配器持续处理候选，直到我停止',
+      execution_status: 'WAITING_EXTERNAL',
+      waiting_reason: {
+        code: 'TIME_OR_INBOUND_EVENT',
+        message: '长期目标正在等待下一次定时唤醒或授权入站事件。',
+      },
+      binding: {
+        kind: 'application_runtime', state: 'BOUND', task_id: 'application-1',
+        target_id: 'owner-binding:v1:test', completion_gate: 'continuous_external_outcome',
+      },
+      binding_plan: {
+        revision: 1,
+        route_kind: 'explicit_external_application',
+        binding_kind: 'application_runtime',
+        capability_ids: ['long_lived.wait', 'application_profile.soul-reply-v1'],
+        owner_kind: 'external_owner',
+        owner_binding_ref: 'owner-binding:v1:test',
+        profile_id: 'soul-reply-v1',
+        classification: 'long_lived_application_goal',
+        rationale: 'explicit specialized adapter selected for this frozen plan',
+        created_at: '2026-08-23T08:00:00Z',
+      },
+      notifications: [{
+        id: 'candidate-1', kind: 'candidate',
+        summary: '发现一个可继续了解的候选；目标继续运行。',
+        evidence_refs: ['candidate-evidence-1'], source_event_sequence: 3,
+        created_at: '2026-08-23T08:00:00Z',
+      }],
+      environment_state: {
+        state: 'READY', facts: [], selected_target_id: 'owner-binding:v1:test', target_options: [],
+      },
+    });
+    const paused = goal({
+      ...longLived,
+      execution_status: 'RUNNING',
+      control_state: 'PAUSED',
+      waiting_reason: null,
+    });
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/api/v2/goals?limit=100')) {
+        return json({ items: [longLived], count: 1 });
+      }
+      if (url.endsWith('/controls') && init?.method === 'POST') {
+        controlAction = JSON.parse(String(init.body)).action;
+        return json(paused);
+      }
+      if (url.endsWith('/api/v2/goals/goal-1')) return json(longLived);
+      throw new Error(`Unexpected ${url}`);
+    }));
+
+    render(<GoalWorkspace />);
+    expect(await screen.findByText('等待下一次事件')).toBeInTheDocument();
+    expect(screen.getByText('正在等待事件，不需要你操作')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '重新检查' })).not.toBeInTheDocument();
+    expect(screen.getByText(/发现一个可继续了解的候选/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '暂停' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '接管' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '停止' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '暂停' }));
+    await waitFor(() => expect(controlAction).toBe('pause'));
+    expect(await screen.findByRole('button', { name: '继续' })).toBeInTheDocument();
+  });
+
+  it('内部长期移动组合未就绪时不冒充 owner 或人工门禁且仍可停止', async () => {
+    const user = userEvent.setup();
+    let controlAction: string | null = null;
+    const unbound = goal({
+      original_goal: '持续认识适合长期相处的人，直到我停止',
+      execution_status: 'WAITING_CONFIGURATION',
+      waiting_reason: {
+        code: 'long_lived_mobile_runtime_not_composed',
+        message: '长期移动目标已冻结通用能力计划，但内部长期运行和设备周期尚未组合。',
+      },
+      binding: {
+        kind: 'long_lived_mobile_composition', state: 'WAITING_CONFIGURATION', task_id: null,
+        target_id: null, completion_gate: 'continuous_mobile_goal_pending_runtime',
+      },
+      binding_plan: {
+        revision: 1,
+        route_kind: 'long_lived_mobile_application',
+        binding_kind: 'long_lived_mobile_composition',
+        capability_ids: ['long_lived.wait', 'android.observe', 'android.action', 'local.goal_verification', 'experience.record'],
+        owner_kind: null,
+        owner_binding_ref: null,
+        profile_id: null,
+        classification: 'long_lived_application_goal',
+        rationale: 'long-lived mobile goal requires bounded RuntimeKernel cycles',
+        created_at: '2026-08-23T08:00:00Z',
+      },
+      environment_state: {
+        state: 'WAITING_CONFIGURATION',
+        facts: [{
+          capability: 'long_lived.mobile_application', state: 'WAITING_CONFIGURATION',
+          detail: 'ApplicationRuntime 与 RuntimeKernel 尚未组合。',
+        }],
+        selected_target_id: null,
+        target_options: [],
+      },
+    });
+    const cancelled = goal({
+      ...unbound,
+      execution_status: 'CANCELLED',
+      waiting_reason: null,
+      terminal_at: '2026-08-23T08:00:02Z',
+      binding: {
+        kind: 'long_lived_mobile_composition', state: 'CANCELLED', task_id: null,
+        target_id: null, completion_gate: 'continuous_mobile_goal_pending_runtime',
+      },
+    });
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/api/v2/goals?limit=100')) {
+        return json({ items: [unbound], count: 1 });
+      }
+      if (url.endsWith('/api/v2/goals/goal-1/controls') && init?.method === 'POST') {
+        controlAction = JSON.parse(String(init.body)).action;
+        return json(cancelled);
+      }
+      if (url.endsWith('/api/v2/goals/goal-1')) return json(unbound);
+      throw new Error(`Unexpected ${url}`);
+    }));
+
+    render(<GoalWorkspace />);
+
+    expect(await screen.findByRole('button', { name: '停止' })).toBeEnabled();
+    expect(screen.getByText('内部长期移动能力尚未组合')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '重新检查' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '暂停' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '接管' })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '停止' }));
+    await waitFor(() => expect(controlAction).toBe('stop'));
+    expect(await screen.findByText('已停止')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '停止' })).not.toBeInTheDocument();
   });
 });

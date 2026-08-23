@@ -1,14 +1,16 @@
 # AI-GAME
 
-> **产品规范与当前状态入口**：唯一权威产品定义、实施路线、验收规则和执行指针位于 [`docs/product/00_INDEX.md`](docs/product/00_INDEX.md)。当前默认有限手机目标路径已经在 U7 本地切换为 Kernel；准确能力与证据边界见 [`docs/product/02_CURRENT_STATE.md`](docs/product/02_CURRENT_STATE.md) 第 14 节。
+> **产品规范与当前状态入口**：唯一权威产品定义、实施路线、验收规则和执行指针位于 [`docs/product/00_INDEX.md`](docs/product/00_INDEX.md)。当前默认有限手机目标路径已经在 U7 本地切换为 Kernel；U8 仍为 `PARTIAL`，准确能力与证据边界见 [`docs/product/02_CURRENT_STATE.md`](docs/product/02_CURRENT_STATE.md) 第 15 节。
 >
 > [constraint-source: PRODUCT_SPEC; ref: `docs/product/00_INDEX.md` section 1]
 >
 > **兼容文档边界**：本 README 的多数组件、命令和执行链说明保留的是 Legacy/迁移期兼容快照，不是当前默认组合或 U0-U9 状态真源。不要从下文的旧现在时推导当前 active work order、默认模型、router 缺口或验收 gate。
+>
+> **D20 退役覆盖**：下文所有 `F:\dating-copilot` 和 Soul owner 链路仅保留为历史实现/接口证据。该项目已经退役，不得启动、探测或用于当前 U8。普通长期移动目标不得据此推导 `external_owner.soul` 或 `soul-reply-v1`；当前目标路线是 ApplicationRuntime 生命周期与有界 RuntimeKernel 手机周期的组合。
 
 AI-GAME 是一个通用的本机手机智能体平台。普通有限手机目标当前经统一 GoalRun 入口绑定到 Kernel；`MobileTaskRuntime` 作为 Legacy 只读历史和显式回滚兼容路径保留。`ApplicationRuntime` 仍为长期应用 Profile 提供持久周期能力。
 
-`F:\dating-copilot` 保持独立，并且是 Soul **唯一的设备执行与物理 ledger owner**。AI-GAME 通过 `profile_id=soul-reply-v1` 负责长期应用编排、本地视觉、云端临时回复和学习 lineage；它只通过 loopback owner Interface 请求 observation、reserve、dispatch、inspect 和 managed scheduler desired state，不复制项目代码、数据库或 ADB 控制逻辑。
+历史上，`F:\dating-copilot` 曾作为 `soul-reply-v1` 的专用设备与物理 ledger owner；D20 已将该集成从当前 U8 排除。`soul-reply-v1` 代码只作为可选专用 Adapter 保留，不是普通长期应用目标的默认路由或前置条件。
 
 Soul 只是 AI-GAME 支持的一个应用，不是产品本身。Mobile-Agent 只作为设计与实现参考；AI-GAME 没有把 Mobile-Agent 安装成父运行时，也不依赖它才能启动。
 
@@ -31,10 +33,10 @@ Soul 只是 AI-GAME 支持的一个应用，不是产品本身。Mobile-Agent �
 - 当前设备循环没有固定动作步数上限，只在用户主动停止、设备/ADB 或模型异常，或者本地模型返回 `terminate` 时结束；这是现状缺口，vNext 要求加入有界的动作、时间和恢复预算，不能把无限循环当作目标能力；
 - 若兼容旧版 GUI-Owl 的 `interact` 输出，控制台只记录一次重定向并要求模型根据新画面继续规划，不会转为人工暂停；
 - 发现并展示当前 Android ADB 目标、连接类型、能力、模型/执行器状态、智能任务进度和活动事件；
-- 通过 Soul Application 创建或恢复 `soul-reply-v1` 长期实例，追加语气要求、暂停、恢复或停止；dating-copilot managed scheduler 负责全天匹配和匹配后即时开场，ApplicationRuntime 负责普通回复与延迟学习；原始截图只交给本地视觉，云端只接收文字 transcript 与结构化本地视觉事实，最终发送仍由 dating-copilot 在同轮 conversation revision 下复核和执行；
+- 保留 `soul-reply-v1` 专用 Adapter 和工作台的兼容读写表面，但其历史 owner 已退役，当前不得据此启动真实 Soul 周期或声称 scheduler ready；普通长期移动目标走统一 Goal composer，并在内部 ApplicationRuntime + RuntimeKernel 组合补齐前诚实等待；
 - 停止正在处理的一轮对话。停止后不会再发送新动作，但已经传输到设备的原子动作无法撤回。
 
-当前自动闭环接入 Android ADB，可绑定发现到的模拟器、USB 或无线连接的手机/平板；Windows 本机目标仍可展示，但 Windows 软件的鼠标键盘执行 Adapter 尚未接入。前端一级导航只有 **一句话开始 / Soul / 设备 / 设置**。Chat、Game Learning、Workflow、Run 和 Approval 的后端 routes 与历史记录为兼容/高级用途保留，不是一级工作台，也不会被 MobileTask worker 自动执行。当前没有一个会把自然语言自动路由成 Chat、LearningJob 或 Soul 操作的 universal Run/router。
+当前自动闭环接入 Android ADB，可绑定发现到的模拟器、USB 或无线连接的手机/平板；Windows 本机目标仍可展示，但 Windows 软件的鼠标键盘执行 Adapter 尚未接入。前端一级导航只有 **一句话开始 / Soul / 设备 / 设置**。Chat、Game Learning、Workflow、Run 和 Approval 的后端 routes 与历史记录为兼容/高级用途保留。v2 Goal composer 已能冻结有限手机、纯语言、本地长期和长期移动能力计划；长期移动计划当前仍缺少 ApplicationRuntime + RuntimeKernel 组合，不会默认转去 Soul owner。
 
 代码、自动测试、已加载运行时和真实设备结果必须分开陈述。当前已有一条率土之滨真实任务完成记录：Task `daac81a7-1af9-47e3-9566-66e73509a0fd`，共 23 次 ActionAttempt，技能作用域 `auto:stzb/tutorial/v1`。它只证明这一条任务的完成事实，不证明通用游戏能力。新的 Soul 回复链仍待本轮 live 验收，不能据代码或测试声称已经实机跑通。
 
@@ -46,7 +48,7 @@ Soul 只是 AI-GAME 支持的一个应用，不是产品本身。Mobile-Agent �
 
 ## 通用 ApplicationRuntime 平台
 
-`ApplicationRuntime` 是应用循环的深 Module。一个 Profile 注入 `ObservationPort`、`Policy`、`ExecutionOwner`、`Verifier`、可选 `MemoryGate` 和持久化脱敏投影；调用方只管理实例，不编排截图、模型请求、物理 ledger 或恢复步骤。当前生产 Application Profile 是 `soul-reply-v1`，Soul 只是这个通用 Interface 的一个 Adapter 组合。
+`ApplicationRuntime` 是应用循环的深 Module。一个 Profile 注入 `ObservationPort`、`Policy`、`ExecutionOwner`、`Verifier`、可选 `MemoryGate` 和持久化脱敏投影；调用方只管理实例，不编排截图、模型请求、物理 ledger 或恢复步骤。当前可达的 `local-managed-v1` 是无设备连续性能力；`soul-reply-v1` 是未获当前真实 owner 验收的可选专用 Adapter，不是通用长期移动组合。
 
 调用 Interface 为：
 
@@ -262,53 +264,8 @@ MobileTask 不调用云端聊天模型：Planner、Executor、BEFORE/AFTER 摘�
 相关目录规则见 [`docs/runtime-layout.md`](docs/runtime-layout.md)，MobileTask 设计与精确契约见 [`docs/mobile-task-runtime.md`](docs/mobile-task-runtime.md) 和 [`contracts/mobile-task-v1.md`](contracts/mobile-task-v1.md)，其余控制面 HTTP 与状态契约见 [`contracts/control-plane-v1.md`](contracts/control-plane-v1.md)，有界学习契约见 [`contracts/game-learning-v1.md`](contracts/game-learning-v1.md)。
 实时游戏控制尚未实现；训练/自定义/沙盒限定的历史候选架构与遥测说明见 `docs/gameplay-readiness.md`，但其中的候选 gate 不自动成为 U0-U9 前置条件。
 
-## Soul Application Profile
+## Historical Soul specialized-owner compatibility
 
-Soul 工作台使用通用 `/api/v1/application-instances` Interface；启动时固定提交 `profile_id=soul-reply-v1`，之后用 `Input`、`Pause`、`Resume`、`Stop` 管理同一个长期实例。浏览器不直接跨端口调用 Soul，也不会读取 dating-copilot 的 SQLite、导入它的 Python 包或接触 ADB。
+旧 `soul-reply-v1` / `F:\dating-copilot` owner 流程只保留为历史契约、ledger、at-most-once 和 no-replay 证据。D20 已把该项目从当前执行中排除：不得启动它、探测 `127.0.0.1:5000`、设置隐式 `AI_GAME_SOUL_CONSOLE_URL`，也不得把这个兼容章节当成普通 Soul 或长期移动目标的路由说明。
 
-每个回复周期为：
-
-```text
-dating-copilot owner 捕获一条到期 pending inbound、稳定 transcript、revision 与 PNG
-→ AI-GAME 本地视觉只消费 PNG，并立即丢弃图片正文
-→ 云端模型只接收 transcript、结构化本地视觉事实、当前策略与 owner 指令
-→ ApplicationRuntime 持久化脱敏 intent，并执行最后 revision fence
-→ dating-copilot reserve 物理意图
-→ dating-copilot 在同一个 conversation_revision 上再次 preflight 后 dispatch
-→ inspect owner 物理 ledger，确认、等待 reconciliation 或 terminal no-replay
-```
-
-AI-GAME 使用的 owner v1 loopback Interface 是：
-
-- `GET /api/application-owner/v1/capabilities`；
-- `POST /api/application-owner/v1/soul/observations`，body 为 `{"contract_version":"v1"}`；
-- `POST /api/application-owner/v1/soul/intents`，body 含 `application_intent_id`、`scope_ref` 和单条 `draft.text`；
-- `POST /api/application-owner/v1/soul/intents/{owner_ref}/dispatch`，再次携带 `scope_ref`、`preflight.conversation_revision` 和同一 `draft.text`，供 owner 校验不可变 hash；
-- `GET /api/application-owner/v1/soul/intents/{owner_ref}`；恢复 reserve 绑定时可按 `GET /api/application-owner/v1/soul/application-intents/{application_intent_id}` 查找 owner ref。
-- `GET /api/application-owner/v1/soul/scheduler` 与 `PUT /api/application-owner/v1/soul/scheduler`；PUT 只接受 `contract_version=v1`、`desired_state=running|paused|stopped` 和固定 `controller_ref=ai-game-soul-reply-v1`。
-
-reserve 与 dispatch 分开是物理 commit fence，不是让 AI-GAME 接管设备。`dating-copilot` 仍是唯一设备与物理 ledger owner；owner 返回 `uncertain_needs_reconciliation` 时，ApplicationRuntime 只 inspect/reconcile，不重新 dispatch。`active_dispatch` 也只进入可中断等待并重复 owner GET，不 reserve、不 dispatch、也不生成替代草稿。进程恢复发现未收口 intent 时同样先走 inspect-only reconciliation；找不到可信证明就以 `recovery_no_replay` 收口。
-
-managed scheduler 只保留匹配职责：全天使用机会，空闲时段提高 cadence，成功匹配后立即开场，并且只有可信的当日配额为零时才进入 Planet；它不生成或发送普通回复。所有 Soul instance 共同聚合成一个 matcher 目标：任一 nonterminal instance 处于 `queued`、`running`、`waiting`，或其 `stopping` 前目标为 running，就优先选择 `running`；否则只要有 `paused` 或停止前目标为 paused，就选择 `paused`。Input 不改 matcher，`stopping` 保留该 instance 的 Stop 前目标，只有 core 真正结算为 `stopped` 的 Stop 才能贡献 stopped。
-
-`soul-scheduler-lifecycle.db` 持久化不含正文的 singleton receipt：`requested_state`、实际可下发的 `desired_state`、source instance、hash transition ref、单调 generation 和时间。存在 nonterminal instance 时按上述需求聚合；不存在时采用最新的显式 lifecycle 证据，但未结算的 Stop 不算 stopped，`failed`/`completed` 保持其最近显式目标，不能让更早的 Stop 重新生效。单个可中断 monitor 每轮先 GET、仅在不一致时 PUT；dating-copilot 反向重启或暂时不可达时按持久目标收敛，cloud/local vision 不可用也不会拖停 matcher。冷恢复且回复依赖不可用时，只委托 Application core 结算真正 idle 的 Stop；worker token 或未完成 intent 不会被清理。AI-GAME shutdown 会关闭本地 activation、monitor 和已加载的 Application runtime；它在 owner GET 后、PUT 前再次检查关闭栅栏，绝不隐式 PUT `stopped`，也不会让阻塞 probe 后的 factory 或晚返回的 candidate 重新发布 runtime。
-
-冷启动恢复 paused 实例时允许 owner 报告 `desired_state=paused / effective_state=stopped`，无需先短暂启动 matcher。浏览器只读 `GET /api/v1/application-profiles/soul-reply-v1/scheduler`，所有写控制仍统一走 ApplicationRuntime Start/Pause/Resume/Stop，不存在第二套 scheduler 按钮。
-
-若出现不受 managed contract 控制的旧 worker/模式，owner 的 `legacy_scheduler_active` 仍是拒绝混跑，不是回退指令。它和 direct `soul_execution_runtime_unavailable` 都是 definite-not-sent：ApplicationRuntime 随后只 GET/inspect 到 `terminal_no_replay`，把本次尝试结算为 nonterminal `confirmed_failure` 后重新观察规划，不重放旧 intent 或草稿。AI-GAME 不导入或直接调用 dating-copilot 的 Python 调度函数，也不通过旧 Soul command route 启动它。
-
-Observation 没有 DELETE/abandon route。reserve 之前，下一次 fresh observe 只能原子替换 process-local 的 unreserved scope；旧 scope 随后返回 `observation_scope_stale`。reserved/active pipeline 不会被替换，`foreground_action_owned` 进入等待重试，绝不授权旧草稿下发。
-
-一次已确认发送只证明送达，不是回复策略奖励。`soul-reply-learning.db` 记录 transcript/pending generation、草稿 hash、策略、prompt/persona/model 版本、owner ref 和 send proof；只有之后出现新的对方 inbound，或带完整时间与“确无新 inbound”证明的延迟结果，才更新 reply strategy。ApplicationRuntime 的 `SoulReplyMemoryGate` 不会把当前发送成功直接晋升为经验。reserve 前创建 learning trial 失败时尚无 owner material，可重试；reserve 或送达已经由 owner 持久化后，本地 bind/send-proof 写入失败只能留下待修复 lineage，不能改写 owner 的送达事实、阻止唯一一次 fenced dispatch，或触发第二次 reserve/send。
-
-旧 `GET /api/v1/integrations/soul` 与 `GET /api/v1/integrations/soul/conversations/{conversation_id}` 仅保留兼容只读诊断。旧 `POST /api/v1/integrations/soul/commands` 和 `POST /api/v1/soul/commands` 固定返回 `410 legacy_soul_write_disabled`，不得再作为主运行逻辑。
-
-默认配置为：
-
-```text
-AI_GAME_SOUL_CONSOLE_URL=http://127.0.0.1:5000
-AI_GAME_SOUL_TIMEOUT_SECONDS=5
-AI_GAME_SOUL_OBSERVATION_TIMEOUT_SECONDS=90
-```
-
-`AI_GAME_SOUL_TIMEOUT_SECONDS` 只约束 owner 的 capabilities、scheduler、reserve、dispatch 与 inspect 等短控制请求；`AI_GAME_SOUL_OBSERVATION_TIMEOUT_SECONDS` 单独约束 owner 捕获一帧可用观察的等待时间。端点只接受 HTTP loopback 地址。AI-GAME 的启动、停止和模型脚本不会启动、终止或修改 `F:\dating-copilot` 的进程或文件；只有显式 Application lifecycle 命令会通过上述 owner API 改变 managed scheduler desired state。
+旧 reserve/dispatch/inspect 和 scheduler wire shape 仍可在 [`contracts/control-plane-v1.md`](contracts/control-plane-v1.md) 中查阅；它不指定当前 owner，也不阻止对已授权、已登录 Android 应用的通用操作。当前产品路线和 U8 验收只以 [`docs/product/00_INDEX.md`](docs/product/00_INDEX.md) 为准。

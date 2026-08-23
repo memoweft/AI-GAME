@@ -252,27 +252,71 @@ legacy
 
 ### U8 — Multi-capability and long-lived goal routing
 
-**Status**: `IN_PROGRESS` — activated after U7 completed its ordinary
-advancement gates on 2026-08-23. No U8 implementation or acceptance claim is
-made by activation alone.
+[constraint-source: USER_DECISION; ref: D22 U8 real mobile/application correction 2026-08-23]
+
+**Status**: `DONE` on 2026-08-24 — the normal launcher composed a real
+authorized, already logged-in Soul GoalRun through generic ApplicationRuntime
+wait/event supervision and bounded RuntimeKernel cycles. The frozen plan
+preceded binding and selected no specialized owner; one at-most-once physical
+cycle produced a verified receipt and nonterminal candidate notification,
+later cycles stayed bounded, a real no-response interval was attributed
+separately in Experience, normal restarts preserved the same instance without
+replay, and final-source explicit stop fenced later ingress, wakes, and physical
+work.
 
 **Outcome**: the orchestrator can bind different goal types without exposing internal modules.
 
 Initial routing families:
 
 - finite phone-operation goal -> canonical Kernel task;
-- long-lived/waiting-driven application goal -> ApplicationRuntime/scheduler capability;
+- local device-free long-lived goal -> managed ApplicationRuntime capability;
+- long-lived mobile/application goal -> ApplicationRuntime lifecycle supervisor
+  composed with bounded RuntimeKernel device cycles;
+- specialized external-owner adapter -> optional capability selected only when
+  actually available, authorized, and appropriate for the frozen goal;
 - active GoalRun follow-up/control -> existing GoalRun;
 - language-only result -> local language capability;
 - experience collection -> internal part of execution, not a user LearningJob choice.
 
-Soul is the first long-lived external-owner compatibility candidate. The user enters through the same goal composer; `soul-reply-v1` and dating-copilot ownership remain internal bindings.
+Soul is one possible target application and `soul-reply-v1` remains one optional
+specialized adapter; neither is the product boundary. For an already logged-in
+application on the authorized Android target, the generic route must first
+consider device discovery and RuntimeKernel operation. A specialized adapter's
+owner/account requirements apply only after the frozen plan selects that
+adapter. The retired historical Soul-page project remains excluded by D20.
 
 The confirmed long-lived policy is continuous: candidate milestones notify without auto-pausing or completing the goal. Each event-driven cycle is bounded and the GoalRun stays active until explicit user stop/takeover/revision, or enters a resumable wait for a real gate.
 
-**Proof**: at least one finite phone goal and one long-lived external-event goal run through the same ingress, controls, projection, and evidence discipline; the long-lived goal survives candidate notification and continues until an explicit stop test.
+**Required proof**: at least one finite phone goal and one real long-lived
+mobile/application goal use the same ingress, controls, projection, and evidence
+discipline. The long-lived run must automatically discover the authorized
+device/application state; persist its binding plan before execution; complete a
+bounded observe/action/re-observe/verify cycle with at-most-once physical effect;
+distinguish the immediate action receipt from a later inbound, reply,
+no-response, or user-feedback outcome; notify a candidate without pausing or
+terminating; complete a later bounded cycle; recover the same instance after a
+normal-launcher restart without replay; and fence all later work after explicit
+stop. If a specialized external owner is actually selected, its own current
+authorization, receipt, and reconciliation evidence is additionally required.
+
+**Closure evidence**: GoalRun `5f42cc67-4baa-4e6e-ba58-42e0730000f7`, instance
+`51f5dd4d-78f9-4a12-ae54-e2e31f1c2a63`, verified Kernel task
+`8581c1ff-85b0-48bb-af3b-7d597db70b71`, candidate notification
+`15359636-dbba-5a50-9768-4e0fa57e8615`, and Experience signal
+`f187d173-552f-5325-bd9a-05028f568258` form the primary real acceptance chain.
+Dedicated final-source stop probe GoalRun
+`600a0041-8f5e-45e2-b284-2b2a8d8bb64b` closed the transient
+`STOP_REQUESTED` ingress race with 409 responses and zero downstream Kernel
+work. Final regression is backend 884, frontend 59, and a passing production
+frontend build.
 
 ### U9 — Production autonomy, deployment, and broader applications
+
+**Status**: `PARTIAL` — activated after U8 passed on 2026-08-24. A versioned,
+hash-verified local installation-candidate archive can now be built from the
+normal release entry and is explicitly marked `NOT_DEPLOYED`; fresh install,
+upgrade/rollback, data protection, observability, failure injection, long-run,
+and production-target acceptance remain open.
 
 **Outcome**: sustained operation on explicit production targets with install policy, observability, backups, upgrade/rollback, resource controls, privacy, and configurable higher-risk action policy.
 
@@ -300,8 +344,8 @@ Includes only after earlier exits:
 | U5 STZB learning vertical | PARTIAL, non-blocking | Checklist and experience gates exist; real complete daily cold/warm acceptance remains a stabilization backlog |
 | U6 Kernel worker canary | DONE | Explicit Kernel canary completed settings/battery/Home, controls, final verification, and Experience reuse; default cutover remains out of scope |
 | U7 Real cutover | DONE | Local normal launcher, real Kernel GoalRun, controls, restore/rollback, final active restart, and 30-minute local observation passed |
-| U8 Long-lived routing | IN PROGRESS | Work order activated; implementation and acceptance not yet claimed |
-| U9 Production hardening | Not started | None |
+| U8 Long-lived routing | DONE | Generic Android long-lived composition, real bounded Soul cycles, candidate continuity, separately attributed no-response, restart/no-replay, and explicit-stop fences passed |
+| U9 Production hardening | PARTIAL | Hash-verified local installation candidate exists; production deployment, SLO, failure-injection, fresh-install, upgrade/rollback, and broader-application evidence remain open |
 
 ## 5. Advancement rule
 

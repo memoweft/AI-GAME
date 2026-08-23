@@ -21,6 +21,7 @@ from .application_runtime import (
     Resume as ApplicationResume,
     Stop as ApplicationStop,
 )
+from .application_runtime_catalog import ApplicationRuntimeCatalog
 from .application_runtime.domain import (
     ApplicationRuntimeError,
     IdempotencyConflict as ApplicationIdempotencyConflict,
@@ -87,7 +88,7 @@ from .openai_chat import OpenAIChatProvider
 from .repository import SQLiteRepository
 from .legacy_cutover import append_mode_journal
 from .runtime_mode import RuntimeModeError, RuntimeModeGuard, validate_runtime_mode
-from .runtime_adapters.adb_executor import AdbActionExecutor
+from .runtime_adapters.adb_executor import GuiExecutorActionAdapter
 from .runtime_adapters.android import AndroidObservationProvider
 from .runtime_adapters.artifacts import FilesystemArtifactStore
 from .runtime_adapters.sqlite import SQLiteRuntimeStore
@@ -98,6 +99,14 @@ from .soul_application_composition import (
     SoulApplicationUnavailable,
     compose_soul_application_runtime,
 )
+from .local_managed_application_composition import (
+    PROFILE_ID as LOCAL_MANAGED_PROFILE_ID,
+    compose_local_managed_application_runtime,
+)
+from .long_lived_mobile_application_composition import (
+    compose_long_lived_mobile_application_runtime,
+)
+from .applications.soul import PROFILE_ID as SOUL_PROFILE_ID
 from .schemas import (
     ApplicationCommandCreate,
     ApplicationInstanceCreate,
@@ -621,12 +630,21 @@ def create_app(
         resolved_application_runtime is None
         and resolved_application_archive is None
     ):
-        application_composition = compose_soul_application_runtime(
+        soul_application_composition = compose_soul_application_runtime(
             resolved_settings,
             resolved_cloud_configuration,
         )
-        resolved_application_runtime = application_composition.runtime
-        resolved_application_archive = application_composition.archive
+        local_application_composition = compose_local_managed_application_runtime(
+            resolved_settings
+        )
+        resolved_application_runtime = ApplicationRuntimeCatalog(
+            {
+                LOCAL_MANAGED_PROFILE_ID: local_application_composition.runtime,
+                SOUL_PROFILE_ID: soul_application_composition.runtime,
+            },
+            scheduler_profile_id=SOUL_PROFILE_ID,
+        )
+        resolved_application_archive = resolved_application_runtime
     elif resolved_application_archive is None:
         resolved_application_archive = resolved_application_runtime
     device_execution_lease = DeviceExecutionLease()
@@ -657,6 +675,20 @@ def create_app(
         if resolved_settings.mobile_role_endpoint
         else resolved_settings.local_chat_api_key
     )
+    # Goal composition is a local text/tool task, not a device-action task.
+    # Keep it available whenever its local model is configured so a local
+    # managed long-lived GoalRun can be frozen even when no ADB target is
+    # present. Device ownership is still checked only by the finite route.
+    if mobile_role_endpoint and mobile_role_model:
+        structured_goal_model = StructuredGoalModel(
+            OpenAICompatibleToolRoleModel(
+                endpoint=mobile_role_endpoint,
+                model=mobile_role_model,
+                api_key=mobile_role_api_key,
+                timeout_seconds=resolved_settings.chat_request_timeout_seconds,
+                evidence=mobile_evidence,
+            )
+        )
     if (
         isinstance(resolved_executor, AdbGuiExecutor)
         and resolved_settings.gui_executor_enabled
@@ -803,6 +835,8 @@ def create_app(
     )
     resolved_gateway = gateway
     kernel_coordinator: KernelCanaryCoordinator | None = None
+    kernel_observation_provider: AndroidObservationProvider | None = None
+    long_lived_mobile_composition: Any | None = None
     if kernel_runtime_enabled:
         if (
             role_model is None
@@ -814,13 +848,14 @@ def create_app(
             )
         runtime_dir = resolved_settings.data_dir / "runtime"
         kernel_artifacts = FilesystemArtifactStore(runtime_dir / "artifacts")
+        kernel_observation_provider = AndroidObservationProvider(
+            adb_path=resolved_settings.adb_path
+        )
         kernel = RuntimeKernel(
             SQLiteRuntimeStore(runtime_dir / "runtime.db"),
-            observation_provider=AndroidObservationProvider(
-                adb_path=resolved_settings.adb_path
-            ),
+            observation_provider=kernel_observation_provider,
             artifact_store=kernel_artifacts,
-            action_executor=AdbActionExecutor(resolved_settings.adb_path),
+            action_executor=GuiExecutorActionAdapter(resolved_executor.for_serial),
         )
         kernel_coordinator = KernelCanaryCoordinator(
             kernel=kernel,
@@ -830,6 +865,18 @@ def create_app(
             device_lease=device_execution_lease,
             experience=experience_service,
             binding_kind=kernel_binding_kind,
+            application_readiness_assessor=(
+                structured_goal_model.assess_mobile_application_readiness
+                if structured_goal_model is not None
+                else None
+            ),
+        )
+        long_lived_mobile_composition = (
+            compose_long_lived_mobile_application_runtime(
+                resolved_settings.data_dir,
+                kernel=kernel_coordinator,
+                observation_provider=kernel_observation_provider,
+            )
         )
         if resolved_gateway is None:
             resolved_gateway = build_gateway_composition(
@@ -837,6 +884,15 @@ def create_app(
                 kernel=kernel,
                 worker=kernel_coordinator,
             )
+
+    def discover_mobile_application(target_id: str) -> str:
+        if kernel_observation_provider is None:
+            raise RuntimeError("RuntimeKernel Android observation is unavailable")
+        state = kernel_observation_provider.read_device_state(target_id)
+        application_id = str(state.foreground_app or "").strip()
+        if not application_id:
+            raise RuntimeError("foreground application is unavailable")
+        return application_id
     def probe_configured_mobile_target() -> tuple[bool, str, str]:
         probe = resolved_executor.probe()
         if probe.status == "ready":
@@ -949,26 +1005,53 @@ def create_app(
             structured_goal_model.inspect_daily_checklist
             if structured_goal_model else None
         ),
+        application_runtime=resolved_application_runtime,
+        application_archive=resolved_application_archive,
+        long_lived_mobile_runtime=(
+            long_lived_mobile_composition.runtime
+            if long_lived_mobile_composition is not None
+            else None
+        ),
+        long_lived_mobile_archive=(
+            long_lived_mobile_composition.runtime
+            if long_lived_mobile_composition is not None
+            else None
+        ),
+        discover_mobile_application=(
+            discover_mobile_application
+            if long_lived_mobile_composition is not None
+            else None
+        ),
+        experience=experience_service,
+        answer_language=(
+            structured_goal_model.answer_language
+            if structured_goal_model else None
+        ),
     )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         chat_start_attempted = False
         game_start_attempted = False
+        application_start_attempted = False
+        long_lived_mobile_start_attempted = False
         try:
             service.initialize()
             resolved_cloud_configuration.start()
+            application_startup = getattr(
+                resolved_application_runtime, "startup", None
+            )
+            if callable(application_startup):
+                application_start_attempted = True
+                try:
+                    application_startup()
+                except SoulApplicationUnavailable:
+                    # [constraint-source: PRODUCT_SPEC; ref: U8 resumable capability wait]
+                    # The local managed profile remains available through the
+                    # catalog while an optional external adapter is a typed
+                    # availability wait.
+                    pass
             if runtime_mode_guard.is_legacy_runtime_available():
-                application_startup = getattr(
-                    resolved_application_runtime, "startup", None
-                )
-                if callable(application_startup):
-                    try:
-                        application_startup()
-                    except SoulApplicationUnavailable:
-                        # The archive remains usable and a later start/command
-                        # retries activation against current cloud/owner state.
-                        pass
                 chat_start_attempted = True
                 resolved_chat.start()
                 if resolved_game_learner is not None:
@@ -976,6 +1059,11 @@ def create_app(
                     resolved_game_learner.start()
             if kernel_coordinator is not None:
                 kernel_coordinator.recover()
+            if long_lived_mobile_composition is not None:
+                resolved_goal_service.fence_stopped_long_lived_mobile_bindings_before_start()
+                long_lived_mobile_start_attempted = True
+                long_lived_mobile_composition.runtime.startup()
+                resolved_goal_service.recover_long_lived_mobile_bindings()
             append_mode_journal(
                 resolved_settings.project_root
                 / "runtime"
@@ -986,6 +1074,8 @@ def create_app(
                 details={
                     "kernel_binding_kind": kernel_binding_kind,
                     "legacy_workers_started": runtime_mode_guard.is_legacy_runtime_available(),
+                    "long_lived_runtime_managed": application_start_attempted,
+                    "long_lived_mobile_composed": long_lived_mobile_start_attempted,
                 },
             )
             yield
@@ -1007,6 +1097,10 @@ def create_app(
             )
             if callable(mobile_task_shutdown):
                 shutdown_callbacks.append(mobile_task_shutdown)
+            if long_lived_mobile_start_attempted:
+                shutdown_callbacks.append(
+                    long_lived_mobile_composition.runtime.shutdown
+                )
             if kernel_coordinator is not None:
                 shutdown_callbacks.append(kernel_coordinator.shutdown)
             # Week 6: 停止 Lease 后台清理并关闭 runtime.db（未初始化时为空操作）
@@ -1015,12 +1109,11 @@ def create_app(
             if resolved_gateway is not None:
                 shutdown_callbacks.append(resolved_gateway.store.close)
                 shutdown_callbacks.append(resolved_gateway.kernel.close)
-            if runtime_mode_guard.is_legacy_runtime_available():
-                application_shutdown = getattr(
-                    resolved_application_runtime, "shutdown", None
-                )
-                if callable(application_shutdown):
-                    shutdown_callbacks.append(application_shutdown)
+            application_shutdown = getattr(
+                resolved_application_runtime, "shutdown", None
+            )
+            if callable(application_shutdown):
+                shutdown_callbacks.append(application_shutdown)
             for shutdown_callback in shutdown_callbacks:
                 try:
                     shutdown_callback()
@@ -1061,6 +1154,16 @@ def create_app(
     app.state.kernel_runtime = kernel_coordinator
     app.state.application_runtime = resolved_application_runtime
     app.state.application_runtime_archive = resolved_application_archive
+    app.state.long_lived_mobile_runtime = (
+        long_lived_mobile_composition.runtime
+        if long_lived_mobile_composition is not None
+        else None
+    )
+    app.state.long_lived_mobile_runtime_archive = (
+        long_lived_mobile_composition.runtime
+        if long_lived_mobile_composition is not None
+        else None
+    )
     app.state.runtime_admin = resolved_runtime_admin
     app.state.console_shutdown_callback = console_shutdown_callback
     # Phase 6 Week 3: Gateway 契约表面（默认 OFF，显式传入才挂载）

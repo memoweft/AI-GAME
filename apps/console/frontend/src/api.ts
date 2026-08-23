@@ -46,6 +46,7 @@ import type {
   GatewayTaskResponse,
   GoalRun,
   GoalRunListResponse,
+  GoalControlAction,
 } from './types';
 
 /** §16: the Console identifies itself as one stable Gateway client. */
@@ -160,12 +161,14 @@ export const api = {
       `/goals/${encodeURIComponent(goalId)}/preflight/selection`,
       { method: 'POST', body: JSON.stringify({ target_id: targetId }) },
     ),
-  stopGoal: (goalId: string, idempotencyKey: string) =>
+  controlGoal: (goalId: string, action: GoalControlAction, idempotencyKey: string) =>
     requestAtBase<GoalRun>(
       GOAL_API_BASE,
       `/goals/${encodeURIComponent(goalId)}/controls`,
-      { method: 'POST', body: JSON.stringify({ action: 'stop', idempotency_key: idempotencyKey }) },
+      { method: 'POST', body: JSON.stringify({ action, idempotency_key: idempotencyKey }) },
     ),
+  stopGoal: (goalId: string, idempotencyKey: string) =>
+    api.controlGoal(goalId, 'stop', idempotencyKey),
   getOverview: () => request<OverviewResponse>('/overview'),
   getTargets: () => request<ListResponse<Target>>('/targets'),
   discoverTargets: () =>
