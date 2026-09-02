@@ -35,6 +35,13 @@ class GoalStateConflict(GoalError):
     status_code = 409
 
 
+class GoalOwnerUnavailable(GoalError):
+    """A bound execution owner could not prove its current state/control."""
+
+    code = "goal_owner_temporarily_unavailable"
+    status_code = 503
+
+
 @dataclass(frozen=True, slots=True)
 class GoalRecord:
     id: str

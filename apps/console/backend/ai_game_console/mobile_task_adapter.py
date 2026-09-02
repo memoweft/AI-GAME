@@ -46,7 +46,7 @@ from .mobile_agent import (
     VerificationContext,
 )
 from .repository import SQLiteRepository
-from .visual_similarity import png_perceptual_distance
+from .visual_similarity import png_perceptual_distance, png_sampled_change_ratio
 
 
 _EVIDENCE_ID = re.compile(r"^[0-9a-f]{32}$")
@@ -439,6 +439,24 @@ def _gui_action(target_id: str, intent: PhysicalIntent) -> GuiAction:
                 "本地模型返回的文字输入动作无效。",
             )
         return GuiAction(target_id=target_id, action="text", text=text)
+    if intent.name == "open_app":
+        package = arguments.get("package")
+        component = arguments.get("component")
+        if (
+            not isinstance(package, str)
+            or not package.strip()
+            or (component is not None and (not isinstance(component, str) or not component.strip()))
+        ):
+            raise MobileTaskAdapterError(
+                "mobile_intent_invalid",
+                "本地模型返回的应用启动动作无效。",
+            )
+        return GuiAction(
+            target_id=target_id,
+            action="open_app",
+            package=package.strip(),
+            component=component.strip() if isinstance(component, str) else None,
+        )
     if intent.name == "keyevent":
         keycode = arguments.get("keycode")
         if not isinstance(keycode, str) or keycode not in _ALLOWED_KEYCODES:
@@ -992,6 +1010,19 @@ class OpenAICompatibleToolRoleModel:
         # one token before the ordinary coordinate/bounds parser runs.
         if decoded.get("action") == "tap":
             decoded = {**decoded, "action": "click"}
+        if decoded.get("action") == "open_app":
+            package = decoded.get("package")
+            component = decoded.get("component")
+            if (
+                not isinstance(package, str)
+                or not package.strip()
+                or (component is not None and (not isinstance(component, str) or not component.strip()))
+            ):
+                raise _invalid_role_response()
+            arguments: dict[str, object] = {"package": package.strip()}
+            if component is not None:
+                arguments["component"] = component.strip()
+            return ActionDecision("act", PhysicalIntent("open_app", arguments), "structured app launch")
         envelope = (
             '<tool_call>{"name":"mobile_use","arguments":'
             + json.dumps(decoded, ensure_ascii=False, separators=(",", ":"))
@@ -1080,6 +1111,11 @@ class OpenAICompatibleToolRoleModel:
             if before.width == after.width and before.height == after.height
             else None
         )
+        sampled_change_ratio = (
+            png_sampled_change_ratio(before.png_bytes, after.png_bytes)
+            if before.width == after.width and before.height == after.height
+            else None
+        )
         materially_unchanged = (
             before.width == after.width
             and before.height == after.height
@@ -1087,6 +1123,8 @@ class OpenAICompatibleToolRoleModel:
                 before.png_bytes == after.png_bytes
                 or perceptual_distance is not None
                 and perceptual_distance <= 8
+                and sampled_change_ratio is not None
+                and sampled_change_ratio <= 0.02
             )
         )
         activity_boundary = _stzb_activity_boundary_kind(
@@ -1411,12 +1449,14 @@ _MOBILE_USE_TOOL_PARAMETERS: dict[str, Any] = {
     "additionalProperties": False,
     "properties": {
         "action": {"type": "string", "enum": [
-            "click", "long_press", "swipe", "type", "system_button", "wait", "terminate",
+            "click", "long_press", "swipe", "type", "system_button", "open_app", "wait", "terminate",
         ]},
         "coordinate": {"type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2},
         "coordinate2": {"type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2},
         "text": {"type": "string"},
         "button": {"type": "string", "enum": ["Back", "Home", "Menu", "Enter"]},
+        "package": {"type": "string", "minLength": 1, "maxLength": 255},
+        "component": {"type": "string", "minLength": 1, "maxLength": 512},
         "time": {"type": "number"},
         "status": {"type": "string", "enum": ["success", "failure"]},
         "target_description": {"type": "string", "maxLength": 200},

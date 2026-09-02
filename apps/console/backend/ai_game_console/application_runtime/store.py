@@ -345,7 +345,6 @@ class _SQLiteApplicationStore:
             if row["target_id"] != event.owner_binding_ref:
                 raise OwnerEventBindingMismatch(instance_id)
             status = str(row["status"])
-            # [constraint-source: PRODUCT_SPEC; ref: docs/product/07_ACCEPTANCE_AND_EVIDENCE.md section 6]
             # Stop is an external-action and later-event fence for the same
             # long-lived GoalRun.  No new owner evidence is admitted once the
             # owner-facing instance is stopping or terminal.

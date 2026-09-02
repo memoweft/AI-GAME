@@ -76,6 +76,10 @@ class KernelApplicationCycleResult:
     verdict: str | None
     evidence: str
     physical_action_sent: bool
+    # A model/runtime may propose missing information, but it cannot write
+    # UserFact authority.  NormalActivitySliceRunner validates and hands this
+    # read-only proposal to FactQuestionCoordinator before any physical action.
+    fact_need: Mapping[str, Any] | None = None
 
 
 class KernelCanaryCoordinator:
@@ -98,6 +102,7 @@ class KernelCanaryCoordinator:
             [str, RoleObservation, str], Mapping[str, Any]
         ]
         | None = None,
+        device_id_resolver: Callable[[str], str] | None = None,
     ) -> None:
         self.kernel = kernel
         self.model = model
@@ -110,6 +115,7 @@ class KernelCanaryCoordinator:
         self.experience = experience
         self.binding_kind = binding_kind
         self.application_readiness_assessor = application_readiness_assessor
+        self.device_id_resolver = device_id_resolver
         self.acceptance_event_type = (
             "KernelTaskAccepted"
             if binding_kind == "runtime_kernel"
@@ -121,6 +127,12 @@ class KernelCanaryCoordinator:
         self._dispatch_lock = threading.RLock()
         self._closed = False
 
+    def _resolve_device_id(self, target_id: str | None) -> str:
+        device_id = _canonical_device_id(target_id)
+        if self.device_id_resolver is None:
+            return device_id
+        return _canonical_device_id(self.device_id_resolver(device_id))
+
     def execute_application_cycle(
         self,
         *,
@@ -131,6 +143,8 @@ class KernelCanaryCoordinator:
         cycle_key: str,
         target_id: str,
         expected_application_id: str,
+        stage_objective: str | None = None,
+        completion_criteria: tuple[str, ...] | None = None,
     ) -> KernelApplicationCycleResult:
         """Execute at most one physical RuntimeKernel action synchronously.
 
@@ -139,7 +153,6 @@ class KernelCanaryCoordinator:
         :meth:`reconcile_application_cycle`, which reads the same durable
         Task/Action/Execution/Verification rows and cannot dispatch.
 
-        [constraint-source: USER_DECISION; ref: D22 U8 real mobile/application]
         """
 
         with self._schedule_lock:
@@ -150,7 +163,7 @@ class KernelCanaryCoordinator:
             raise KernelCanaryError(
                 "application cycle already exists and requires reconciliation"
             )
-        device_id = _canonical_device_id(target_id)
+        device_id = self._resolve_device_id(target_id)
         task = self.kernel.create_task(
             goal=goal,
             source=TaskSource(
@@ -207,7 +220,11 @@ class KernelCanaryCoordinator:
                     goal, before, expected_application_id
                 )
             ready = bool(readiness.get("ready"))
+            authentication_required = bool(
+                readiness.get("authentication_required", True)
+            )
             authenticated = bool(readiness.get("authenticated"))
+            authentication_satisfied = authenticated or not authentication_required
             application_matches_goal = bool(
                 readiness.get("application_matches_goal")
             )
@@ -221,14 +238,20 @@ class KernelCanaryCoordinator:
                     "application_id": foreground or None,
                     "expected_application_id": expected_application_id,
                     "ready": ready,
+                    "authentication_required": authentication_required,
                     "authenticated": authenticated,
+                    "authentication_satisfied": authentication_satisfied,
                     "application_matches_goal": application_matches_goal,
                     "before_observation_id": kernel_before.id,
                     "before_evidence_id": before.evidence_id,
                     "evidence": readiness_evidence,
                 },
             )
-            if not ready or not authenticated or not application_matches_goal:
+            if (
+                not ready
+                or not authentication_satisfied
+                or not application_matches_goal
+            ):
                 self.kernel.fail_task(
                     task_id=task.id,
                     code="application_not_ready",
@@ -236,14 +259,19 @@ class KernelCanaryCoordinator:
                 )
                 return self.inspect_application_cycle(task.id)
 
-            objective = (
+            objective = (stage_objective or "").strip() or (
                 "在当前已登录目标应用的真实界面中，只执行一个可验证的原子动作，"
                 "推进候选发现、候选判断或当前对话；动作后立即交回长期调度器。"
             )
+            criteria = tuple(
+                item.strip()
+                for item in (completion_criteria or ())
+                if item.strip()
+            ) or ("一个真实原子动作产生可验证的候选或对话推进",)
             stage = self.kernel.create_stage(
                 task_id=task.id,
                 objective=objective,
-                completion_criteria=("一个真实原子动作产生可验证的候选或对话推进",),
+                completion_criteria=criteria,
             )
             stage = self.kernel.start_stage(task_id=task.id, stage_id=stage.id)
             inputs = _inputs(task.goal, task.created_at, self.kernel.events(task.id))
@@ -286,7 +314,15 @@ class KernelCanaryCoordinator:
                 )
                 return self.inspect_application_cycle(task.id)
             try:
-                action_type, params = _kernel_action(decision.intent)
+                action_type, params = _kernel_action(
+                    decision.intent,
+                    expected_foreground_package=foreground,
+                    expected_accessibility_tree_changed_from=(
+                        kernel_before.ui_tree.artifact.sha256
+                        if kernel_before.ui_tree.artifact is not None
+                        else None
+                    ),
+                )
             except (KeyError, TypeError, ValueError, KernelCanaryError):
                 self.kernel.fail_task(
                     task_id=task.id,
@@ -337,7 +373,12 @@ class KernelCanaryCoordinator:
                 return self.inspect_application_cycle(task.id)
             if self.settle_seconds > 0:
                 time.sleep(self.settle_seconds)
-            after = self._observe(task.id)
+            after = self._observe(
+                task.id,
+                kernel_action_id=(
+                    action.id if execution.body_command_id is not None else None
+                ),
+            )
             verification = self.model.verify(
                 VerificationContext(
                     task_id=task.id,
@@ -371,7 +412,7 @@ class KernelCanaryCoordinator:
                 or "",
                 verdict=verdict,
                 reason=verification.evidence or "role-assisted application cycle verdict",
-                evidence_refs=(after.evidence_id,),
+                evidence_refs=self._current_observation_evidence_refs(task.id),
                 method=VerificationMethod.ROLE_ASSISTED,
                 complete_stage=(verdict is VerificationVerdict.SUCCESS),
                 progress_summary=(
@@ -586,7 +627,10 @@ class KernelCanaryCoordinator:
             application_ready=bool(
                 readiness is not None
                 and readiness.payload.get("ready")
-                and readiness.payload.get("authenticated")
+                and (
+                    readiness.payload.get("authenticated")
+                    or not readiness.payload.get("authentication_required", True)
+                )
                 and readiness.payload.get("application_matches_goal")
             ),
             before_observation_id=before_id,
@@ -664,7 +708,7 @@ class KernelCanaryCoordinator:
         frozen_criteria_ids: tuple[str, ...] = (),
         **_: Any,
     ) -> MobileTaskState:
-        device_id = _canonical_device_id(target_id)
+        device_id = self._resolve_device_id(target_id)
         for existing in self.kernel.list_tasks():
             if existing.source.initial_message_id != client_request_id:
                 continue
@@ -707,6 +751,13 @@ class KernelCanaryCoordinator:
         return self.inspect(task.id)
 
     def submit(self, task_id: str) -> None:
+        task = self.kernel.load_task(task_id)
+        if task.source.client_id == "r5-acceptance-operator":
+            # R5 is intentionally driven one action at a time by the protected
+            # loopback operator.  Attention pause/resume and runtime recovery
+            # may still reach this shared worker port, but they must never
+            # schedule autonomous model work for that externally driven Task.
+            return
         with self._schedule_lock:
             if self._closed:
                 raise KernelCanaryError("kernel canary coordinator is closed")
@@ -727,6 +778,8 @@ class KernelCanaryCoordinator:
     def recover(self) -> None:
         """Restart from durable facts; accepted unverified actions are never replayed."""
         for task in self.kernel.list_tasks():
+            if task.source.client_id == "r5-acceptance-operator":
+                continue
             if task.terminal:
                 continue
             if not any(
@@ -1002,6 +1055,8 @@ class KernelCanaryCoordinator:
 
     def _run(self, task_id: str) -> None:
         task = self.kernel.load_task(task_id)
+        if task.source.client_id == "r5-acceptance-operator":
+            return
         if task.terminal or task.status is TaskStatus.PAUSED:
             return
         lease: DeviceLeaseHandle | None = self.device_lease.acquire(
@@ -1180,7 +1235,12 @@ class KernelCanaryCoordinator:
                     ActionType.WAIT,
                 }:
                     time.sleep(self.settle_seconds)
-                after = self._observe(task_id)
+                after = self._observe(
+                    task_id,
+                    kernel_action_id=(
+                        action.id if execution.body_command_id is not None else None
+                    ),
+                )
                 receipt = TransportReceipt(
                     "not_sent" if is_finish else "accepted",
                     receipt_id=execution.id,
@@ -1209,7 +1269,7 @@ class KernelCanaryCoordinator:
                         after_observation_id=self.kernel.load_task(task_id).last_observation_id or "",
                         verdict=VerificationVerdict.UNCERTAIN,
                         reason=verdict.evidence or "role verification uncertain",
-                        evidence_refs=(after.evidence_id,),
+                        evidence_refs=self._current_observation_evidence_refs(task_id),
                         method=VerificationMethod.ROLE_ASSISTED,
                     )
                     self.kernel.mark_task_uncertain(
@@ -1230,7 +1290,7 @@ class KernelCanaryCoordinator:
                     after_observation_id=self.kernel.load_task(task_id).last_observation_id or "",
                     verdict=kernel_verdict,
                     reason=verdict.evidence or "role-assisted fresh observation comparison",
-                    evidence_refs=(after.evidence_id,),
+                    evidence_refs=self._current_observation_evidence_refs(task_id),
                     method=VerificationMethod.ROLE_ASSISTED,
                     complete_stage=verdict.satisfied,
                     progress_summary=verdict.evidence if verdict.satisfied else None,
@@ -1308,10 +1368,18 @@ class KernelCanaryCoordinator:
         finally:
             lease.release()
 
-    def _observe(self, task_id: str) -> RoleObservation:
+    def _observe(
+        self, task_id: str, *, kernel_action_id: str | None = None
+    ) -> RoleObservation:
         task = self.kernel.load_task(task_id)
-        observation = self.kernel.capture_observation(
-            task_id=task_id, device_id=task.device_id
+        observation = (
+            self.kernel.capture_fresh_body_observation(
+                task_id=task_id, kernel_action_id=kernel_action_id
+            )
+            if kernel_action_id is not None
+            else self.kernel.capture_observation(
+                task_id=task_id, device_id=task.device_id
+            )
         )
         screenshot = self.artifacts.read(observation.screenshot.artifact)
         role_observation = self.evidence.record(
@@ -1332,6 +1400,23 @@ class KernelCanaryCoordinator:
         )
         return role_observation
 
+    def _current_observation_evidence_refs(self, task_id: str) -> tuple[str, ...]:
+        """Return only artifact refs owned by the Task's current Observation.
+
+        ``RoleObservation.evidence_id`` belongs to the model-facing mobile
+        evidence store.  RuntimeKernel verification deliberately accepts only
+        immutable artifacts persisted on its exact before/after Observations,
+        so the two identifiers must never be substituted for one another.
+        """
+
+        observation = self.kernel.latest_observation(task_id)
+        if observation is None:
+            raise KernelCanaryError("kernel verification requires a current observation")
+        refs = [observation.screenshot.artifact.reference]
+        if observation.ui_tree.artifact is not None:
+            refs.append(observation.ui_tree.artifact.reference)
+        return tuple(refs)
+
 
 def _canonical_device_id(target_id: str | None) -> str:
     if not isinstance(target_id, str) or not target_id.strip():
@@ -1340,14 +1425,22 @@ def _canonical_device_id(target_id: str | None) -> str:
     return value if value.startswith("adb:") else f"adb:{value}"
 
 
-def _kernel_action(intent: PhysicalIntent) -> tuple[ActionType, dict[str, Any]]:
+def _kernel_action(
+    intent: PhysicalIntent,
+    *,
+    expected_foreground_package: str | None = None,
+    expected_accessibility_tree_changed_from: str | None = None,
+) -> tuple[ActionType, dict[str, Any]]:
     args = dict(intent.arguments)
     if intent.name == "tap":
-        return ActionType.TAP, {
+        values: dict[str, Any] = {
             "x": int(args["x"]),
             "y": int(args["y"]),
             **_semantic_target(args),
         }
+        if expected_foreground_package:
+            values["expected_foreground_package"] = expected_foreground_package
+        return ActionType.TAP, values
     if intent.name == "long_press":
         return ActionType.LONG_PRESS, {
             "x": int(args["x"]),
@@ -1356,15 +1449,33 @@ def _kernel_action(intent: PhysicalIntent) -> tuple[ActionType, dict[str, Any]]:
             **_semantic_target(args),
         }
     if intent.name == "swipe":
-        return ActionType.SWIPE, {
+        values = {
             "start_x": int(args.get("x", args.get("start_x"))),
             "start_y": int(args.get("y", args.get("start_y"))),
             "end_x": int(args["end_x"]),
             "end_y": int(args["end_y"]),
             "duration_ms": int(args.get("duration_ms", 300)),
         }
+        if expected_foreground_package:
+            values["expected_foreground_package"] = expected_foreground_package
+        if expected_accessibility_tree_changed_from:
+            values["expected_accessibility_tree_changed_from"] = (
+                expected_accessibility_tree_changed_from
+            )
+        return ActionType.SWIPE, values
     if intent.name == "text":
         return ActionType.INPUT_TEXT, {"text": str(args["text"])}
+    if intent.name == "open_app":
+        package = args.get("package")
+        component = args.get("component")
+        if not isinstance(package, str) or not package.strip():
+            raise KernelCanaryError("open_app requires a package")
+        values: dict[str, Any] = {"package": package.strip()}
+        if component is not None:
+            if not isinstance(component, str) or not component.strip():
+                raise KernelCanaryError("open_app component must be non-blank")
+            values["component"] = component.strip()
+        return ActionType.OPEN_APP, values
     if intent.name == "wait":
         seconds = max(0.0, min(float(args.get("seconds", 1.0)), 10.0))
         return ActionType.WAIT, {"seconds": seconds}
@@ -1376,6 +1487,8 @@ def _kernel_action(intent: PhysicalIntent) -> tuple[ActionType, dict[str, Any]]:
             return ActionType.BACK, {}
         if keycode == "KEYCODE_HOME":
             return ActionType.HOME, {}
+        if keycode == "KEYCODE_APP_SWITCH":
+            return ActionType.RECENTS, {}
     raise KernelCanaryError(f"unsupported physical intent: {intent.name}")
 
 
@@ -1388,6 +1501,8 @@ def _decision_from_action(action: Any) -> ActionDecision:
         ActionType.INPUT_TEXT: ("text", action.params),
         ActionType.BACK: ("keyevent", {"keycode": "KEYCODE_BACK"}),
         ActionType.HOME: ("keyevent", {"keycode": "KEYCODE_HOME"}),
+        ActionType.RECENTS: ("keyevent", {"keycode": "KEYCODE_APP_SWITCH"}),
+        ActionType.OPEN_APP: ("open_app", action.params),
         ActionType.WAIT: ("wait", action.params),
         ActionType.SCREENSHOT: ("screenshot", {}),
     }.get(action.type, (action.type.value, action.params))

@@ -579,30 +579,6 @@ export type ApplicationOutcomeStatus =
 
 export type ApplicationCommandName = 'Input' | 'Pause' | 'Resume' | 'Stop';
 
-export type SoulSchedulerState =
-  | 'running'
-  | 'paused'
-  | 'stopped'
-  | 'degraded';
-
-export type SoulSchedulerDesiredState = 'running' | 'paused' | 'stopped';
-
-export type SoulSchedulerEffectiveState =
-  | 'running'
-  | 'paused'
-  | 'stopping'
-  | 'stopped';
-
-export interface SoulSchedulerStatus {
-  profile_id: 'soul-reply-v1';
-  state: SoulSchedulerState;
-  desired_state: SoulSchedulerDesiredState;
-  effective_state: SoulSchedulerEffectiveState;
-  controller_matches: boolean;
-  code: string;
-  observed_at: string;
-}
-
 export interface ApplicationIntentSummary {
   id: string;
   cycle: number;
@@ -661,9 +637,7 @@ export interface ApplicationCommandRequest {
 }
 
 // ---------------------------------------------------------------------------
-// Gateway contract (Phase 6) — docs/NEW/PHASE_1_GATEWAY_CONTRACT_DESIGN.md
-// §18 DESIGN FROZEN: these types mirror the frozen §4–§11 wire shapes and
-// must not drift without an explicit cutover work order.
+// Legacy Gateway wire types retained for API compatibility.
 // ---------------------------------------------------------------------------
 
 export const GATEWAY_TERMINAL_TASK_STATUSES = [
@@ -909,4 +883,254 @@ export interface GoalRun {
 export interface GoalRunListResponse {
   items: GoalRun[];
   count: number;
+}
+
+/** R1's durable Session projection.  GoalRun remains the v2 compatibility API. */
+export type SessionControlAction = 'pause' | 'resume' | 'takeover' | 'stop';
+export type SessionDirectiveKind = 'add' | 'revise' | 'reprioritize';
+
+/** Immutable success condition frozen with a GoalGraph revision. */
+export interface SessionGoalCriterion {
+  id?: string;
+  description: string;
+  status?: string;
+  verified?: boolean;
+}
+
+/** A retained revision of the Session's goal graph. */
+export interface SessionGoalGraphRevision {
+  revision: number;
+  authority_revision?: number;
+  source_directive_id?: string | null;
+  reason?: string | null;
+  /** Legacy fixture aliases retained while stored R1 projections remain readable. */
+  directive_id?: string | null;
+  summary?: string | null;
+  created_at?: string;
+}
+
+/** R3 wake information is descriptive until DeviceBody is connected in R4. */
+export interface SessionWakeCondition {
+  id?: string;
+  goal_node_id?: string;
+  /** Durable R3 domain objects use goal_id; goal_node_id is the Console alias. */
+  goal_id?: string;
+  revision?: number;
+  kind?: string;
+  status?: string;
+  reason?: string | null;
+  waiting_ref?: string | null;
+  matcher?: Record<string, unknown> | null;
+  event_type?: string | null;
+  due_at?: string | null;
+  earliest_wake_at?: string | null;
+  next_eligible_at?: string | null;
+}
+
+/** Durable resume point saved when AttentionScheduler switches away from a Goal. */
+export interface SessionContinuation {
+  id?: string;
+  goal_node_id?: string;
+  /** Durable R3 domain objects use goal_id; goal_node_id is the Console alias. */
+  goal_id?: string;
+  revision?: number;
+  summary?: string | null;
+  current_stage_id?: string | null;
+  stage_id?: string | null;
+  next_step?: string | null;
+  reason?: string | null;
+  yield_reason?: string | null;
+  checkpoint_kind?: string | null;
+  checkpoint_ref?: string | null;
+  attention_decision_id?: string | null;
+  application_package?: string | null;
+  scene_ref?: string | null;
+  verified_fact_refs?: string[];
+  resume_preconditions?: Record<string, unknown>;
+  waiting_kind?: string | null;
+  waiting_ref?: string | null;
+  pending_intent?: Record<string, unknown> | null;
+  next_eligible_at?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface SessionAttentionCandidate {
+  goal_node_id?: string;
+  /** Durable R3 GoalEligibility uses goal_id. */
+  goal_id?: string;
+  rank?: number;
+  score?: number;
+  attention_score?: number;
+  total_score?: number;
+  eligible?: boolean;
+  eligibility?: string;
+  eligibility_reason?: string | null;
+  hard_tier?: number | string | null;
+  scheduling_class?: string | null;
+  reason?: string | null;
+  score_components?: Record<string, number>;
+}
+
+/** Persisted explanation of which Goal currently owns the execution slot. */
+export interface SessionAttentionDecision {
+  id?: string;
+  revision?: number;
+  /** Durable R3 domain name retained alongside the compact Console alias. */
+  decision_revision?: number;
+  selected_goal_id: string | null;
+  reason?: string | null;
+  trigger_kind?: string | null;
+  trigger_source?: string | null;
+  trigger_event_id?: string | null;
+  trigger_key?: string | null;
+  outcome?: string | null;
+  selector_kind?: string | null;
+  event_cursor?: number;
+  preemption_policy?: string | null;
+  preemption_checkpoint_ref?: string | null;
+  basis?: string[] | string | null;
+  candidates?: SessionAttentionCandidate[];
+  created_at?: string;
+}
+
+export interface SessionGoalNode {
+  id: string;
+  title: string;
+  status: string;
+  bound_goal_run_id: string | null;
+  goal_run?: GoalRun | null;
+  /** The exact part of the user's instruction that this GoalNode covers. */
+  original_fragment?: string | null;
+  application_hint?: string | null;
+  explicit_priority?: number | null;
+  activation_state?: string | null;
+  criteria?: SessionGoalCriterion[];
+  /** R3 scheduling projection. All fields remain optional for stored R1/R2 sessions. */
+  eligibility?: string | null;
+  eligible?: boolean;
+  eligibility_reason?: string | null;
+  hard_tier?: number | string | null;
+  attention_score?: number | null;
+  scheduling_class?: string | null;
+  wake_condition?: SessionWakeCondition | null;
+  continuation?: SessionContinuation | null;
+  next_eligible_at?: string | null;
+  last_service_at?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface SessionDirective {
+  id: string;
+  revision: number;
+  content: string;
+  directive_kind: string;
+  created_at: string;
+}
+
+export interface SessionEvent {
+  id: string;
+  cursor: number;
+  session_id: string;
+  event_type: string;
+  data: Record<string, unknown>;
+  handling_status: string;
+  created_at: string;
+  handled_at: string | null;
+  /** R7 EventInbox provenance and routing fields remain optional for R1-R6 rows. */
+  idempotency_key?: string;
+  source_namespace?: string | null;
+  source_event_id?: string | null;
+  device_id?: string | null;
+  device_boot_id?: string | null;
+  source_cursor?: string | null;
+  occurred_at?: string | null;
+  received_at?: string | null;
+  classified_at?: string | null;
+  affected_goal_ids?: string[];
+  decision_id?: string | null;
+  error?: string | null;
+  payload_digest?: string | null;
+}
+
+/** Optional R7 convenience projection; durable objects above remain authoritative. */
+export interface SessionEventRuntimeProjection {
+  pending_preemption_event_id?: string | null;
+  pending_preemption_reason?: string | null;
+  raw_observation_count?: number;
+  latest_raw_observation?: Record<string, unknown> | null;
+  recovery_context_ref?: string | null;
+  control_transition_reason?: string | null;
+}
+
+export interface AgentSession {
+  id: string;
+  original_instruction: string;
+  authority_revision: number;
+  session_kind: string;
+  status: string;
+  control_mode: string;
+  active_goal_id: string | null;
+  event_cursor: number;
+  summary: string | null;
+  created_at: string;
+  updated_at: string;
+  stopped_at: string | null;
+  directives: SessionDirective[];
+  goal_nodes: SessionGoalNode[];
+  /** R2 fields are optional so stored R1 sessions remain readable. */
+  goal_graph_revision?: number;
+  graph_revisions?: SessionGoalGraphRevision[];
+  /** R3 fields are optional so the Console degrades cleanly for R1/R2 snapshots. */
+  attention_decision?: SessionAttentionDecision | null;
+  attention_candidates?: SessionAttentionCandidate[];
+  continuations?: SessionContinuation[];
+  wake_conditions?: SessionWakeCondition[];
+  pending_event_count?: number;
+  event_runtime?: SessionEventRuntimeProjection | null;
+  current_application?: string | null;
+  latest_device_snapshot?: Record<string, unknown> | null;
+  events?: SessionEvent[];
+}
+
+export interface AgentSessionListResponse {
+  items: AgentSession[];
+  count: number;
+}
+
+export interface AgentSessionEventPage {
+  items: SessionEvent[];
+  count: number;
+  next_cursor?: number;
+}
+
+/** R8 question raised when one Goal is missing a user-owned fact. */
+export interface NeedUserFact {
+  id: string;
+  need_id?: string;
+  session_id: string;
+  goal_id: string;
+  origin_goal_id?: string;
+  fact_key: string;
+  question: string;
+  why_needed: string;
+  reason?: string;
+  status: string;
+  answer_schema?: Record<string, unknown> | null;
+  conversation_hint?: string | null;
+  resume_stage_id?: string | null;
+  resume_stage?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface NeedUserFactListResponse {
+  items: NeedUserFact[];
+  count: number;
+}
+
+export interface AnswerNeedUserFactRequest {
+  value: unknown;
+  idempotency_key: string;
 }

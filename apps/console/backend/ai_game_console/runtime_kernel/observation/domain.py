@@ -134,6 +134,35 @@ class ObservationConsistency:
 
 
 @dataclass(frozen=True, slots=True)
+class BodySnapshotCorrelation:
+    """Opaque DeviceBody snapshot facts projected into the Kernel ledger.
+
+    This is deliberately correlation-only: foreground/text values remain in
+    the DeviceBody snapshot, and the RuntimeKernel does not reconstruct a
+    second device-state authority.
+    """
+
+    snapshot_id: str
+    binding_id: str
+    device_boot_id: str
+    capture_request_id: str
+    sequence: int
+    caused_by_body_command_id: str
+
+    def __post_init__(self) -> None:
+        for value, label in (
+            (self.snapshot_id, "body_snapshot.snapshot_id"),
+            (self.binding_id, "body_snapshot.binding_id"),
+            (self.device_boot_id, "body_snapshot.device_boot_id"),
+            (self.capture_request_id, "body_snapshot.capture_request_id"),
+            (self.caused_by_body_command_id, "body_snapshot.caused_by_body_command_id"),
+        ):
+            _required(value, label)
+        if isinstance(self.sequence, bool) or not isinstance(self.sequence, int) or self.sequence < 1:
+            raise ValueError("body_snapshot.sequence must be positive")
+
+
+@dataclass(frozen=True, slots=True)
 class Observation:
     id: str
     task_id: str
@@ -145,6 +174,7 @@ class Observation:
     ui_tree: UiTreeChannel
     device_state: DeviceState
     consistency: ObservationConsistency
+    body_snapshot: BodySnapshotCorrelation | None = None
 
     def __post_init__(self) -> None:
         _required(self.id, "observation.id")

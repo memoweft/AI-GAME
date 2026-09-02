@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import hmac
 import logging
+import os
 import sys
 from collections.abc import Callable
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from fastapi import APIRouter, FastAPI, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
@@ -29,10 +32,33 @@ from .application_runtime.domain import (
     RuntimeClosed as ApplicationRuntimeClosed,
     RuntimeNotFound as ApplicationRuntimeNotFound,
 )
+from .agent_runtime.api import (
+    agent_runtime_error_handler,
+    create_agent_session_router,
+)
+from .agent_runtime.event_router import DeviceBodyEventInbox
+from .agent_runtime.event_pump import AgentRuntimeEventPump
+from .agent_runtime.fact_questions import FactQuestionCoordinator
+from .agent_runtime.activity_integration import (
+    AgentRuntimeActivitySlicePreemptionCoordinator,
+    NormalActivitySliceRunner,
+)
+from .agent_runtime.activity_store import ActivitySliceStore
+from .agent_runtime.domain import AgentRuntimeError
+from .agent_runtime.planner import DeterministicSessionPlanner, FallbackSessionPlanner
+from .agent_runtime.scheduler import AttentionScheduler, SQLiteSchedulerCoordination
+from .agent_runtime.service import AgentSessionService
+from .agent_runtime.store import SQLiteAgentRuntimeStore
+from .user_fact_runtime import SQLiteUserFactStore, UserFactService
+from .user_fact_runtime.api import create_user_fact_router
 from .chat import AndroidAutomationFactory, ChatCoordinator, ChatCoordinatorError
 from .cloud_config import CloudChatConfiguration, CloudConfigError
 from .config import Settings
 from .discovery import AdbTargetDiscovery
+from .device_body.adb_adapter import AdbDeviceBodyAdapter
+from .device_body.domain import ConnectionState, DeviceBodyBinding
+from .device_body.kernel_bridge import KernelDeviceBodyBridge
+from .device_body.store import SQLiteDeviceBodyStore
 from .device_lease import DeviceExecutionLease
 from .execution import GuiExecutor
 from .experience_runtime import ExperienceService, SQLiteExperienceStore
@@ -63,6 +89,8 @@ from .goal_runtime import (
     SQLiteDailyChecklistStore,
     StzbDailyProgressController,
     StructuredGoalModel,
+    StructuredSessionPlanner,
+    build_qwen_attention_scheduler,
     create_goal_router,
     goal_error_handler,
 )
@@ -78,6 +106,7 @@ from .mobile_agent import (
 )
 from .mobile_task_adapter import (
     LocalMobileEvidenceStore,
+    MobileTaskAdapterError,
     MobileTaskAndroidDriver,
     OpenAICompatibleMobileRoleModel,
     OpenAICompatibleToolRoleModel,
@@ -91,14 +120,24 @@ from .runtime_mode import RuntimeModeError, RuntimeModeGuard, validate_runtime_m
 from .runtime_adapters.adb_executor import GuiExecutorActionAdapter
 from .runtime_adapters.android import AndroidObservationProvider
 from .runtime_adapters.artifacts import FilesystemArtifactStore
+from .execution_contract import (
+    ExecutionContractError,
+    ExecutionContractService,
+    V2ExecutionContractService,
+    SQLiteExecutionContractStore,
+    create_execution_router,
+    create_execution_v2_router,
+    execution_contract_error_handler,
+)
+from .execution_v2_composition import (
+    CanonicalTaskPortAdapter,
+    ExperiencePortAdapter,
+)
+from .emulator_runtime.production import compose_production_emulator_runtime
+from .emulator_runtime.task_runner import ResidentV2TaskScheduler
 from .runtime_adapters.sqlite import SQLiteRuntimeStore
 from .runtime_kernel import RuntimeKernel
 from .runtime_admin import LeaseAdminService, create_lease_admin_router
-from .soul_integration import SoulIntegration, SoulIntegrationError
-from .soul_application_composition import (
-    SoulApplicationUnavailable,
-    compose_soul_application_runtime,
-)
 from .local_managed_application_composition import (
     PROFILE_ID as LOCAL_MANAGED_PROFILE_ID,
     compose_local_managed_application_runtime,
@@ -106,7 +145,6 @@ from .local_managed_application_composition import (
 from .long_lived_mobile_application_composition import (
     compose_long_lived_mobile_application_runtime,
 )
-from .applications.soul import PROFILE_ID as SOUL_PROFILE_ID
 from .schemas import (
     ApplicationCommandCreate,
     ApplicationInstanceCreate,
@@ -144,10 +182,6 @@ from .schemas import (
     RunDetailSchema,
     RunListResponse,
     RunSummarySchema,
-    SoulCommandRequest,
-    SoulConversationResponse,
-    SoulSchedulerStatusSchema,
-    SoulWorkspaceResponse,
     RuntimeModeResponse,
     RuntimeResponse,
     TargetDiscoveryResponse,
@@ -156,10 +190,39 @@ from .schemas import (
 )
 from .service import ControlPlaneError, ControlPlaneService
 
+
 logger = logging.getLogger(__name__)
+_AUTO_LONG_TASK_SCHEDULER = object()
 
 WRITE_CLIENT_HEADER = "console-v1"
 CONSOLE_SHUTDOWN_TOKEN_HEADER = "X-AI-Game-Shutdown-Token"
+
+
+class _DeferredBodyEventInbox:
+    """Bind the durable BodyEvent intake only after normal composition finishes.
+
+    ``RuntimeKernel`` does not execute an action while it is being composed,
+    but keeping this narrow proxy makes that ordering explicit: a BodyEvent
+    can neither be dropped nor routed through an unfinished AgentSession
+    service.
+    """
+
+    def __init__(self) -> None:
+        self._target: DeviceBodyEventInbox | None = None
+
+    def bind(self, target: DeviceBodyEventInbox) -> None:
+        if self._target is not None and self._target is not target:
+            raise RuntimeError("DeviceBody EventInbox is already bound")
+        self._target = target
+
+    def ingest(self, event: Any) -> Any:
+        if self._target is None:
+            raise RuntimeError("DeviceBody EventInbox is unavailable during composition")
+        return self._target.ingest(event)
+
+
+def _utc_now() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 class _UnavailableLearningEnvironmentFactory:
@@ -571,6 +634,134 @@ def _application_instance_payload(state: Any) -> dict[str, Any]:
     }
 
 
+def _resolve_kernel_task_session_owner(
+    *,
+    task: Any,
+    goal_store: SQLiteGoalStore,
+    agent_runtime_store: SQLiteAgentRuntimeStore,
+    long_lived_mobile_runtime: Any | None = None,
+    runtime_kernel: RuntimeKernel | Any | None = None,
+) -> Any:
+    """Return the one Session that durably owns this exact Kernel Task.
+
+    ``TaskSource.conversation_id`` is an index into a GoalRun, never an
+    authorization grant on its own.  Direct Kernel bindings must name this
+    exact Task.  A long-lived mobile GoalRun instead binds its Application
+    instance; only the single in-flight, durably correlated cycle child may
+    borrow that instance's DeviceBody authority.  Both routes reject a second
+    task forged with the same ``goal:<id>`` conversation prefix.
+    """
+
+    conversation_id = task.source.conversation_id
+    goal_prefix = "goal:"
+    if not conversation_id.startswith(goal_prefix) or not conversation_id[len(goal_prefix):]:
+        raise RuntimeError("Kernel Task has no GoalRun ownership key")
+    goal_run_id = conversation_id[len(goal_prefix):]
+    goal_run = goal_store.inspect(goal_run_id)
+    binding_kind = str(getattr(goal_run, "binding_kind", ""))
+    if binding_kind in {"runtime_kernel", "runtime_kernel_canary"}:
+        if goal_run.bound_task_id != task.id:
+            raise RuntimeError("Kernel Task is not the GoalRun's bound task")
+    elif binding_kind == "long_lived_mobile_composition":
+        _authorize_long_lived_mobile_cycle_child(
+            task=task,
+            goal_run=goal_run,
+            goal_run_id=goal_run_id,
+            long_lived_mobile_runtime=long_lived_mobile_runtime,
+            runtime_kernel=runtime_kernel,
+        )
+    else:
+        raise RuntimeError("Kernel Task GoalRun binding kind cannot grant DeviceBody authority")
+
+    ownership_bindings = [
+        (session, binding)
+        for session in agent_runtime_store.sessions_for_recovery()
+        for binding in agent_runtime_store.bindings(session.id)
+        if binding.goal_run_id == goal_run_id
+    ]
+    if len(ownership_bindings) != 1:
+        raise RuntimeError(
+            "Kernel Task GoalRun must resolve to exactly one AgentSession binding"
+        )
+    return ownership_bindings[0][0]
+
+
+def _authorize_long_lived_mobile_cycle_child(
+    *,
+    task: Any,
+    goal_run: Any,
+    goal_run_id: str,
+    long_lived_mobile_runtime: Any | None,
+    runtime_kernel: RuntimeKernel | Any | None,
+) -> None:
+    """Fail closed unless a Task is the active durable long-lived child.
+
+    The public GoalRun deliberately names the ApplicationRuntime instance,
+    not its short-lived Kernel cycle Tasks.  This helper consumes the narrow
+    read-only correlation projection exposed by that private runtime and the
+    immutable accepted-cycle event retained in the Kernel ledger.  It does
+    not authorize by foreground application, active Goal, or a source prefix.
+    """
+
+    source = getattr(task, "source", None)
+    if (
+        source is None
+        or getattr(source, "client_id", None) != "goal-v2-long-lived-mobile"
+        or not isinstance(getattr(source, "initial_message_id", None), str)
+        or not source.initial_message_id.strip()
+    ):
+        raise RuntimeError("Kernel Task is not a durable long-lived mobile cycle")
+    instance_id = getattr(goal_run, "bound_task_id", None)
+    if not isinstance(instance_id, str) or not instance_id.strip():
+        raise RuntimeError("long-lived GoalRun has no bound application instance")
+    if long_lived_mobile_runtime is None or runtime_kernel is None:
+        raise RuntimeError("long-lived mobile authorization dependencies are unavailable")
+    authorization_reader = getattr(
+        long_lived_mobile_runtime, "durable_child_authorization", None
+    )
+    if not callable(authorization_reader):
+        raise RuntimeError("long-lived mobile authorization reader is unavailable")
+    try:
+        authorization = authorization_reader(instance_id)
+    except (KeyError, OSError, RuntimeError, ValueError):
+        raise RuntimeError("long-lived mobile authorization facts are unavailable") from None
+    if authorization is None:
+        raise RuntimeError("long-lived mobile child is not currently dispatching")
+    if (
+        getattr(authorization, "instance_id", None) != instance_id
+        or getattr(authorization, "goal_id", None) != goal_run_id
+        or getattr(authorization, "target_id", None) != task.device_id
+        or not isinstance(getattr(authorization, "activated_at", None), str)
+        or not authorization.activated_at.strip()
+        or getattr(authorization, "intent_phase", None) != "dispatching"
+        or getattr(authorization, "reservation_id", None)
+        != source.initial_message_id
+    ):
+        raise RuntimeError("Kernel Task does not match the dispatching long-lived child")
+    try:
+        events = tuple(runtime_kernel.events(task.id))
+    except (KeyError, OSError, RuntimeError, ValueError):
+        raise RuntimeError("Kernel Task accepted-cycle facts are unavailable") from None
+    accepted = tuple(
+        event for event in events
+        if getattr(event, "type", None) == "KernelApplicationCycleAccepted"
+    )
+    if len(accepted) != 1:
+        raise RuntimeError("Kernel Task must have exactly one accepted long-lived cycle event")
+    payload = getattr(accepted[0], "payload", None)
+    if not isinstance(payload, dict):
+        raise RuntimeError("Kernel Task accepted-cycle event payload is invalid")
+    if (
+        payload.get("goal_id") != goal_run_id
+        or payload.get("application_instance_id") != instance_id
+        or payload.get("cycle_key") != source.initial_message_id
+        or payload.get("target_id") != task.device_id
+        or payload.get("application_cycle")
+        != getattr(authorization, "application_cycle", None)
+    ):
+        raise RuntimeError("Kernel Task accepted-cycle event does not match long-lived authorization")
+
+
 def create_app(
     *,
     settings: Settings | None = None,
@@ -581,7 +772,6 @@ def create_app(
     automation_factory: AndroidAutomationFactory | None = None,
     cloud_configuration: CloudChatConfiguration | None = None,
     game_learner: GameLearner | Any | None = None,
-    soul_integration: SoulIntegration | None = None,
     mobile_task_runtime: MobileTaskRuntime | Any | None = None,
     mobile_task_archive: MobileTaskArchive | Any | None = None,
     application_runtime: Any | None = None,
@@ -590,8 +780,19 @@ def create_app(
     console_shutdown_callback: Callable[[], None] | None = None,
     gateway: GatewayComposition | None = None,
     goal_service: GoalService | None = None,
+    agent_session_service: AgentSessionService | None = None,
+    execution_contract_service: ExecutionContractService | None = None,
+    execution_contract_v2_service: V2ExecutionContractService | None = None,
+    execution_v2_device_profiles: Any | None = None,
+    execution_v2_frames: Any | None = None,
+    long_task_scheduler: Any = _AUTO_LONG_TASK_SCHEDULER,
 ) -> FastAPI:
     resolved_settings = settings or Settings.from_env()
+    def canonical_runtime_device_id(device_id: str) -> str:
+        return device_id
+
+    def transport_runtime_device_id(device_id: str) -> str:
+        return device_id
     # Phase 7: 启动期校验运行时模式（配置非法即拒绝启动，fail-fast）
     validate_runtime_mode(resolved_settings.runtime_mode)
     runtime_mode_guard = RuntimeModeGuard(resolved_settings.runtime_mode)
@@ -622,7 +823,11 @@ def create_app(
         resolved_settings,
     )
     resolved_executor = adb_executor or AdbGuiExecutor.from_settings(resolved_settings)
-    resolved_soul_integration = soul_integration or SoulIntegration.from_settings(resolved_settings)
+    # Resolution is lazy: constructing the application may resolve filesystem
+    # configuration later, but never runs ``adb devices`` or any shell command.
+    resolved_adb_discovery = adb_discovery or AdbTargetDiscovery(
+        adb_path=resolved_settings.adb_path
+    )
     resolved_mobile_tasks = mobile_task_runtime
     resolved_application_runtime = application_runtime
     resolved_application_archive = application_runtime_archive
@@ -630,19 +835,14 @@ def create_app(
         resolved_application_runtime is None
         and resolved_application_archive is None
     ):
-        soul_application_composition = compose_soul_application_runtime(
-            resolved_settings,
-            resolved_cloud_configuration,
-        )
         local_application_composition = compose_local_managed_application_runtime(
             resolved_settings
         )
         resolved_application_runtime = ApplicationRuntimeCatalog(
             {
                 LOCAL_MANAGED_PROFILE_ID: local_application_composition.runtime,
-                SOUL_PROFILE_ID: soul_application_composition.runtime,
             },
-            scheduler_profile_id=SOUL_PROFILE_ID,
+            scheduler_profile_id=LOCAL_MANAGED_PROFILE_ID,
         )
         resolved_application_archive = resolved_application_runtime
     elif resolved_application_archive is None:
@@ -660,6 +860,8 @@ def create_app(
         observation_payload=lambda evidence_id: mobile_evidence.load(evidence_id).png_bytes,
     )
     structured_goal_model: StructuredGoalModel | None = None
+    session_planner: StructuredSessionPlanner | None = None
+    attention_scheduler = AttentionScheduler()
     role_model: Any | None = None
     daily_checklist_store = SQLiteDailyChecklistStore(
         resolved_settings.data_dir / "stzb-daily.db"
@@ -680,15 +882,20 @@ def create_app(
     # managed long-lived GoalRun can be frozen even when no ADB target is
     # present. Device ownership is still checked only by the finite route.
     if mobile_role_endpoint and mobile_role_model:
-        structured_goal_model = StructuredGoalModel(
-            OpenAICompatibleToolRoleModel(
+        goal_role_model = OpenAICompatibleToolRoleModel(
                 endpoint=mobile_role_endpoint,
                 model=mobile_role_model,
                 api_key=mobile_role_api_key,
                 timeout_seconds=resolved_settings.chat_request_timeout_seconds,
                 evidence=mobile_evidence,
-            )
         )
+        structured_goal_model = StructuredGoalModel(goal_role_model)
+        session_planner = FallbackSessionPlanner(
+            StructuredSessionPlanner(goal_role_model),
+            fallback=DeterministicSessionPlanner(),
+            recoverable_exceptions=(MobileTaskAdapterError,),
+        )
+        attention_scheduler = build_qwen_attention_scheduler(goal_role_model)
     if (
         isinstance(resolved_executor, AdbGuiExecutor)
         and resolved_settings.gui_executor_enabled
@@ -720,6 +927,12 @@ def create_app(
         )
         if isinstance(role_model, OpenAICompatibleToolRoleModel):
             structured_goal_model = StructuredGoalModel(role_model)
+            session_planner = FallbackSessionPlanner(
+                StructuredSessionPlanner(role_model),
+                fallback=DeterministicSessionPlanner(),
+                recoverable_exceptions=(MobileTaskAdapterError,),
+            )
+            attention_scheduler = build_qwen_attention_scheduler(role_model)
         if (
             resolved_mobile_tasks is None
             and runtime_mode_guard.is_legacy_runtime_available()
@@ -774,7 +987,7 @@ def create_app(
     service = ControlPlaneService(
         resolved_repository,
         resolved_settings,
-        adb_discovery=adb_discovery,
+        adb_discovery=resolved_adb_discovery,
         adb_executor=resolved_executor,
         cloud_configuration=resolved_cloud_configuration,
     )
@@ -833,10 +1046,64 @@ def create_app(
         or resolved_mobile_tasks
         or MobileTaskArchive(resolved_settings.data_dir / "mobile-tasks.db")
     )
+    # AgentSession and DeviceBody share one durable ledger.  Construct this
+    # before RuntimeKernel so its dispatch bridge can resolve a Kernel Task to
+    # the already-established GoalRun -> AgentSession relationship.
+    agent_runtime_database = resolved_settings.data_dir / "agent-runtime.db"
+    agent_runtime_store = SQLiteAgentRuntimeStore(agent_runtime_database)
+    harness_execution_store = SQLiteExecutionContractStore(
+        resolved_settings.data_dir / "harness-executions.db"
+    )
+    user_fact_store = SQLiteUserFactStore(agent_runtime_database)
+    user_fact_service = UserFactService(user_fact_store)
+
+    def session_fact_context(_: str) -> list[dict[str, Any]]:
+        context: list[dict[str, Any]] = []
+        for fact in user_fact_store.list_facts(user_scope="local-owner"):
+            revisions = user_fact_store.revisions(
+                user_scope=fact.user_scope, fact_key=fact.fact_key
+            )
+            if not revisions:
+                continue
+            latest = revisions[-1]
+            context.append(
+                {
+                    "fact_key": latest.fact_key,
+                    "revision_id": latest.id,
+                    "value": latest.value,
+                    "applicability": latest.applicability,
+                    "source_kind": latest.source_kind.value,
+                    "source_ref": latest.source_ref,
+                    "valid_until": (
+                        latest.valid_until.isoformat()
+                        if latest.valid_until is not None
+                        else None
+                    ),
+                }
+            )
+        return context
+    device_body_store = SQLiteDeviceBodyStore(agent_runtime_database)
+    adb_device_body_adapter = (
+        AdbDeviceBodyAdapter(adb_path=resolved_settings.adb_path)
+        if resolved_settings.adb_path
+        else None
+    )
+    # The active product path is emulator-only. DeviceBody commands use the
+    # exact ADB transport that was accepted by the saved emulator Profile;
+    # there is no secondary Companion identity or pairing lifecycle.
+    device_body_adapter = adb_device_body_adapter
+    deferred_device_body_event_inbox: _DeferredBodyEventInbox | None = None
+    device_body_bridge: KernelDeviceBodyBridge | None = None
+    kernel: RuntimeKernel | None = None
     resolved_gateway = gateway
     kernel_coordinator: KernelCanaryCoordinator | None = None
     kernel_observation_provider: AndroidObservationProvider | None = None
     long_lived_mobile_composition: Any | None = None
+    activity_slice_runner: NormalActivitySliceRunner | None = None
+    activity_preemption_coordinator = (
+        AgentRuntimeActivitySlicePreemptionCoordinator(agent_runtime_store)
+    )
+    kernel_artifacts = None
     if kernel_runtime_enabled:
         if (
             role_model is None
@@ -849,13 +1116,91 @@ def create_app(
         runtime_dir = resolved_settings.data_dir / "runtime"
         kernel_artifacts = FilesystemArtifactStore(runtime_dir / "artifacts")
         kernel_observation_provider = AndroidObservationProvider(
-            adb_path=resolved_settings.adb_path
+            adb_path=resolved_settings.adb_path,
+            transport_device_id_resolver=transport_runtime_device_id,
+        )
+        if adb_device_body_adapter is None:
+            raise RuntimeError("Kernel-active startup requires the DeviceBody ADB adapter.")
+        runtime_store = SQLiteRuntimeStore(runtime_dir / "runtime.db")
+
+        def resolve_device_body_binding(
+            task_id: str, device_id: str
+        ) -> DeviceBodyBinding:
+            """Resolve only the Session that owns this Kernel Task's GoalRun.
+
+            KernelCanaryCoordinator persists ``goal:<GoalRun id>`` in the
+            task source conversation.  Direct bindings name this exact Task;
+            long-lived mobile bindings name their ApplicationRuntime instance
+            and only grant its one durably dispatching cycle child.  Either
+            route still requires the unique SessionGoalBinding.  A foreground
+            application hint, an active Goal, a visible app, or merely a
+            matching conversation prefix is never sufficient.
+            """
+
+            task = runtime_store.load_task(task_id)
+            if task.device_id != device_id:
+                raise ValueError("Kernel Task device does not match dispatch device")
+            session = _resolve_kernel_task_session_owner(
+                task=task,
+                goal_store=goal_store,
+                agent_runtime_store=agent_runtime_store,
+                long_lived_mobile_runtime=(
+                    long_lived_mobile_composition.runtime
+                    if long_lived_mobile_composition is not None
+                    else None
+                ),
+                runtime_kernel=kernel,
+            )
+            existing = device_body_store.binding_for_session(session.id)
+            if existing is not None:
+                if existing.device_id != device_id:
+                    raise ValueError("AgentSession DeviceBody binding would drift devices")
+                if existing.adapter_id != adb_device_body_adapter.adapter_id:
+                    raise ValueError("AgentSession DeviceBody adapter is not emulator ADB")
+                return existing
+
+            now = _utc_now()
+            binding_adapter = adb_device_body_adapter
+            created = device_body_store.create_binding(
+                DeviceBodyBinding(
+                    id=str(uuid4()),
+                    session_id=session.id,
+                    device_id=device_id,
+                    adapter_id=binding_adapter.adapter_id,
+                    device_boot_id=binding_adapter.read_boot_id(device_id),
+                    connection_state=ConnectionState.CONNECTED,
+                    capability_revision=0,
+                    event_cursor=0,
+                    action_cursor=0,
+                    bound_at=now,
+                    updated_at=now,
+                )
+            )
+            if created.capability_revision == 0:
+                device_body_store.replace_capability_revision(
+                    created.id, binding_adapter.discover_capabilities(created)
+                )
+            return device_body_store.load_binding(created.id)
+
+        deferred_device_body_event_inbox = _DeferredBodyEventInbox()
+        device_body_bridge = KernelDeviceBodyBridge(
+            store=device_body_store,
+            adapter=device_body_adapter,
+            binding_resolver=resolve_device_body_binding,
+            clock=_utc_now,
+            event_inbox=deferred_device_body_event_inbox,
         )
         kernel = RuntimeKernel(
-            SQLiteRuntimeStore(runtime_dir / "runtime.db"),
+            runtime_store,
             observation_provider=kernel_observation_provider,
             artifact_store=kernel_artifacts,
-            action_executor=GuiExecutorActionAdapter(resolved_executor.for_serial),
+            action_executor=GuiExecutorActionAdapter(
+                resolved_executor.for_serial,
+                transport_device_id_resolver=transport_runtime_device_id,
+            ),
+            # RuntimeKernel prioritizes this dispatcher over the legacy
+            # executor, so one Kernel Action can create only one Body command.
+            body_dispatcher=device_body_bridge,
         )
         kernel_coordinator = KernelCanaryCoordinator(
             kernel=kernel,
@@ -870,12 +1215,24 @@ def create_app(
                 if structured_goal_model is not None
                 else None
             ),
+            device_id_resolver=canonical_runtime_device_id,
+        )
+        activity_slice_store = ActivitySliceStore(
+            resolved_settings.data_dir / "activity-slices.db"
+        )
+        activity_slice_runner = NormalActivitySliceRunner(
+            activity_slice_store,
+            agent_runtime_store=agent_runtime_store,
+            device_body_store=device_body_store,
+            observation_provider=kernel_observation_provider,
+            preemption_coordinator=activity_preemption_coordinator,
         )
         long_lived_mobile_composition = (
             compose_long_lived_mobile_application_runtime(
                 resolved_settings.data_dir,
                 kernel=kernel_coordinator,
                 observation_provider=kernel_observation_provider,
+                activity_slice_runner=activity_slice_runner,
             )
         )
         if resolved_gateway is None:
@@ -893,6 +1250,19 @@ def create_app(
         if not application_id:
             raise RuntimeError("foreground application is unavailable")
         return application_id
+
+    def recover_session_context(session_id: str) -> str:
+        if kernel_observation_provider is None:
+            raise RuntimeError("context recovery observation is unavailable")
+        binding = device_body_store.binding_for_session(session_id)
+        if binding is None:
+            raise RuntimeError("context recovery Session has no DeviceBody binding")
+        state = kernel_observation_provider.read_device_state(binding.device_id)
+        captured_at = str(state.captured_at or "").strip()
+        if not captured_at:
+            raise RuntimeError("context recovery observation has no capture time")
+        foreground = str(state.foreground_app or "unknown")
+        return f"device-state:recovery:{binding.device_id}:{captured_at}:{foreground}"
     def probe_configured_mobile_target() -> tuple[bool, str, str]:
         probe = resolved_executor.probe()
         if probe.status == "ready":
@@ -1022,13 +1392,100 @@ def create_app(
             if long_lived_mobile_composition is not None
             else None
         ),
+        target_id_resolver=canonical_runtime_device_id,
         experience=experience_service,
         answer_language=(
             structured_goal_model.answer_language
             if structured_goal_model else None
         ),
     )
-
+    resolved_agent_session_service = agent_session_service or AgentSessionService(
+        agent_runtime_store,
+        resolved_goal_service,
+        planner=session_planner,
+        attention_scheduler=attention_scheduler,
+        # GoalService can touch Kernel/ApplicationRuntime while delivering an
+        # activation outbox.  Normal composition defers replay until every
+        # downstream runtime has completed its own startup/recovery.
+        recover_on_start=False,
+        device_body_store=device_body_store,
+        context_recovery=(
+            recover_session_context if kernel_observation_provider is not None else None
+        ),
+        fact_context_provider=session_fact_context,
+    )
+    fact_question_coordinator = FactQuestionCoordinator(
+        user_fact_service, resolved_agent_session_service
+    )
+    if activity_slice_runner is not None:
+        activity_slice_runner.bind_fact_question_coordinator(
+            fact_question_coordinator
+        )
+    activity_preemption_coordinator.bind_event_handler(
+        resolved_agent_session_service.handle_inbox_event
+    )
+    device_body_event_inbox = DeviceBodyEventInbox(
+        agent_runtime_store,
+        device_body_store=device_body_store,
+        event_handler=resolved_agent_session_service.handle_inbox_event,
+    )
+    if deferred_device_body_event_inbox is not None:
+        deferred_device_body_event_inbox.bind(device_body_event_inbox)
+    resolved_execution_contract = execution_contract_service or ExecutionContractService(
+        harness_execution_store,
+        resolved_agent_session_service,
+        fact_question_coordinator,
+        kernel=kernel,
+        artifact_store=kernel_artifacts,
+    )
+    production_emulator = compose_production_emulator_runtime(
+        data_dir=resolved_settings.data_dir,
+        adb_discovery=resolved_adb_discovery,
+        agent_runtime_store=agent_runtime_store,
+        clock=_utc_now,
+        gui_executor_enabled=resolved_settings.gui_executor_enabled,
+        role_model=(role_model if isinstance(role_model, OpenAICompatibleToolRoleModel) else None),
+        mobile_evidence=mobile_evidence,
+        experience_service=experience_service,
+    )
+    resolved_execution_v2_device_profiles = (
+        execution_v2_device_profiles or production_emulator.profile_port
+    )
+    resolved_execution_v2_frames = execution_v2_frames or production_emulator.frame_port
+    resolved_execution_contract_v2 = (
+        execution_contract_v2_service
+        or V2ExecutionContractService(
+            harness_execution_store,
+            CanonicalTaskPortAdapter(
+                runtime_store=agent_runtime_store,
+                execution_store=harness_execution_store,
+                fact_questions=fact_question_coordinator,
+                profiles=getattr(resolved_execution_v2_device_profiles, "profiles", None),
+            ),
+            device_profiles=resolved_execution_v2_device_profiles,
+            experiences=ExperiencePortAdapter(experience_service),
+            frames=resolved_execution_v2_frames,
+        )
+    )
+    resolved_long_task_scheduler = long_task_scheduler
+    if resolved_long_task_scheduler is _AUTO_LONG_TASK_SCHEDULER:
+        resolved_long_task_scheduler = ResidentV2TaskScheduler(
+            runtime_store=agent_runtime_store,
+            coordination=SQLiteSchedulerCoordination(agent_runtime_database),
+            profiles=production_emulator.profiles,
+            operator=None,
+            owner_id=f"process-{uuid4()}",
+            runner_admission=resolved_execution_contract_v2,
+            general_handler=(
+                production_emulator.general_ui.runner
+                if production_emulator.general_ui is not None
+                else None
+            ),
+        )
+    agent_runtime_event_pump = AgentRuntimeEventPump(
+        resolved_agent_session_service,
+        long_task_scheduler=resolved_long_task_scheduler,
+    )
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         chat_start_attempted = False
@@ -1037,20 +1494,38 @@ def create_app(
         long_lived_mobile_start_attempted = False
         try:
             service.initialize()
+            user_fact_store.initialize()
+            # An outer ApplicationRuntime timeout can leave a fully persisted
+            # EVENT_AVAILABLE Slice handoff owning Session authority.  Close
+            # that checkpoint before the watchdog or EventInbox recovery can
+            # ask the scheduler for a new AttentionDecision.
+            if activity_slice_runner is not None:
+                activity_slice_runner.recover_persisted_preemptions()
             resolved_cloud_configuration.start()
+            # Rebuild the durable agenda before any long-lived mobile worker
+            # can recover.  GoalRun preparation is side-effect free; selected
+            # dispatch remains pending until the downstream runtime has
+            # started behind the non-selected pause fence below.
+            resolved_agent_session_service.recover_planning()
+            resolved_agent_session_service.recover_pending()
+            fact_question_coordinator.recover(dispatch=False)
+            resolved_agent_session_service.recover_inbox_events(dispatch=False)
+            resolved_agent_session_service.recover_attention(dispatch=False)
+            selected_goal_run_ids = (
+                resolved_agent_session_service.selected_goal_run_ids()
+            )
             application_startup = getattr(
                 resolved_application_runtime, "startup", None
             )
             if callable(application_startup):
+                resolved_goal_service.fence_nonselected_application_bindings_before_start(
+                    selected_goal_run_ids
+                )
                 application_start_attempted = True
-                try:
-                    application_startup()
-                except SoulApplicationUnavailable:
-                    # [constraint-source: PRODUCT_SPEC; ref: U8 resumable capability wait]
-                    # The local managed profile remains available through the
-                    # catalog while an optional external adapter is a typed
-                    # availability wait.
-                    pass
+                application_startup()
+                resolved_goal_service.recover_selected_application_bindings(
+                    selected_goal_run_ids
+                )
             if runtime_mode_guard.is_legacy_runtime_available():
                 chat_start_attempted = True
                 resolved_chat.start()
@@ -1058,12 +1533,31 @@ def create_app(
                     game_start_attempted = True
                     resolved_game_learner.start()
             if kernel_coordinator is not None:
+                resolved_goal_service.fence_nonselected_kernel_bindings_before_recover(
+                    selected_goal_run_ids
+                )
                 kernel_coordinator.recover()
+                resolved_goal_service.recover_selected_kernel_bindings(
+                    selected_goal_run_ids
+                )
             if long_lived_mobile_composition is not None:
                 resolved_goal_service.fence_stopped_long_lived_mobile_bindings_before_start()
+                resolved_goal_service.fence_nonselected_long_lived_bindings_before_start(
+                    selected_goal_run_ids
+                )
                 long_lived_mobile_start_attempted = True
                 long_lived_mobile_composition.runtime.startup()
-                resolved_goal_service.recover_long_lived_mobile_bindings()
+                resolved_goal_service.recover_long_lived_mobile_bindings(
+                    selected_goal_run_ids
+                )
+            # Finish an interrupted Session stop before creating any missing
+            # binding; then replay activation outboxes and settle stops whose
+            # binding was the interrupted part.  Stable downstream request
+            # keys make all three passes idempotent.
+            resolved_agent_session_service.recover_stopping()
+            resolved_agent_session_service.recover_attention_dispatches()
+            resolved_agent_session_service.recover_stopping()
+            agent_runtime_event_pump.start()
             append_mode_journal(
                 resolved_settings.project_root
                 / "runtime"
@@ -1088,6 +1582,7 @@ def create_app(
             cleanup_error: Exception | None = None
             active_error = sys.exc_info()[0] is not None
             shutdown_callbacks: list[Any] = []
+            shutdown_callbacks.append(agent_runtime_event_pump.shutdown)
             if game_start_attempted and resolved_game_learner is not None:
                 shutdown_callbacks.append(resolved_game_learner.shutdown)
             if chat_start_attempted:
@@ -1105,6 +1600,7 @@ def create_app(
                 shutdown_callbacks.append(kernel_coordinator.shutdown)
             # Week 6: 停止 Lease 后台清理并关闭 runtime.db（未初始化时为空操作）
             shutdown_callbacks.append(resolved_runtime_admin.shutdown)
+            shutdown_callbacks.append(production_emulator.close)
             # Phase 6 Week 3: 显式启用 Gateway 时关闭 gateway.db 与 Runtime 存储
             if resolved_gateway is not None:
                 shutdown_callbacks.append(resolved_gateway.store.close)
@@ -1146,10 +1642,28 @@ def create_app(
     app.state.cloud_configuration = resolved_cloud_configuration
     app.state.game_learner = resolved_game_learner
     app.state.device_execution_lease = device_execution_lease
-    app.state.soul_integration = resolved_soul_integration
     app.state.mobile_task_runtime = resolved_mobile_tasks
     app.state.mobile_task_archive = resolved_mobile_task_archive
     app.state.goal_service = resolved_goal_service
+    app.state.agent_session_service = resolved_agent_session_service
+    app.state.user_fact_service = user_fact_service
+    app.state.fact_question_coordinator = fact_question_coordinator
+    app.state.agent_runtime_event_pump = agent_runtime_event_pump
+    app.state.execution_contract_v2 = resolved_execution_contract_v2
+    app.state.emulator_profiles = production_emulator.profiles
+    app.state.emulator_profile_port = resolved_execution_v2_device_profiles
+    app.state.emulator_frame_bindings = production_emulator.frame_bindings
+    app.state.emulator_frame_port = resolved_execution_v2_frames
+    app.state.emulator_android_ui_runner = (
+        production_emulator.general_ui.runner
+        if production_emulator.general_ui is not None
+        else None
+    )
+    app.state.device_body_store = device_body_store
+    app.state.device_body_adapter = device_body_adapter
+    app.state.adb_device_body_adapter = adb_device_body_adapter
+    app.state.device_body_event_inbox = device_body_event_inbox
+    app.state.device_body_bridge = device_body_bridge
     app.state.kernel_canary = kernel_coordinator
     app.state.kernel_runtime = kernel_coordinator
     app.state.application_runtime = resolved_application_runtime
@@ -1196,8 +1710,6 @@ def create_app(
             or path.startswith("/api/v1/application-instances/")
             or path == "/api/v1/learning/jobs"
             or path.startswith("/api/v1/learning/jobs/")
-            or path.startswith("/api/v1/soul/")
-            or path == "/api/v1/integrations/soul/commands"
         )
         legacy_admission = request.method == "POST" and (
             path == "/api/v1/executor/actions"
@@ -1235,7 +1747,9 @@ def create_app(
 
     @app.middleware("http")
     async def require_console_client_for_writes(request: Request, call_next):
-        if request.method == "POST" and request.url.path.startswith(("/api/v1/", "/api/v2/")):
+        if request.method == "POST" and request.url.path.startswith(
+            ("/api/v1/", "/api/v2/", "/api/v3/")
+        ):
             if request.headers.get("X-AI-Game-Client") != WRITE_CLIENT_HEADER:
                 return JSONResponse(
                     status_code=403,
@@ -1294,6 +1808,8 @@ def create_app(
         )
 
     app.add_exception_handler(GoalError, goal_error_handler)
+    app.add_exception_handler(AgentRuntimeError, agent_runtime_error_handler)
+    app.add_exception_handler(ExecutionContractError, execution_contract_error_handler)
 
     @app.exception_handler(ApplicationRuntimeError)
     async def handle_application_runtime_error(
@@ -1311,9 +1827,6 @@ def create_app(
         elif isinstance(error, ApplicationRuntimeClosed):
             status_code = 503
             message = "Application 运行时当前不可用。"
-        elif isinstance(error, SoulApplicationUnavailable):
-            status_code = 503
-            message = "Soul Application 运行依赖当前不可用。"
         else:
             status_code = 409
             message = "Application 运行请求无法执行。"
@@ -1328,18 +1841,22 @@ def create_app(
     ) -> JSONResponse:
         return JSONResponse(status_code=error.status_code, content=error.as_payload())
 
-    @app.exception_handler(SoulIntegrationError)
-    async def handle_soul_integration_error(
-        _: Request, error: SoulIntegrationError
-    ) -> JSONResponse:
-        return JSONResponse(status_code=error.status_code, content=error.as_payload())
-
     @app.exception_handler(RequestValidationError)
     async def redact_executor_action_validation_error(
         request: Request, error: RequestValidationError
     ) -> JSONResponse:
         # FastAPI's default validation payload can contain rejected input.
         # Every write surface returns a redacted error instead of echoing it.
+        if request.url.path.startswith("/api/execution/v1/"):
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "error": {
+                        "code": "INVALID_EXECUTION_REQUEST",
+                        "message": "The Harness execution request is invalid.",
+                    }
+                },
+            )
         if request.url.path == "/api/v2/goals" or request.url.path.startswith(
             "/api/v2/goals/"
         ):
@@ -1428,19 +1945,6 @@ def create_app(
                     }
                 },
             )
-        if request.url.path in {
-            "/api/v1/soul/commands",
-            "/api/v1/integrations/soul/commands",
-        }:
-            return JSONResponse(
-                status_code=422,
-                content={
-                    "error": {
-                        "code": "invalid_legacy_soul_request",
-                        "message": "旧 Soul 写请求无效。",
-                    }
-                },
-            )
         if request.url.path == "/api/v1/application-instances" or (
             request.url.path.startswith("/api/v1/application-instances/")
         ):
@@ -1521,7 +2025,7 @@ def create_app(
                 "adb_status": view.discovery.status,
                 "adb_path": view.discovery.adb_path,
                 "message": view.discovery.message,
-                "device_count": len(view.discovery.devices),
+                "device_count": len(view.discovery.targets),
             },
         }
 
@@ -1764,21 +2268,6 @@ def create_app(
         state = invoke_application_reader(lambda: archive.inspect(instance_id))
         return _application_instance_payload(state)
 
-    @router.get(
-        "/application-profiles/soul-reply-v1/scheduler",
-        response_model=SoulSchedulerStatusSchema,
-    )
-    def inspect_soul_application_scheduler():
-        runtime = require_application_runtime()
-        status_reader = getattr(runtime, "scheduler_status", None)
-        if not callable(status_reader):
-            raise ControlPlaneError(
-                code="soul_scheduler_status_unavailable",
-                message="Soul 全天调度状态当前不可用。",
-                status_code=503,
-            )
-        return invoke_application_reader(status_reader)
-
     @router.post(
         "/application-instances/{instance_id}/commands",
         status_code=202,
@@ -1935,31 +2424,6 @@ def create_app(
             require_mobile_task_runtime().stop(task_id, request.client_request_id)
         )
 
-    @router.get(
-        "/integrations/soul",
-        response_model=SoulWorkspaceResponse,
-    )
-    def soul_workspace():
-        snapshot = resolved_soul_integration.workspace()
-        return {**snapshot, "available_commands": []}
-
-    @router.get(
-        "/integrations/soul/conversations/{conversation_id}",
-        response_model=SoulConversationResponse,
-    )
-    def soul_conversation(conversation_id: str):
-        return resolved_soul_integration.conversation(conversation_id)
-
-    @router.post("/soul/commands", status_code=410)
-    @router.post("/integrations/soul/commands", status_code=410)
-    def soul_command(request: SoulCommandRequest):
-        del request
-        raise ControlPlaneError(
-            code="legacy_soul_write_disabled",
-            message="旧 Soul 写入口已停用，请使用 ApplicationRuntime。",
-            status_code=410,
-        )
-
     def require_game_learner() -> Any:
         if resolved_game_learner is None:
             raise ControlPlaneError(
@@ -2026,12 +2490,25 @@ def create_app(
             learner.stop(job_id), list(learner.list_profiles())
         )
 
-    # U7：Kernel-active 正常装配会提供 Gateway；显式注入仍用于测试/集成。
-    # 它注册在 Legacy 路由之前，使 canonical 路径稳定解析到新契约；旧历史
-    # 通过独立只读命名空间提供，不做 payload 嗅探。
+    # Kernel-active 正常装配会提供 Gateway；显式注入仍用于兼容测试。
+    # 它注册在 Legacy 路由之前，使 canonical 路径稳定解析到新契约。
     if resolved_gateway is not None:
         app.include_router(create_gateway_router(resolved_gateway))
+    app.include_router(
+        create_execution_router(
+            resolved_execution_contract,
+            token=resolved_settings.harness_api_token,
+        )
+    )
+    app.include_router(
+        create_execution_v2_router(
+            resolved_execution_contract_v2,
+            token=resolved_settings.harness_api_token,
+        )
+    )
     app.include_router(create_goal_router(resolved_goal_service))
+    app.include_router(create_agent_session_router(resolved_agent_session_service))
+    app.include_router(create_user_fact_router(fact_question_coordinator))
     app.include_router(compatibility_router)
     app.include_router(router)
     # Week 6: Runtime Lease 管理 API（懒初始化，不产生额外数据库文件）

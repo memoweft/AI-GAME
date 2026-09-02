@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Protocol
 
 from .action import Action, ActionExecution
+from .executor import ActionExecutionResult
 from .checkpoint import Checkpoint, CheckpointDraft
 from .event import RuntimeEvent, RuntimeEventDraft
 from .fact import Fact
@@ -87,6 +88,8 @@ class RuntimeStorePort(Protocol):
 
     def load_action(self, task_id: str, action_id: str) -> Action: ...
 
+    def load_action_by_id(self, action_id: str) -> Action: ...
+
     def list_actions(self, task_id: str) -> tuple[Action, ...]: ...
 
     def record_action_execution(
@@ -99,6 +102,17 @@ class RuntimeStorePort(Protocol):
         execution: ActionExecution,
         event: RuntimeEventDraft,
     ) -> RuntimeEvent: ...
+
+    def record_body_execution_once(
+        self,
+        *,
+        before_task: Task,
+        after_task: Task,
+        before_action: Action,
+        after_action: Action,
+        execution: ActionExecution,
+        event: RuntimeEventDraft,
+    ) -> tuple[ActionExecution, bool]: ...
 
     def load_action_execution(self, action_id: str) -> ActionExecution: ...
 
@@ -189,6 +203,21 @@ class RuntimeStorePort(Protocol):
 
 class ObservationProviderPort(Protocol):
     def capture(self, device_id: str) -> RawObservation: ...
+
+
+class BodyCommandDispatcherPort(Protocol):
+    """R4 seam from one persisted Kernel Action to one DeviceBody command.
+
+    The dispatcher owns cross-store command/receipt reconciliation.  It returns
+    only a transport result, so RuntimeKernel remains the sole writer of
+    ``ActionExecution`` and the sole verification authority.
+    """
+
+    def dispatch(
+        self, *, action: Action, task_id: str, device_id: str
+    ) -> ActionExecutionResult: ...
+
+    def capture_fresh_snapshot(self, *, kernel_action_id: str) -> object: ...
 
 
 class ArtifactStorePort(Protocol):

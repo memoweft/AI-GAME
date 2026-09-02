@@ -7,7 +7,6 @@ import re
 
 _SPACE = re.compile(r"\s+")
 _STZB_NAMES = ("率土之滨", "率土")
-_SOUL_NAMES = ("soul", "Soul", "SOUL")
 _STZB_LAUNCH = re.compile(r"(?:打开|启动|进入|登录)(?:《)?(?:游戏)?率土(?:之滨)?")
 
 
@@ -17,15 +16,11 @@ def resolve_mobile_skill_scope(goal: str, target_id: str | None) -> str | None:
     The scope describes reusable task knowledge, not a device connection.  A
     task remains bound to its selected target separately, so verified game
     experience can later transfer from an emulator to a compatible tablet.
-    Soul is deliberately excluded because its conversation and relationship
-    learning is owned by its specialized external owner rather than MobileTask.
     """
 
     del target_id
     normalized = _SPACE.sub(" ", goal.strip())
     if not normalized:
-        return None
-    if any(name in normalized for name in _SOUL_NAMES):
         return None
     if any(name in normalized for name in _STZB_NAMES):
         if any(word in normalized for word in ("奖励", "领取", "签到", "日常")):

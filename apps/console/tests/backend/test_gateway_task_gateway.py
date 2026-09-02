@@ -404,7 +404,7 @@ class TestGetTaskSnapshot:
             after_observation_id=after.id,
             verdict=VerificationVerdict.SUCCESS,
             reason="verified",
-            evidence_refs=(f"observation:{after.id}",),
+            evidence_refs=(after.screenshot.artifact.reference,),
             method=VerificationMethod.RUNTIME_RULE,
             verified_facts=(fact,),
             complete_stage=True,

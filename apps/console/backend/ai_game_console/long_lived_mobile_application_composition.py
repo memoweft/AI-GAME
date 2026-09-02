@@ -6,7 +6,7 @@ import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Protocol
 
 from .application_runtime import (
     ApplicationRuntime,
@@ -40,12 +40,107 @@ class LongLivedMobileApplicationComposition:
 
 
 @dataclass(frozen=True, slots=True)
+class ActivitySliceDispatchRequest:
+    """Narrow transport facts for one trigger-owned ActivitySlice.
+
+    The ActivitySlice domain and its state machine remain owned by
+    ``agent_runtime.activity_slice``.  This DTO carries only the correlation
+    facts the normal mobile composition must lend to an injected adapter.
+    """
+
+    idempotency_key: str
+    application_instance_id: str
+    application_cycle: int
+    goal_id: str
+    target_id: str
+    objective: str
+    trigger_id: str
+    trigger_kind: str
+    initial_application_context: str
+
+
+@dataclass(frozen=True, slots=True)
+class ActivitySliceStepDispatch:
+    """Stable identity of one authoritative ActivityStep requesting ACT."""
+
+    step_id: str
+    ordinal: int
+    idempotency_key: str
+
+
+@dataclass(frozen=True, slots=True)
+class ActivitySliceDispatchResult:
+    """ApplicationRuntime-facing settlement of one persisted ActivitySlice."""
+
+    receipt_id: str
+    slice_id: str
+    status: str
+    evidence: str
+    accepted: bool
+    physical_action_sent: bool
+    before_evidence_id: str | None
+    after_evidence_id: str | None
+    step_ids: tuple[str, ...]
+    kernel_task_ids: tuple[str, ...]
+
+
+class ActivitySliceRunnerPort(Protocol):
+    """Adapter implemented around the authoritative ActivitySliceSupervisor.
+
+    ``dispatch_activity_slice`` may call ``execute_step`` several times, but
+    only after the corresponding ActivityStep has a durable idempotency key.
+    Replays must return the persisted result without invoking the callback.
+    """
+
+    def dispatch_activity_slice(
+        self,
+        request: ActivitySliceDispatchRequest,
+        execute_step: Callable[[ActivitySliceStepDispatch], KernelApplicationCycleResult],
+    ) -> ActivitySliceDispatchResult: ...
+
+    def inspect_activity_slice(self, receipt_id: str) -> ActivitySliceDispatchResult: ...
+
+    def reconcile_activity_slice(
+        self, idempotency_key: str
+    ) -> ActivitySliceDispatchResult | None: ...
+
+    def active_activity_step(
+        self, idempotency_key: str
+    ) -> ActivitySliceStepDispatch | None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class DurableChildAuthorization:
+    """Read-only correlation facts for one in-flight Kernel child task.
+
+    This deliberately exposes only the durable identifiers needed by the
+    DeviceBody owner resolver.  Callers must still authenticate the Kernel
+    Task's accepted-cycle event; this projection is not a general-purpose
+    authorization grant for every task sharing a GoalRun.
+    """
+
+    instance_id: str
+    goal_id: str
+    target_id: str
+    activated_at: str
+    application_cycle: int
+    intent_phase: str
+    reservation_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class _Binding:
     instance_id: str
     goal_id: str
     target_id: str
-    application_id: str
+    initial_application_context: str
     activated_at: str | None
+
+    @property
+    def application_id(self) -> str:
+        """Legacy read alias; no R4 code may treat it as a foreground fence."""
+
+        return self.initial_application_context
 
 
 class _BindingStore:
@@ -69,7 +164,12 @@ class _BindingStore:
             )
 
     def put(
-        self, *, instance_id: str, goal_id: str, target_id: str, application_id: str
+        self,
+        *,
+        instance_id: str,
+        goal_id: str,
+        target_id: str,
+        initial_application_context: str,
     ) -> _Binding:
         now = _now()
         with self._lock, self._connection(write=True) as db:
@@ -80,13 +180,13 @@ class _BindingStore:
             if row is None:
                 db.execute(
                     "INSERT INTO long_lived_mobile_bindings VALUES(?,?,?,?,NULL,?)",
-                    (instance_id, goal_id, target_id, application_id, now),
+                    (instance_id, goal_id, target_id, initial_application_context, now),
                 )
             elif (
                 str(row["goal_id"]),
                 str(row["target_id"]),
                 str(row["application_id"]),
-            ) != (goal_id, target_id, application_id):
+            ) != (goal_id, target_id, initial_application_context):
                 raise ValueError("long-lived mobile binding correlation conflict")
         return self.get(instance_id)
 
@@ -141,12 +241,14 @@ class LongLivedMobileApplicationRuntimeGateway:
         *,
         kernel: KernelCanaryCoordinator,
         observation_provider: AndroidObservationProvider,
+        activity_slice_runner: ActivitySliceRunnerPort | None = None,
     ) -> None:
         self.database_path = Path(database_path)
         self._archive = _SQLiteApplicationStore(self.database_path)
         self._bindings = _BindingStore(self.database_path)
         self._kernel = kernel
         self._observation_provider = observation_provider
+        self._activity_slice_runner = activity_slice_runner
         self._runtime: ApplicationRuntime | None = None
         self._closed = False
         self._lock = threading.RLock()
@@ -160,9 +262,20 @@ class LongLivedMobileApplicationRuntimeGateway:
         client_request_id: str,
         goal_id: str,
         target_id: str,
-        application_id: str,
+        initial_application_context: str | None = None,
+        application_id: str | None = None,
         initial_input: str,
     ) -> Any:
+        # ``application_id`` is retained only for callers replaying an R3
+        # request.  The old value describes the first observed application;
+        # it is not an authorization to pin later foreground observations.
+        if initial_application_context is None:
+            initial_application_context = application_id
+        elif application_id is not None and application_id != initial_application_context:
+            raise ValueError("initial application context conflicts with legacy application_id")
+        initial_application_context = str(initial_application_context or "").strip()
+        if not initial_application_context:
+            raise ValueError("initial application context must not be blank")
         state = self._runtime_for_new_work().start(
             _INTERNAL_PROFILE_ID,
             client_request_id,
@@ -173,7 +286,7 @@ class LongLivedMobileApplicationRuntimeGateway:
             instance_id=state.instance_id,
             goal_id=goal_id,
             target_id=target_id,
-            application_id=application_id,
+            initial_application_context=initial_application_context,
         )
         return self.inspect(state.instance_id)
 
@@ -240,6 +353,62 @@ class LongLivedMobileApplicationRuntimeGateway:
     def binding(self, instance_id: str) -> _Binding:
         return self._bindings.get(instance_id)
 
+    def durable_child_authorization(
+        self, instance_id: str
+    ) -> DurableChildAuthorization | None:
+        """Return the one dispatching child correlation, if it is unambiguous.
+
+        The DeviceBody bridge calls this during a Kernel dispatch.  The method
+        is intentionally read-only and fail-closed: an unactivated binding,
+        a terminal instance, or more/less than one unfinished intent has no
+        child authorization to lend to a Kernel Task.
+        """
+
+        binding = self._bindings.get(instance_id)
+        state = self._archive.inspect(instance_id)
+        if binding.activated_at is None or state.terminal:
+            return None
+        unfinished = tuple(
+            intent
+            for intent in state.intents
+            if intent.finalized_at is None
+            and intent.phase in {
+                "open",
+                "reserved",
+                "dispatching",
+                "dispatched",
+                "reconciled",
+            }
+        )
+        if len(unfinished) != 1:
+            return None
+        intent = unfinished[0]
+        if (
+            intent.phase != "dispatching"
+            or not isinstance(intent.reservation_id, str)
+            or not intent.reservation_id.strip()
+        ):
+            return None
+        reservation_id = intent.reservation_id
+        if self._activity_slice_runner is not None:
+            active_step = self._activity_slice_runner.active_activity_step(
+                reservation_id
+            )
+            if active_step is None:
+                return None
+            reservation_id = _activity_slice_cycle_key(
+                reservation_id, active_step
+            )
+        return DurableChildAuthorization(
+            instance_id=binding.instance_id,
+            goal_id=binding.goal_id,
+            target_id=binding.target_id,
+            activated_at=binding.activated_at,
+            application_cycle=int(intent.cycle),
+            intent_phase=intent.phase,
+            reservation_id=reservation_id,
+        )
+
     def fence_stop_before_start(self, instance_id: str, request_id: str) -> Any:
         """Persist the Goal stop fence before recovery workers can run."""
 
@@ -260,6 +429,37 @@ class LongLivedMobileApplicationRuntimeGateway:
         self._archive.settle_stop_if_idle(instance_id)
         return self.inspect(instance_id)
 
+    def fence_pause_before_start(self, instance_id: str, request_id: str) -> Any:
+        """Persist a non-terminal scheduler fence before recovery workers run.
+
+        ``ApplicationRuntime.recover`` deliberately leaves a paused instance
+        out of the planning queue (while still reconciling an already
+        dispatched intent).  Writing the real ApplicationRuntime ``Pause``
+        command through its archive therefore closes the launcher window in
+        which an R2-era, non-selected binding could otherwise re-enter the
+        FIFO before the R3 AttentionScheduler has restored its selection.
+
+        The request id and digest use the same durable idempotency contract as
+        the live ``command`` API.  A replay observes the original accepted
+        command; it does not manufacture a second pause or a projected state.
+        """
+
+        state = self.inspect(instance_id)
+        if state.status in {"paused", "stopped", "completed", "failed"}:
+            return state
+        digest = request_digest(
+            "command",
+            {"instance_id": instance_id, "tag": "Pause", "content": None},
+        )
+        self._archive.accept_command(
+            instance_id,
+            "Pause",
+            None,
+            request_id,
+            digest,
+        )
+        return self.inspect(instance_id)
+
     def shutdown(self) -> None:
         with self._lock:
             self._closed = True
@@ -278,11 +478,19 @@ class LongLivedMobileApplicationRuntimeGateway:
                     profile=_INTERNAL_PROFILE_ID,
                     memory_scope=_INTERNAL_PROFILE_ID,
                     observation_port=_ObservationPort(
-                        self._bindings, self._observation_provider, self._kernel
+                        self._bindings,
+                        self._observation_provider,
+                        self._kernel,
+                        self._activity_slice_runner,
                     ),
                     policy=_Policy(self._bindings),
-                    execution_owner=_ExecutionOwner(self._bindings, self._kernel),
-                    verifier=_Verifier(self._kernel),
+                    execution_owner=_ExecutionOwner(
+                        self._bindings,
+                        self._kernel,
+                        self._observation_provider,
+                        self._activity_slice_runner,
+                    ),
+                    verifier=_Verifier(self._kernel, self._activity_slice_runner),
                 )
             return self._runtime
 
@@ -293,10 +501,12 @@ class _ObservationPort:
         bindings: _BindingStore,
         provider: AndroidObservationProvider,
         kernel: KernelCanaryCoordinator,
+        activity_slice_runner: ActivitySliceRunnerPort | None = None,
     ) -> None:
         self._bindings = bindings
         self._provider = provider
         self._kernel = kernel
+        self._activity_slice_runner = activity_slice_runner
 
     def observe(self, instance: Any) -> Observation:
         try:
@@ -305,17 +515,11 @@ class _ObservationPort:
         except (KeyError, OSError, RuntimeError, ValueError):
             raise RetryableApplicationError(2.0) from None
         foreground = str(state.foreground_app or "").strip()
-        if foreground != binding.application_id:
-            # [constraint-source: ARCH_INVARIANT; ref: current-target validation]
-            # A temporary foreground change is a resumable event gate.  It
-            # must neither terminalize the long-lived GoalRun nor authorize an
-            # action against a different application.
-            raise RetryableApplicationError(2.0)
         material = "\0".join(
             (
                 instance.instance_id,
                 binding.target_id,
-                binding.application_id,
+                binding.initial_application_context,
                 foreground,
                 str(state.captured_at),
                 str(instance.revision),
@@ -331,7 +535,10 @@ class _ObservationPort:
             fresh=True,
             data={
                 "target_id": binding.target_id,
-                "application_id": binding.application_id,
+                # R4 compatibility projection: this is the app visible when
+                # the old long-lived binding was created.  Foreground is a
+                # per-observation fact and intentionally may differ.
+                "initial_application_context": binding.initial_application_context,
                 "foreground_app": foreground or None,
                 "connection_state": state.connection_state.value,
                 "orientation": state.orientation.value,
@@ -345,6 +552,22 @@ class _ObservationPort:
     ) -> Observation:
         del intent
         if receipt.receipt_id:
+            if self._activity_slice_runner is not None:
+                result = self._activity_slice_runner.inspect_activity_slice(
+                    receipt.receipt_id
+                )
+                if result.after_evidence_id:
+                    return Observation(
+                        result.after_evidence_id,
+                        "ActivitySlice 已结算全部连续 Step，并保留最后一次新鲜动作后证据。",
+                        fresh=True,
+                        data=_activity_slice_result_data(result),
+                    )
+                if result.accepted and result.physical_action_sent:
+                    raise RuntimeError(
+                        "accepted ActivitySlice has no durable after evidence"
+                    )
+                return self.observe(instance)
             result = self._kernel.inspect_application_cycle(receipt.receipt_id)
             if result.after_evidence_id:
                 return Observation(
@@ -417,7 +640,7 @@ class _Policy:
                     {
                         "goal_id": binding.goal_id,
                         "target_id": binding.target_id,
-                        "application_id": binding.application_id,
+                        "initial_application_context": binding.initial_application_context,
                         "trigger_id": trigger_id,
                         "trigger_kind": trigger_kind,
                     },
@@ -433,10 +656,16 @@ class _Policy:
 
 class _ExecutionOwner:
     def __init__(
-        self, bindings: _BindingStore, kernel: KernelCanaryCoordinator
+        self,
+        bindings: _BindingStore,
+        kernel: KernelCanaryCoordinator,
+        observation_provider: AndroidObservationProvider,
+        activity_slice_runner: ActivitySliceRunnerPort | None = None,
     ) -> None:
         self._bindings = bindings
         self._kernel = kernel
+        self._observation_provider = observation_provider
+        self._activity_slice_runner = activity_slice_runner
 
     def reserve(self, instance: Any, intent: Intent) -> str:
         runtime_intent = _latest_cycle_intent(instance)
@@ -464,17 +693,39 @@ class _ExecutionOwner:
         )
         if trigger is None:
             raise ValueError("long-lived mobile trigger is missing")
-        cycle_goal = str(instance.initial_input or "")
-        if instance.inputs:
-            input_history = "\n".join(
-                f"{index}. {content}"
-                for index, content in enumerate(instance.inputs, start=1)
+        cycle_goal = _application_cycle_goal(instance)
+        if self._activity_slice_runner is not None:
+            slice_result = self._activity_slice_runner.dispatch_activity_slice(
+                ActivitySliceDispatchRequest(
+                    idempotency_key=reservation_id,
+                    application_instance_id=instance.instance_id,
+                    application_cycle=runtime_intent.cycle,
+                    goal_id=binding.goal_id,
+                    target_id=binding.target_id,
+                    objective=cycle_goal,
+                    trigger_id=trigger_id,
+                    trigger_kind=str(intent.arguments.get("trigger_kind") or ""),
+                    initial_application_context=binding.initial_application_context,
+                ),
+                lambda step: self._execute_activity_step(
+                    instance=instance,
+                    runtime_intent=runtime_intent,
+                    binding=binding,
+                    reservation_id=reservation_id,
+                    cycle_goal=cycle_goal,
+                    step=step,
+                ),
             )
-            cycle_goal = (
-                f"{cycle_goal}\n\n"
-                "同一 GoalRun 当前已接收的授权输入历史（按顺序）：\n"
-                f"{input_history}"
+            return ExecutionReceipt(
+                slice_result.receipt_id,
+                accepted=slice_result.accepted,
+                detail=(
+                    f"activity slice {slice_result.slice_id} {slice_result.status}; "
+                    f"{len(slice_result.step_ids)} step(s) settled"
+                ),
             )
+
+        current_foreground = self._read_foreground(binding.target_id)
         result = self._kernel.execute_application_cycle(
             goal=cycle_goal,
             goal_id=binding.goal_id,
@@ -482,7 +733,10 @@ class _ExecutionOwner:
             application_cycle=runtime_intent.cycle,
             cycle_key=reservation_id,
             target_id=binding.target_id,
-            expected_application_id=binding.application_id,
+            # The legacy bounded-cycle API still needs this positional
+            # compatibility argument.  Supply the foreground just observed
+            # for this dispatch, never the old binding's initial context.
+            expected_application_id=current_foreground,
         )
         return ExecutionReceipt(
             result.task_id,
@@ -490,10 +744,99 @@ class _ExecutionOwner:
             detail=f"kernel application cycle {result.status}",
         )
 
+    def _execute_activity_step(
+        self,
+        *,
+        instance: Any,
+        runtime_intent: Any,
+        binding: _Binding,
+        reservation_id: str,
+        cycle_goal: str,
+        step: ActivitySliceStepDispatch,
+    ) -> KernelApplicationCycleResult:
+        """Dispatch exactly one persisted ActivityStep through RuntimeKernel."""
+
+        current_foreground = self._read_foreground(binding.target_id)
+        cycle_key = _activity_slice_cycle_key(reservation_id, step)
+        try:
+            return self._kernel.execute_application_cycle(
+                goal=(
+                    f"{cycle_goal}\n\n"
+                    f"ActivitySlice Step {step.ordinal}；一次只执行一个可验证动作。"
+                ),
+                goal_id=binding.goal_id,
+                application_instance_id=instance.instance_id,
+                # DeviceBody authorization deliberately keeps the outer durable
+                # ApplicationRuntime cycle.  Step uniqueness lives in cycle_key.
+                application_cycle=runtime_intent.cycle,
+                cycle_key=cycle_key,
+                target_id=binding.target_id,
+                expected_application_id=current_foreground,
+                stage_objective=(
+                    f"推进当前 Goal 的下一步：{cycle_goal}；只执行一个可验证的原子动作，"
+                    "动作后立即重新观察、验证，并交回 ActivitySlice。"
+                ),
+                completion_criteria=(
+                    f"ActivitySlice Step {step.ordinal} 完成一个真实原子动作，"
+                    "并形成动作后观察与验证",
+                ),
+            )
+        except Exception:
+            # The synchronous Kernel cycle may fail after its durable Task and
+            # before any Action exists (for example, a malformed local-model
+            # readiness tool call).  Let the Kernel reconcile that exact key
+            # and settle the Slice as a no-action yield instead of leaving its
+            # Step permanently EXECUTING.  Once any physical effect exists we
+            # still fail closed: the original exception must surface so normal
+            # restart recovery can preserve the no-replay boundary.
+            reconciled = self._kernel.reconcile_application_cycle(cycle_key)
+            if reconciled is not None and not reconciled.physical_action_sent:
+                return reconciled
+            raise
+
+    def _read_foreground(self, target_id: str) -> str:
+        try:
+            current_foreground = str(
+                self._observation_provider.read_device_state(
+                    target_id
+                ).foreground_app
+                or ""
+            ).strip()
+        except (OSError, RuntimeError, ValueError) as error:
+            raise RetryableApplicationError(2.0) from error
+        if not current_foreground:
+            raise RetryableApplicationError(2.0)
+        return current_foreground
+
     def reconcile(self, instance: Any, runtime_intent: Any) -> ExecutionReconciliation:
         cycle_key = runtime_intent.reservation_id or _cycle_key(
             instance.instance_id, runtime_intent.intent_id
         )
+        if self._activity_slice_runner is not None:
+            slice_result = self._activity_slice_runner.reconcile_activity_slice(
+                cycle_key
+            )
+            if slice_result is None:
+                return ExecutionReconciliation(
+                    Outcome(
+                        "confirmed_failure",
+                        "ActivitySlice ledger proves no dispatch was created",
+                        terminal=False,
+                    ),
+                    f"activity-slice-absent:{runtime_intent.intent_id}",
+                    ExecutionReceipt(None, False, "ActivitySlice dispatch did not occur"),
+                )
+            return ExecutionReconciliation(
+                _activity_slice_outcome(slice_result),
+                slice_result.after_evidence_id
+                or slice_result.before_evidence_id
+                or f"activity-slice:{slice_result.slice_id}",
+                ExecutionReceipt(
+                    slice_result.receipt_id,
+                    slice_result.accepted,
+                    f"activity slice {slice_result.slice_id} {slice_result.status}",
+                ),
+            )
         result = self._kernel.reconcile_application_cycle(cycle_key)
         if result is None:
             return ExecutionReconciliation(
@@ -532,8 +875,13 @@ class _ExecutionOwner:
 
 
 class _Verifier:
-    def __init__(self, kernel: KernelCanaryCoordinator) -> None:
+    def __init__(
+        self,
+        kernel: KernelCanaryCoordinator,
+        activity_slice_runner: ActivitySliceRunnerPort | None = None,
+    ) -> None:
         self._kernel = kernel
+        self._activity_slice_runner = activity_slice_runner
 
     def verify(self, context: Any) -> Outcome:
         if context.intent.name != _CYCLE_INTENT or not context.receipt.receipt_id:
@@ -542,6 +890,19 @@ class _Verifier:
                 "long-lived mobile cycle did not return a Kernel task receipt",
                 terminal=False,
             )
+        if self._activity_slice_runner is not None:
+            result = self._activity_slice_runner.inspect_activity_slice(
+                context.receipt.receipt_id
+            )
+            if (
+                result.status == "confirmed_success"
+                and (
+                    not result.physical_action_sent
+                    or result.after_evidence_id == context.after.evidence_id
+                )
+            ):
+                return Outcome("confirmed_success", result.evidence, terminal=False)
+            return _activity_slice_outcome(result)
         result = self._kernel.inspect_application_cycle(
             context.receipt.receipt_id
         )
@@ -571,6 +932,7 @@ def compose_long_lived_mobile_application_runtime(
     *,
     kernel: KernelCanaryCoordinator,
     observation_provider: AndroidObservationProvider,
+    activity_slice_runner: ActivitySliceRunnerPort | None = None,
 ) -> LongLivedMobileApplicationComposition:
     database = data_dir / APPLICATION_DATABASE_FILENAME
     return LongLivedMobileApplicationComposition(
@@ -578,6 +940,7 @@ def compose_long_lived_mobile_application_runtime(
             database,
             kernel=kernel,
             observation_provider=observation_provider,
+            activity_slice_runner=activity_slice_runner,
         ),
         database,
     )
@@ -737,6 +1100,55 @@ def _cycle_key(instance_id: str, intent_id: str) -> str:
         f"{instance_id}\0{intent_id}".encode("utf-8")
     ).hexdigest()
     return f"long-lived-mobile-cycle:{digest}"
+
+
+def _activity_slice_cycle_key(
+    reservation_id: str, step: ActivitySliceStepDispatch
+) -> str:
+    digest = hashlib.sha256(
+        (
+            f"{reservation_id}\0{step.step_id}\0{step.ordinal}\0"
+            f"{step.idempotency_key}"
+        ).encode("utf-8")
+    ).hexdigest()
+    return f"{reservation_id}:activity-step:{step.ordinal}:{digest}"
+
+
+def _application_cycle_goal(instance: Any) -> str:
+    cycle_goal = str(instance.initial_input or "")
+    if instance.inputs:
+        input_history = "\n".join(
+            f"{index}. {content}"
+            for index, content in enumerate(instance.inputs, start=1)
+        )
+        cycle_goal = (
+            f"{cycle_goal}\n\n"
+            "同一 GoalRun 当前已接收的授权输入历史（按顺序）：\n"
+            f"{input_history}"
+        )
+    return cycle_goal
+
+
+def _activity_slice_outcome(result: ActivitySliceDispatchResult) -> Outcome:
+    if result.status == "confirmed_success":
+        return Outcome("confirmed_success", result.evidence, terminal=False)
+    if result.status == "confirmed_failure":
+        return Outcome("confirmed_failure", result.evidence, terminal=False)
+    if result.status == "uncertain":
+        return Outcome("uncertain", result.evidence, terminal=True)
+    return Outcome("unconfirmed", result.evidence, terminal=True)
+
+
+def _activity_slice_result_data(
+    result: ActivitySliceDispatchResult,
+) -> dict[str, Any]:
+    return {
+        "activity_slice_id": result.slice_id,
+        "activity_slice_status": result.status,
+        "activity_step_ids": list(result.step_ids),
+        "kernel_task_ids": list(result.kernel_task_ids),
+        "physical_action_sent": result.physical_action_sent,
+    }
 
 
 def _result_data(result: KernelApplicationCycleResult) -> dict[str, Any]:

@@ -11,9 +11,16 @@ class ActionType(StrEnum):
     LONG_PRESS = "long_press"
     SWIPE = "swipe"
     INPUT_TEXT = "input_text"
+    # ``INPUT_TEXT`` remains the legacy model/runtime spelling.  The R4
+    # transport contract uses the explicit Unicode variant so that a caller
+    # cannot accidentally treat an ASCII-only transport acknowledgement as a
+    # verified text entry.
+    INPUT_TEXT_UNICODE = "input_text_unicode"
     BACK = "back"
     HOME = "home"
+    RECENTS = "recents"
     OPEN_APP = "open_app"
+    CAPTURE_SNAPSHOT = "capture_snapshot"
     WAIT = "wait"
     SCREENSHOT = "screenshot"
 
@@ -57,6 +64,8 @@ class ActionExecution:
     error: ExecutionError | None
     started_at: str
     finished_at: str
+    body_command_id: str | None = None
+    body_receipt_id: str | None = None
 
     def __post_init__(self) -> None:
         _required(self.id, "action_execution.id")
@@ -64,6 +73,13 @@ class ActionExecution:
         _required(self.device_id, "action_execution.device_id")
         if self.lease_ref is not None:
             _required(self.lease_ref, "action_execution.lease_ref")
+        if (self.body_command_id is None) != (self.body_receipt_id is None):
+            raise ValueError(
+                "ActionExecution body_command_id and body_receipt_id must be paired"
+            )
+        if self.body_command_id is not None:
+            _required(self.body_command_id, "action_execution.body_command_id")
+            _required(self.body_receipt_id or "", "action_execution.body_receipt_id")
         started = _utc_timestamp(self.started_at, "action_execution.started_at")
         finished = _utc_timestamp(self.finished_at, "action_execution.finished_at")
         if finished < started:

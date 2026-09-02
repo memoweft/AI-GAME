@@ -1,8 +1,7 @@
 """Kernel control surface: user-directed pause/resume/cancel/takeover.
 
-Phase 6 Week 1. The frozen Gateway contract
-(``docs/NEW/PHASE_1_GATEWAY_CONTRACT_DESIGN.md`` §9) maps control commands
-onto the existing Task state machine:
+The retained Gateway compatibility surface maps control commands onto the
+existing Task state machine:
 
 - ``pause``    RUNNING -> PAUSED   (event ``TaskPaused``, actor gateway)
 - ``resume``   PAUSED  -> RUNNING  (event ``TaskResumed``; the runtime must

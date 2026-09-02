@@ -1,4 +1,4 @@
-"""Build and verify a bounded U9 release-candidate archive.
+"""Build and verify a bounded local release-candidate archive.
 
 The archive is an installation artifact, not deployment evidence.  It contains
 only the local console source, the already-built browser bundle, sanitized
@@ -28,12 +28,8 @@ NOTES_NAME = "RELEASE-NOTES.md"
 MANIFEST_SCHEMA_VERSION = 1
 _EXCLUDED_DIRECTORY_NAMES = frozenset({"__pycache__", ".pytest_cache", "node_modules"})
 _POLICY_DOCUMENTS = (
-    "docs/product/01_PRODUCT_SPEC.md",
-    "docs/product/04_AUTONOMY_AND_LEARNING.md",
-    "docs/product/06_IMPLEMENTATION_ROADMAP.md",
-    "docs/product/07_ACCEPTANCE_AND_EVIDENCE.md",
-    "docs/product/09_DECISIONS_AND_OPEN_QUESTIONS.md",
-    "docs/product/work-orders/U9_PRODUCTION_HARDENING.md",
+    "docs/product/VISION.md",
+    "docs/product/PROJECT_MAP.md",
 )
 _ROOT_LAUNCHERS = ("启动控制台.cmd", "停止控制台.cmd")
 _RELEASE_SCRIPTS = ("scripts/console.ps1", "scripts/production-release.ps1")
@@ -122,7 +118,7 @@ def build_release_candidate(
         "deployment_note": (
             "This archive is a release candidate only. Installation, target approval, "
             "long-run observation, failure injection, upgrade, rollback, and restore "
-            "remain separate U9 evidence."
+            "remain separate verification work."
         ),
         "application": project,
         "source_control": source_control,
@@ -379,8 +375,8 @@ def _release_notes(release_id: str, project: dict[str, str], source_state: str) 
             "It is intentionally local-only (`127.0.0.1`) and excludes runtime data,",
             "credentials, model weights, screenshots, and logs.",
             "",
-            "Before operating it on a new target, complete the U9 approved install plan",
-            "and record fresh-install, upgrade, rollback, restore, long-run, and failure",
+            "Before operating it on a new target, verify fresh installation, upgrade,",
+            "rollback, restore, long-run behavior, and failure",
             "injection evidence. Do not use a source checkout alone as a data rollback.",
             "",
         )
@@ -445,7 +441,7 @@ def _slug(value: str) -> str:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Build or verify an AI-GAME U9 release candidate.")
+    parser = argparse.ArgumentParser(description="Build or verify an AI-GAME release candidate.")
     commands = parser.add_subparsers(dest="command", required=True)
     build = commands.add_parser("build")
     build.add_argument("--project-root", required=True)

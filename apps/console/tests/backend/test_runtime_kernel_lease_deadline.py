@@ -427,7 +427,7 @@ def _build_v4_database(path: Path) -> None:
     """手工构造 v4（Phase 5 迁移前）数据库，含一行无 deadline_at 的 Lease"""
     connection = sqlite3.connect(path)
     connection.row_factory = sqlite3.Row
-    connection.executescript(store_module._PHASE_2_SCHEMA)
+    connection.executescript(store_module._RUNTIME_SCHEMA)
     now = "2026-08-17T14:00:00+00:00"
     connection.execute(
         "INSERT INTO runtime_schema(revision, applied_at) VALUES (1, ?)", (now,)
@@ -452,6 +452,26 @@ def _build_v4_database(path: Path) -> None:
         connection.execute(f"PRAGMA user_version = {target_revision}")
         connection.commit()
 
+    # The legacy lease is valid v4 data: its task parent exists.  Leaving a
+    # dangling task reference would make the later R4 action-table rebuild's
+    # full foreign-key audit fail for an unrelated pre-existing corruption.
+    connection.execute(
+        """
+        INSERT INTO runtime_tasks (
+            id, schema_version, goal, status, source_client_id,
+            source_conversation_id, source_initial_message_id, device_id,
+            current_stage_id, last_observation_id,
+            last_meaningful_progress_at, failure_state_json,
+            latest_checkpoint_id, created_at, updated_at, terminal_at
+        ) VALUES (
+            'task-legacy', 1, 'legacy lease migration', 'CREATED',
+            'legacy-client', 'legacy-conversation', 'legacy-message',
+            'device-legacy', NULL, NULL, NULL, NULL, NULL,
+            '2026-08-17T14:00:00+00:00',
+            '2026-08-17T14:00:00+00:00', NULL
+        )
+        """
+    )
     connection.execute(
         """
         INSERT INTO runtime_device_leases (
@@ -468,8 +488,8 @@ def _build_v4_database(path: Path) -> None:
     connection.close()
 
 
-def test_migration_4_to_5_backfills_deadline_at(tmp_path: Path) -> None:
-    """v4 库迁移到 v5：schema 升版 + 存量 Lease 回填 deadline_at = acquired_at + 300s"""
+def test_migration_from_v4_reaches_current_schema_and_backfills_deadline_at(tmp_path: Path) -> None:
+    """v4 库迁移至当前 schema，且存量 Lease deadline 回填保持正确。"""
     db_path = tmp_path / "runtime.db"
     _build_v4_database(db_path)
 
@@ -484,8 +504,8 @@ def test_migration_4_to_5_backfills_deadline_at(tmp_path: Path) -> None:
         max_revision = int(
             connection.execute("SELECT MAX(revision) FROM runtime_schema").fetchone()[0]
         )
-        assert user_version == 5
-        assert max_revision == 5
+        assert user_version == store_module._SCHEMA_REVISION
+        assert max_revision == store_module._SCHEMA_REVISION
 
     lease = store.get_lease("lease-legacy")
     assert lease is not None

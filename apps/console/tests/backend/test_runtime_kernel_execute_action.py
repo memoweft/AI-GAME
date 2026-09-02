@@ -301,6 +301,32 @@ def test_execute_action_different_types(tmp_path: Path) -> None:
     assert executor.calls[1][0] == "back"
 
 
+def test_typed_text_is_transient_but_executes_once_in_same_kernel(tmp_path: Path) -> None:
+    store = SQLiteRuntimeStore(tmp_path / "runtime.db")
+    executor = FakeActionExecutor()
+    kernel = RuntimeKernel(
+        store, observation_provider=FakeObservationProvider(),
+        artifact_store=FilesystemArtifactStore(tmp_path / "artifacts"),
+        action_executor=executor, clock=_clock(), id_factory=_ids(),
+    )
+    task = kernel.create_task(goal="Type safely", source=_source("typed"), device_id="device-typed")
+    stage = kernel.create_stage(task_id=task.id, objective="Type", completion_criteria=("typed",))
+    kernel.start_stage(task_id=task.id, stage_id=stage.id)
+    observation = kernel.capture_observation(task_id=task.id, device_id=task.device_id)
+    secret = "password=K1-DO-NOT-PERSIST"
+    action = kernel.propose_action(
+        task_id=task.id, stage_id=stage.id, based_on_observation_id=observation.id,
+        action_type=ActionType.INPUT_TEXT, params={"text": secret},
+        expected_outcome="text entered", proposed_by_call_id="typed-test",
+    )
+    assert secret not in (tmp_path / "runtime.db").read_bytes().decode("latin-1")
+    persisted = kernel.load_action(task.id, action.id)
+    assert persisted.params["text"]["redacted"] is True
+    kernel.execute_action(task_id=task.id, action_id=action.id)
+    assert executor.calls[-1] == ("input_text", "device-typed", {"text": secret})
+    assert secret not in (tmp_path / "runtime.db").read_bytes().decode("latin-1")
+
+
 def test_execute_action_releases_lease_on_executor_failure(tmp_path: Path) -> None:
     """验证执行器失败时 Lease 正确释放"""
     store = SQLiteRuntimeStore(tmp_path / "runtime.db")
@@ -541,6 +567,61 @@ def test_execute_action_raises_on_device_lease_conflict(tmp_path: Path) -> None:
     assert kernel.load_action(task_b.id, action_b.id).status is ActionStatus.PROPOSED
 
 
+def test_execute_action_reuses_exact_inflight_owner_action_lease(tmp_path: Path) -> None:
+    """进程恢复只可复用同一 Task/Action 已持久化的 in-flight Lease。"""
+    store = SQLiteRuntimeStore(tmp_path / "runtime.db")
+    store.initialize()
+    executor = FakeActionExecutor()
+    kernel = RuntimeKernel(
+        store,
+        observation_provider=FakeObservationProvider(),
+        artifact_store=FilesystemArtifactStore(tmp_path / "artifacts"),
+        action_executor=executor,
+        clock=_clock(),
+        id_factory=_ids(),
+    )
+
+    task = kernel.create_task(
+        goal="Recover one in-flight action",
+        source=_source("recover-inflight"),
+        device_id="device-recover-inflight",
+    )
+    stage = kernel.create_stage(
+        task_id=task.id,
+        objective="Recover tap",
+        completion_criteria=("done",),
+    )
+    kernel.start_stage(task_id=task.id, stage_id=stage.id)
+    observation = kernel.capture_observation(
+        task_id=task.id, device_id=task.device_id
+    )
+    action = kernel.propose_action(
+        task_id=task.id,
+        stage_id=stage.id,
+        based_on_observation_id=observation.id,
+        action_type=ActionType.TAP,
+        params={"x": 100, "y": 100},
+        expected_outcome="Tap executed",
+        proposed_by_call_id="op-recover-inflight",
+    )
+    lease = store.acquire_lease(
+        device_id=task.device_id,
+        task_id=task.id,
+        holder_process_id="previous-owner",
+        ttl_seconds=60,
+        lease_id=str(uuid4()),
+        acquired_at=TIMES[0],
+    )
+    store.update_lease_action(lease.id, action.id)
+
+    execution = kernel.execute_action(task_id=task.id, action_id=action.id)
+
+    assert execution.accepted is True
+    assert execution.lease_ref == lease.id
+    assert executor.calls == [("tap", task.device_id, {"x": 100, "y": 100})]
+    assert store.get_lease_for_device(task.device_id) is None
+
+
 def test_execute_action_rejects_replay_after_execution(tmp_path: Path) -> None:
     """验证已 EXECUTED 的 Action 拒绝二次 execute_action()（防重放）"""
     store = SQLiteRuntimeStore(tmp_path / "runtime.db")
@@ -637,3 +718,35 @@ def test_execute_action_rejects_stale_decision_observation(tmp_path: Path) -> No
     # Action 保持 PROPOSED，且未残留任何 Lease
     assert kernel.load_action(task.id, action.id).status is ActionStatus.PROPOSED
     assert store.get_lease_for_device("device-stale") is None
+
+
+def test_resume_invalidates_pre_control_observation_and_proposed_action(tmp_path: Path) -> None:
+    """A resumed task must re-observe; a paused-era proposal cannot dispatch."""
+
+    store = SQLiteRuntimeStore(tmp_path / "runtime.db")
+    kernel = RuntimeKernel(
+        store,
+        observation_provider=FakeObservationProvider(),
+        artifact_store=FilesystemArtifactStore(tmp_path / "artifacts"),
+        action_executor=FakeActionExecutor(),
+        clock=_clock(),
+        id_factory=_ids(),
+    )
+    task = kernel.create_task(goal="resume fresh", source=_source("resume-fresh"), device_id="device-resume-fresh")
+    stage = kernel.create_stage(task_id=task.id, objective="observe", completion_criteria=("done",))
+    kernel.start_stage(task_id=task.id, stage_id=stage.id)
+    observation = kernel.capture_observation(task_id=task.id, device_id=task.device_id)
+    action = kernel.propose_action(
+        task_id=task.id, stage_id=stage.id, based_on_observation_id=observation.id,
+        action_type=ActionType.TAP, params={"x": 7, "y": 9},
+        expected_outcome="tap", proposed_by_call_id="resume-fresh-plan",
+    )
+
+    kernel.apply_control(task_id=task.id, command="pause")
+    resumed = kernel.apply_control(task_id=task.id, command="resume")
+
+    assert resumed.task.last_observation_id is None
+    with pytest.raises(ValueError, match="Action decision is stale"):
+        kernel.execute_action(task_id=task.id, action_id=action.id)
+    assert kernel.load_action(task.id, action.id).status is ActionStatus.PROPOSED
+    assert store.get_lease_for_device(task.device_id) is None

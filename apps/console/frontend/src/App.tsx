@@ -1,14 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { LucideIcon } from 'lucide-react';
 import {
-  Activity,
   AlertCircle,
   AlertTriangle,
   Bot,
   Check,
   CirclePause,
   Gauge,
-  Heart,
   Info,
   Laptop,
   ListTodo,
@@ -24,12 +22,9 @@ import {
 } from 'lucide-react';
 import { API_BASE, ApiError, api } from './api';
 import { EmptyState } from './components/EmptyState';
-import { GatewayTaskWorkspace } from './components/GatewayTaskWorkspace';
 import { StatusBadge } from './components/StatusBadge';
 import { CloudModelSettings } from './components/CloudModelSettings';
-import { MobileTaskWorkspace } from './components/MobileTaskWorkspace';
-import { SoulWorkspace } from './components/SoulWorkspace';
-import { GoalWorkspace } from './components/GoalWorkspace';
+import { SessionWorkspace } from './components/SessionWorkspace';
 import { compactId, formatDateTime } from './format';
 import { capabilityRole, executorCapability, modelCapability } from './compat';
 import {
@@ -42,8 +37,7 @@ import type {
   Target,
 } from './types';
 
-type PageId = 'goal' | 'targets' | 'settings' | 'advanced';
-type DiagnosticId = 'mobile' | 'gateway' | 'soul';
+type PageId = 'goal' | 'targets' | 'settings';
 type ResourceKey = 'targets' | 'runtime';
 
 interface NavItem {
@@ -54,10 +48,9 @@ interface NavItem {
 }
 
 const NAV_ITEMS: NavItem[] = [
-  { id: 'goal', label: '目标', description: '说出结果，AI Game 自动检查环境并继续执行', icon: ListTodo },
-  { id: 'targets', label: '设备', description: '查看模拟器、真机和平板连接', icon: MonitorSmartphone },
+  { id: 'goal', label: '执行诊断', description: '开发者查看 AI-GAME 执行作业、事件、等待与恢复状态', icon: ListTodo },
+  { id: 'targets', label: '模拟器', description: '查看当前可用的 Android 模拟器', icon: MonitorSmartphone },
   { id: 'settings', label: '设置', description: '模型、执行器与连接配置', icon: Settings },
-  { id: 'advanced', label: '高级', description: '兼容运行时与迁移诊断', icon: MonitorCog },
 ];
 
 function toMessage(error: unknown): string {
@@ -111,10 +104,6 @@ export default function App() {
   }, [loadAll]);
 
   useEffect(() => {
-    if (window.location.hash.startsWith('#diagnostics/')) setPage('advanced');
-  }, []);
-
-  useEffect(() => {
     if (!toast) return;
     const timer = window.setTimeout(() => setToast(null), 6500);
     return () => window.clearTimeout(timer);
@@ -137,7 +126,7 @@ export default function App() {
       <aside className={`sidebar ${mobileNavOpen ? 'sidebar-open' : ''}`}>
         <div className="brand">
           <div className="brand-mark" aria-hidden="true"><Bot size={22} strokeWidth={2.2} /></div>
-          <div><strong>AI GAME</strong><span>本地手机智能体</span></div>
+          <div><strong>AI GAME</strong><span>Android 模拟器任务服务</span></div>
           <button className="icon-button sidebar-close" aria-label="关闭导航" onClick={() => setMobileNavOpen(false)}><X size={20} /></button>
         </div>
 
@@ -173,7 +162,7 @@ export default function App() {
         <header className="topbar">
           <div className="topbar-title">
             <button className="icon-button mobile-menu" aria-label="打开导航" onClick={() => setMobileNavOpen(true)}><Menu size={21} /></button>
-            <div><span className="topbar-kicker">LOCAL COMMAND CENTER</span><h1>{currentNav.label}</h1><p>{currentNav.description}</p></div>
+            <div><span className="topbar-kicker">LOCAL EXECUTION DIAGNOSTICS</span><h1>{currentNav.label}</h1><p>{currentNav.description}</p></div>
           </div>
           <div className="topbar-actions">
             <div className={`topbar-live ${connected ? 'topbar-live-ready' : ''}`}><span />{loading ? '连接中' : connected ? '本地在线' : '连接异常'}</div>
@@ -184,12 +173,11 @@ export default function App() {
         </header>
 
         <main className="page-content">
-          {page === 'goal' && <GoalWorkspace />}
+          {page === 'goal' && <SessionWorkspace />}
           {page === 'targets' && (
             <TargetsPage targets={targets} loading={loading} error={errors.targets} onRetry={() => void loadAll()} onTargets={setTargets} onToast={setToast} onRefresh={() => void loadAll()} />
           )}
           {page === 'settings' && <SettingsPage runtime={effectiveRuntime} loading={loading} error={errors.runtime} onRetry={() => void loadAll()} onRuntimeChanged={() => loadAll()} />}
-          {page === 'advanced' && <AdvancedDiagnostics targets={targets} />}
         </main>
       </div>
 
@@ -204,18 +192,6 @@ export default function App() {
       )}
     </div>
   );
-}
-
-function AdvancedDiagnostics({ targets }: { targets: Target[] }) {
-  const hashValue = window.location.hash.replace('#diagnostics/', '') as DiagnosticId;
-  const [diagnostic, setDiagnostic] = useState<DiagnosticId>(
-    ['mobile', 'gateway', 'soul'].includes(hashValue) ? hashValue : 'mobile',
-  );
-  const select = (next: DiagnosticId) => {
-    setDiagnostic(next);
-    window.history.replaceState(null, '', `#diagnostics/${next}`);
-  };
-  return <div className="page-stack advanced-diagnostics"><section className="panel advanced-warning"><AlertTriangle size={20} /><div><strong>兼容诊断</strong><p>这些是迁移期间保留的内部运行时视图，不是普通目标的创建入口。</p></div></section><div className="advanced-tabs" role="tablist" aria-label="兼容诊断"><button role="tab" aria-selected={diagnostic === 'mobile'} onClick={() => select('mobile')}><ListTodo size={16} /> MobileTask</button><button role="tab" aria-selected={diagnostic === 'gateway'} onClick={() => select('gateway')}><Activity size={16} /> Gateway</button><button role="tab" aria-selected={diagnostic === 'soul'} onClick={() => select('soul')}><Heart size={16} /> Soul</button></div>{diagnostic === 'mobile' && <MobileTaskWorkspace targets={targets} />}{diagnostic === 'gateway' && <GatewayTaskWorkspace />}{diagnostic === 'soul' && <SoulWorkspace />}</div>;
 }
 
 function PanelHeader({ title, description, action }: { title: string; description: string; action?: React.ReactNode }) {
@@ -249,9 +225,7 @@ function targetCapabilityLabel(capability: string): string {
 function targetConnectionLabel(target: Target): string {
   const reported = target.details?.connection_type;
   if (reported === 'emulator') return 'Android 模拟器';
-  if (reported === 'usb') return 'USB 真机 / 平板';
-  if (reported === 'wireless') return 'Wi-Fi 调试';
-  if (target.kind === 'android' || target.platform === 'android') return 'Android 设备';
+  if (target.kind === 'android' || target.platform === 'android') return 'Android 模拟器';
   return '本机设备';
 }
 
@@ -276,7 +250,7 @@ function TargetsPage({ targets, loading, error, onRetry, onTargets, onToast, onR
   return (
     <div className="page-stack">
       {error && <PageError message={error} onRetry={onRetry} compact />}
-      <div className="section-intro"><div><h2>设备与连接</h2><p>{readyCount} 个可用，共 {targets.length} 个设备。刷新连接只读取设备状态，不会操作屏幕。</p></div><button className="button button-primary" onClick={() => void discover()} disabled={discovering}>{discovering ? <span className="button-spinner" /> : <RefreshCw size={17} />}{discovering ? '正在刷新…' : '刷新设备'}</button></div>
+      <div className="section-intro"><div><h2>模拟器与连接</h2><p>{readyCount} 个可用，共 {targets.length} 个模拟器。刷新连接只读取运行状态，不会操作屏幕。</p></div><button className="button button-primary" onClick={() => void discover()} disabled={discovering}>{discovering ? <span className="button-spinner" /> : <RefreshCw size={17} />}{discovering ? '正在刷新…' : '刷新模拟器'}</button></div>
       {targets.length ? (
         <div className="target-grid">
           {targets.map((target) => {
@@ -294,15 +268,7 @@ function TargetsPage({ targets, loading, error, onRetry, onTargets, onToast, onR
             );
           })}
         </div>
-      ) : <section className="panel"><EmptyState icon={MonitorSmartphone} title="尚未发现 Android 设备" description="启动模拟器，或按下方提示连接真机和平板，然后刷新设备。" action={<button className="button button-primary" onClick={() => void discover()} disabled={discovering}><RefreshCw size={17} /> 刷新设备</button>} /></section>}
-
-      <section className="panel target-connect-guide">
-        <PanelHeader title="连接真机或平板" description="首次连接需要在设备上确认调试授权；连接成功后再点击“刷新设备”。" />
-        <div className="target-connect-options">
-          <article><strong>USB 连接</strong><p>用数据线连接电脑，开启开发者选项和 USB 调试，并在设备上允许这台电脑进行调试。</p></article>
-          <article><strong>Wi-Fi 连接</strong><p>Android 11 及以上可在开发者选项中打开无线调试配对；电脑与设备需处于可互通的网络。</p></article>
-        </div>
-      </section>
+      ) : <section className="panel"><EmptyState icon={MonitorSmartphone} title="尚未发现 Android 模拟器" description="先启动一个受支持的本机模拟器，再刷新列表。AI-GAME 不连接真机。" action={<button className="button button-primary" onClick={() => void discover()} disabled={discovering}><RefreshCw size={17} /> 刷新模拟器</button>} /></section>}
     </div>
   );
 }
@@ -314,11 +280,11 @@ function SettingsPage({ runtime, loading, error, onRetry, onRuntimeChanged }: { 
   const executorReady = capabilityStatus(executorCapability(runtime)) === 'ready';
   const executionReady = modelReady && executorReady;
   const boundaryDetail = executionReady
-    ? '本地 GUI 模型与设备执行器均已就绪；对话执行可以持续运行截图、判断、单动作、再观察循环，不设单轮步数上限。'
+    ? '本地 GUI 模型与设备执行器均已就绪；诊断作业可以持续运行截图、判断、单动作、再观察循环，不设单轮步数上限。'
     : modelReady
-      ? '本地 GUI 模型已就绪，但设备执行器尚未接入；文字对话仍可使用，手机操作暂不可用。'
+      ? '本地 GUI 模型已就绪，但设备执行器尚未接入；模型诊断仍可使用，模拟器操作暂不可用。'
       : executorReady
-        ? '设备执行器已就绪，但本地 GUI 模型当前不可用；手机操作暂不可用。'
+        ? '设备执行器已就绪，但本地 GUI 模型当前不可用；模拟器操作暂不可用。'
         : '本地 GUI 模型与设备执行器尚未同时就绪；请先完成连接配置。';
   return (
     <div className="page-stack settings-layout">
@@ -326,7 +292,7 @@ function SettingsPage({ runtime, loading, error, onRetry, onRuntimeChanged }: { 
       <CloudModelSettings onRuntimeChanged={onRuntimeChanged} />
       <section className="panel settings-panel"><PanelHeader title="运行组件" description="来自本地控制服务的当前状态，不做推测" />{capabilities.length ? <div className="component-list">{capabilities.map((capability) => { const role = capabilityRole(capability.id); return <article className="component-row" key={capability.id}><div className="component-icon">{role === 'model' || role === 'planner' ? <Bot size={20} /> : role === 'executor' ? <MonitorCog size={20} /> : <Gauge size={20} />}</div><div><strong>{capability.name}</strong><span>{capability.detail || (capability.configured ? '组件已配置' : '组件尚未配置')}</span>{capability.blocker && <small>{typeof capability.blocker === 'string' ? capability.blocker : capability.blocker.message}</small>}</div><StatusBadge meta={runtimeStatusMeta(capabilityStatus(capability))} /></article>; })}</div> : <EmptyState compact icon={MonitorCog} title="没有组件状态" description="控制服务尚未报告运行组件。" />}</section>
       <section className="panel settings-panel"><PanelHeader title="API 连接" description="前端连接本地控制服务所使用的地址" /><dl className="settings-list"><div><dt>基础路径</dt><dd><code>{API_BASE}</code></dd></div><div><dt>连接方式</dt><dd>同源本地请求</dd></div><div><dt>客户端标识</dt><dd><code>console-v1</code></dd></div><div><dt>远程跨域访问</dt><dd>未开放</dd></div></dl></section>
-      <section className="panel settings-panel"><PanelHeader title="本阶段能力边界" description="控制台不会把未发生的动作显示为成功" /><div className="boundary-list"><div><Check size={17} /><span><strong>可以使用</strong>直接和本地模型对话；云端配置完成后，可由云端对话、本地模型自动操作 Android 设备。</span></div><div>{executionReady ? <Check size={17} /> : <CirclePause size={17} />}<span><strong>{executionReady ? '设备闭环已接入' : '暂不可执行'}</strong>{boundaryDetail}</span></div><div><ShieldCheck size={17} /><span><strong>测试模式全部放开</strong>对话执行不设单轮步数上限，账号、验证码、实名、付款、CAPTCHA、权限、法律确认或无法判断的页面也不会自动暂停；循环持续到目标完成、主动停止或运行故障。</span></div></div></section>
+      <section className="panel settings-panel"><PanelHeader title="诊断能力边界" description="最终用户在 WeftMate 中与 Harness 对话；本控制台不作为聊天产品" /><div className="boundary-list"><div><Check size={17} /><span><strong>开发诊断</strong>这里用于验证模型、执行器和 Android 模拟器闭环；正式请求应由 Harness 工具调用进入。</span></div><div>{executionReady ? <Check size={17} /> : <CirclePause size={17} />}<span><strong>{executionReady ? '模拟器闭环已接入' : '暂不可执行'}</strong>{boundaryDetail}</span></div><div><ShieldCheck size={17} /><span><strong>用户控制优先</strong>任务可暂停、继续、接管和停止；遇到缺少用户决定或高风险页面时如实等待，不用固定步数假装完成，也不会无限自转。</span></div></div></section>
     </div>
   );
 }

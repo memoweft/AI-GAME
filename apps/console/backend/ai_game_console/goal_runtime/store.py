@@ -488,6 +488,19 @@ class SQLiteGoalStore:
             ).fetchall()
             return [self._get(connection, str(row["goal_id"])) for row in rows]
 
+    def recoverable_records(self, *, bound_only: bool = True) -> list[GoalRecord]:
+        """Return the complete nonterminal recovery set without UI truncation."""
+
+        self.initialize()
+        with self._connection() as connection:
+            sql = "SELECT goal_id FROM goal_runs WHERE terminal_at IS NULL"
+            if bound_only:
+                sql += " AND bound_task_id IS NOT NULL"
+            rows = connection.execute(
+                sql + " ORDER BY created_at, rowid"
+            ).fetchall()
+            return [self._get(connection, str(row["goal_id"])) for row in rows]
+
     def mark_waiting_configuration(self, goal_id: str, *, code: str, message: str) -> None:
         self._update_projection(
             goal_id,
@@ -717,7 +730,6 @@ class SQLiteGoalStore:
                 (scope, idempotency_key, digest, goal_id, now),
             )
             if action == "stop":
-                # [constraint-source: ARCH_INVARIANT; ref: user stop durable fence]
                 # Persist the supervisor-facing stop intent in the same
                 # transaction as idempotency admission.  Launcher recovery can
                 # therefore fence the ApplicationRuntime before any worker is
@@ -754,7 +766,6 @@ class SQLiteGoalStore:
             )
             self._event(connection, goal_id, "goal_takeover_settled", {}, now)
 
-    # [constraint-source: ARCH_INVARIANT; ref: one owner, user stop, durable terminal state]
     def cancel_unbound(self, goal_id: str) -> GoalRecord:
         """Settle user stop when no executor/owner was ever bound."""
 
@@ -870,7 +881,6 @@ class SQLiteGoalStore:
             "paused": ("RUNNING", "PAUSED", False),
             "stopping": ("RUNNING", "STOP_REQUESTED", False),
             "stopped": ("CANCELLED", "AUTOMATED", True),
-            # [constraint-source: PRODUCT_SPEC; ref: D14]
             # A continuous long-lived binding may not silently turn an owner
             # cycle completion into the user's terminal external outcome.
             "completed": ("FAILED", "AUTOMATED", True),

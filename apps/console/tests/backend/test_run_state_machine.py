@@ -176,12 +176,12 @@ def test_cancelling_awaiting_run_withdraws_pending_approval(client: TestClient) 
     assert approval["status"] == "withdrawn"
 
 
-def test_disabled_workflow_missing_records_and_request_validation(client: TestClient) -> None:
-    disabled = client.post(
+def test_missing_workflow_records_and_request_validation(client: TestClient) -> None:
+    missing_workflow = client.post(
         "/api/v1/runs",
         headers=WRITE_HEADERS,
         json={
-            "workflow_id": "soul",
+            "workflow_id": "does-not-exist",
             "target_id": "windows-local",
             "instruction": "测试",
             "exact_text": None,
@@ -189,8 +189,8 @@ def test_disabled_workflow_missing_records_and_request_validation(client: TestCl
             "name": None,
         },
     )
-    assert disabled.status_code == 409
-    assert disabled.json()["error"]["code"] == "workflow_disabled"
+    assert missing_workflow.status_code == 404
+    assert missing_workflow.json()["error"]["code"] == "workflow_not_found"
 
     missing = client.get("/api/v1/runs/does-not-exist")
     assert missing.status_code == 404

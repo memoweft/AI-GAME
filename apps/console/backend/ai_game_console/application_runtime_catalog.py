@@ -67,6 +67,17 @@ class ApplicationRuntimeCatalog:
         )
         return items[:limit]
 
+    def fence_pause_before_start(
+        self, instance_id: str, request_id: str
+    ) -> Any:
+        """Route the pre-start pause to the runtime owning this instance."""
+
+        runtime = self._for_instance(instance_id)
+        fence = getattr(runtime, "fence_pause_before_start", None)
+        if not callable(fence):
+            raise RuntimeNotFound(instance_id)
+        return fence(instance_id, request_id)
+
     def startup(self) -> None:
         for runtime in self._runtimes.values():
             startup = getattr(runtime, "startup", None)

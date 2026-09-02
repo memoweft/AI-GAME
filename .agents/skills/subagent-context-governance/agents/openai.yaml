@@ -1,4 +1,0 @@
-interface:
-  display_name: "Subagent and Context Governance"
-  short_description: "Delegate bounded work and repair context gaps"
-  default_prompt: "Use $subagent-context-governance to decide whether to delegate and to repair any main-agent context gap."

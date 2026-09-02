@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -14,6 +14,7 @@ from .executor import ActionExecutionResult, ActionExecutorPort
 from .fact import Fact, FactScope, FactStatus
 from .observation import (
     ArtifactRef,
+    BodySnapshotCorrelation,
     ChannelAvailability,
     Observation,
     ScreenshotChannel,
@@ -21,9 +22,12 @@ from .observation import (
 )
 from .ports import (
     ArtifactStorePort,
+    BodyCommandDispatcherPort,
     ObservationProviderPort,
+    RecordNotFound,
     RuntimeStoreError,
     RuntimeStorePort,
+    StoreConflict,
 )
 from .stage import Stage, StageStatus
 from .task import FailureState, Task, TaskSource, TaskStatus
@@ -40,6 +44,7 @@ class RuntimeKernel:
         observation_provider: ObservationProviderPort | None = None,
         artifact_store: ArtifactStorePort | None = None,
         action_executor: ActionExecutorPort | None = None,
+        body_dispatcher: BodyCommandDispatcherPort | None = None,
         clock: Callable[[], str] | None = None,
         id_factory: Callable[[], str] | None = None,
         lease_manager: DeviceLeaseManager | None = None,
@@ -48,9 +53,14 @@ class RuntimeKernel:
         self._observation_provider = observation_provider
         self._artifact_store = artifact_store
         self._action_executor = action_executor
+        self._body_dispatcher = body_dispatcher
         self._clock = clock or _utc_now
         self._id_factory = id_factory or (lambda: str(uuid4()))
         self._lease_manager = lease_manager
+        # Plaintext typed text is intentionally process-local only.  SQLite
+        # actions carry an opaque redacted descriptor, so a restart loses this
+        # envelope and must fail closed/replan rather than replay credentials.
+        self._transient_typed_text: dict[str, str] = {}
         self._store.initialize()
 
     def close(self) -> None:
@@ -360,6 +370,7 @@ class RuntimeKernel:
         task_id: str,
         device_id: str,
         observation_id: str | None = None,
+        body_snapshot: BodySnapshotCorrelation | None = None,
     ) -> Observation:
         if self._observation_provider is None or self._artifact_store is None:
             raise RuntimeError("observation capability is not configured")
@@ -418,6 +429,7 @@ class RuntimeKernel:
                 ),
                 device_state=raw.device_state,
                 consistency=raw.consistency,
+                body_snapshot=body_snapshot,
             )
             after_task = task.record_observation(
                 observation.id, at=observation.captured_at
@@ -446,6 +458,11 @@ class RuntimeKernel:
                         "capture_started_at": observation.capture_started_at,
                         "capture_completed_at": observation.capture_completed_at,
                         "consistency": observation.consistency.status.value,
+                        "body_snapshot_id": (
+                            observation.body_snapshot.snapshot_id
+                            if observation.body_snapshot is not None
+                            else None
+                        ),
                     },
                 ),
             )
@@ -502,9 +519,15 @@ class RuntimeKernel:
             proposed_by_call_id=proposed_by_call_id,
             proposed_at=now,
         )
-        self._store.create_action(
-            action,
-            self._event(
+        if action.type in {ActionType.INPUT_TEXT, ActionType.INPUT_TEXT_UNICODE}:
+            text = action.params.get("text")
+            if not isinstance(text, str):
+                raise ValueError("typed text Action requires transient plaintext")
+            self._transient_typed_text[action.id] = text
+        try:
+            self._store.create_action(
+                action,
+                self._event(
                 "ActionProposed",
                 now,
                 task_id,
@@ -515,12 +538,20 @@ class RuntimeKernel:
                     "type": action.type.value,
                     "expected_outcome": action.expected_outcome,
                 },
-            ),
-        )
+                ),
+            )
+        except Exception:
+            self._transient_typed_text.pop(action.id, None)
+            raise
         return action
 
     def load_action(self, task_id: str, action_id: str) -> Action:
         return self._store.load_action(task_id, action_id)
+
+    def load_action_by_id(self, action_id: str) -> Action:
+        """Resolve a globally unique Action for Companion retained results."""
+
+        return self._store.load_action_by_id(action_id)
 
     def load_action_execution(self, action_id: str) -> ActionExecution:
         return self._store.load_action_execution(action_id)
@@ -566,9 +597,32 @@ class RuntimeKernel:
         started_at: str | None = None,
         finished_at: str | None = None,
         lease_ref: str | None = None,
+        body_command_id: str | None = None,
+        body_receipt_id: str | None = None,
     ) -> ActionExecution:
+        if body_command_id is not None or body_receipt_id is not None:
+            if action_id is None:
+                raise ValueError("Body execution requires a Kernel action id")
+            execution, _created = self._record_body_execution_once(
+                task_id=task_id,
+                action_id=action_id,
+                execution_id=execution_id,
+                device_id=self._store.load_task(task_id).device_id,
+                accepted=accepted,
+                adapter_code=adapter_code,
+                error=error,
+                started_at=started_at,
+                finished_at=finished_at,
+                lease_ref=lease_ref,
+                body_command_id=body_command_id,
+                body_receipt_id=body_receipt_id,
+            )
+            return execution
+        # This direct recording API is also used by retained adapter replies.
+        # It must not become a bypass around the same current-observation and
+        # control/recovery fence required by execute_action.
+        before_action = self.prepare_action_execution(task_id=task_id, action_id=action_id)
         before_task = self._store.load_task(task_id)
-        before_action = self._store.load_action(task_id, action_id)
         now = self._clock()
         execution = ActionExecution(
             id=execution_id or self._id_factory(),
@@ -580,6 +634,8 @@ class RuntimeKernel:
             error=error,
             started_at=started_at or now,
             finished_at=finished_at or now,
+            body_command_id=body_command_id,
+            body_receipt_id=body_receipt_id,
         )
         after_action = before_action.record_execution(execution)
         after_task = before_task
@@ -611,11 +667,280 @@ class RuntimeKernel:
                     "accepted": accepted,
                     "adapter_code": adapter_code,
                     "error_code": error.code if error else None,
+                    "body_command_id": body_command_id,
+                    "body_receipt_id": body_receipt_id,
                 },
                 actor=EventActor.DEVICE,
             ),
         )
         return execution
+
+    def record_body_execution_once(
+        self,
+        *,
+        kernel_action_id: str,
+        body_command_id: str,
+        body_receipt_id: str,
+        device_id: str,
+        accepted: bool,
+        adapter_code: int | None = None,
+        error: ExecutionError | None = None,
+        started_at: str,
+        finished_at: str,
+    ) -> tuple[ActionExecution, bool]:
+        """Merge a synchronous, late, or retained Companion result once.
+
+        This callback intentionally stops at ``ActionExecution``.  It does not
+        capture an Observation, write a Verification, complete a Stage/Task,
+        or touch Goal authority.  A caller must separately request the normal
+        fresh Body snapshot path before any verification.
+        """
+
+        action = self._store.load_action_by_id(kernel_action_id)
+        return self._record_body_execution_once(
+            task_id=action.task_id,
+            action_id=action.id,
+            execution_id=None,
+            device_id=device_id,
+            accepted=accepted,
+            adapter_code=adapter_code,
+            error=error,
+            started_at=started_at,
+            finished_at=finished_at,
+            lease_ref=None,
+            body_command_id=body_command_id,
+            body_receipt_id=body_receipt_id,
+        )
+
+    def _record_body_execution_once(
+        self,
+        *,
+        task_id: str,
+        action_id: str,
+        execution_id: str | None,
+        device_id: str,
+        accepted: bool,
+        adapter_code: int | None,
+        error: ExecutionError | None,
+        started_at: str | None,
+        finished_at: str | None,
+        lease_ref: str | None,
+        body_command_id: str | None,
+        body_receipt_id: str | None,
+    ) -> tuple[ActionExecution, bool]:
+        if body_command_id is None or body_receipt_id is None:
+            raise ValueError("Body execution requires command and receipt identities")
+        before_task = self._store.load_task(task_id)
+        before_action = self._store.load_action(task_id, action_id)
+        if before_task.device_id != device_id:
+            raise StoreConflict("Body result device does not match the Kernel Task")
+
+        # Fast idempotent read for ordinary retained-result delivery.  The
+        # store repeats the same check under BEGIN IMMEDIATE for sync/late
+        # races, so this read is not the concurrency fence.
+        try:
+            existing = self._store.load_action_execution(action_id)
+        except RecordNotFound:
+            existing = None
+        if existing is not None:
+            if (
+                existing.body_command_id != body_command_id
+                or existing.body_receipt_id != body_receipt_id
+                or existing.device_id != device_id
+            ):
+                raise StoreConflict(
+                    "Kernel Action already has a different Body command/receipt identity"
+                )
+            release_exact = getattr(
+                self._store, "release_lease_for_body_execution", None
+            )
+            if callable(release_exact):
+                release_exact(
+                    device_id=existing.device_id,
+                    task_id=before_task.id,
+                    action_id=existing.action_id,
+                )
+            return existing, False
+
+        # A first durable receipt is a physical-boundary mutation.  It must
+        # pass the same fresh observation/control/recovery fence as the
+        # synchronous execute path; only an already committed exact receipt
+        # above may be reconciled after a pause/takeover/restart.
+        before_action = self.prepare_action_execution(task_id=task_id, action_id=action_id)
+        before_task = self._store.load_task(task_id)
+
+        now = self._clock()
+        execution = ActionExecution(
+            id=execution_id or self._id_factory(),
+            action_id=action_id,
+            device_id=device_id,
+            lease_ref=lease_ref,
+            accepted=accepted,
+            adapter_code=adapter_code,
+            error=error,
+            started_at=started_at or now,
+            finished_at=finished_at or now,
+            body_command_id=body_command_id,
+            body_receipt_id=body_receipt_id,
+        )
+        after_action = before_action.record_execution(execution)
+        after_task = before_task
+        if not accepted and not before_task.terminal:
+            after_task = before_task.record_failure(
+                self._failure_state(
+                    before_task,
+                    code=error.code if error else "action_rejected",
+                    summary=error.message if error else "Action transport rejected",
+                    action_id=action_id,
+                    verdict="FAIL",
+                    at=execution.finished_at,
+                ),
+                at=execution.finished_at,
+            )
+        return self._store.record_body_execution_once(
+            before_task=before_task,
+            after_task=after_task,
+            before_action=before_action,
+            after_action=after_action,
+            execution=execution,
+            event=self._event(
+                "ActionExecuted",
+                execution.finished_at,
+                task_id,
+                {
+                    "action_id": action_id,
+                    "execution_id": execution.id,
+                    "accepted": accepted,
+                    "adapter_code": adapter_code,
+                    "error_code": error.code if error else None,
+                    "body_command_id": body_command_id,
+                    "body_receipt_id": body_receipt_id,
+                },
+                actor=EventActor.DEVICE,
+            ),
+        )
+
+    def capture_fresh_body_observation(
+        self, *, task_id: str, kernel_action_id: str
+    ) -> Observation:
+        """Capture a normal Observation from a fresh post-receipt Body snapshot.
+
+        The Device ``ACTION_RESULT`` payload is never accepted as an
+        Observation.  This method always calls the composed
+        ``KernelDeviceBodyBridge.capture_fresh_snapshot`` and persists only its
+        strict opaque ``BodySnapshotCorrelation`` on the newly captured Kernel
+        Observation.
+        """
+
+        task = self._store.load_task(task_id)
+        action = self._store.load_action(task_id, kernel_action_id)
+        execution = self._store.load_action_execution(action.id)
+        if execution.body_command_id is None or execution.body_receipt_id is None:
+            raise ValueError("ActionExecution is not backed by a Body command/receipt")
+        capture = getattr(
+            self._body_dispatcher, "capture_snapshot_for_observation", None
+        )
+        if not callable(capture):
+            # Compatibility with older Body bridges is observation-only.  A
+            # Body-backed verification still requires the durable verdict gate
+            # below, so an UNKNOWN receipt cannot be promoted by a legacy
+            # dispatcher that does not implement the R5 reconciliation seam.
+            capture = getattr(self._body_dispatcher, "capture_fresh_snapshot", None)
+        if not callable(capture):
+            raise RuntimeError("fresh DeviceBody snapshot capability is not configured")
+        fresh = capture(kernel_action_id=action.id)
+        command = getattr(fresh, "command", None)
+        receipt = getattr(fresh, "receipt", None)
+        if (
+            command is None
+            or receipt is None
+            or getattr(command, "id", None) != execution.body_command_id
+            or getattr(command, "kernel_action_id", None) != action.id
+            or getattr(receipt, "id", None) != execution.body_receipt_id
+            or getattr(receipt, "kernel_action_id", None) != action.id
+        ):
+            raise StoreConflict(
+                "fresh Body snapshot command/receipt does not match ActionExecution"
+            )
+        correlate = getattr(fresh, "as_kernel_correlation", None)
+        if not callable(correlate):
+            raise RuntimeError("fresh DeviceBody snapshot has no Kernel correlation")
+        correlation = correlate()
+        if (
+            not isinstance(correlation, BodySnapshotCorrelation)
+            or correlation.caused_by_body_command_id != execution.body_command_id
+        ):
+            raise StoreConflict("fresh Body snapshot correlation is invalid")
+        return self.capture_observation(
+            task_id=task.id,
+            device_id=task.device_id,
+            body_snapshot=correlation,
+        )
+
+    def verify_persisted_body_action_snapshot(
+        self, *, task_id: str, action_id: str, after_observation_id: str
+    ) -> object:
+        """Return the body verifier result for one persisted after Observation.
+
+        Unlike ``capture_fresh_body_observation`` this performs no physical
+        action and creates no Observation.  It is the only public path for an
+        operator to turn the opaque persisted Body correlation into a
+        deterministic TAP/SWIPE/Unicode match decision.
+        """
+
+        task = self._store.load_task(task_id)
+        action = self._store.load_action(task_id, action_id)
+        execution = self._store.load_action_execution(action.id)
+        before_observation = self._store.load_observation(action.based_on_observation_id)
+        observation = self._store.load_observation(after_observation_id)
+        if (
+            observation.task_id != task_id
+            or observation.device_id != task.device_id
+            or task.last_observation_id != after_observation_id
+            or observation.body_snapshot is None
+        ):
+            raise ValueError("Body verifier requires the Task's correlated after Observation")
+        if execution.body_command_id is None or execution.body_receipt_id is None:
+            raise ValueError("Body verifier requires a Body-backed ActionExecution")
+        correlation = observation.body_snapshot
+        if correlation.caused_by_body_command_id != execution.body_command_id:
+            raise ValueError("Body verifier correlation does not belong to the ActionExecution")
+        verify = getattr(self._body_dispatcher, "verify_persisted_snapshot", None)
+        if not callable(verify):
+            raise RuntimeError("persisted DeviceBody snapshot verifier is not configured")
+        before_correlation = before_observation.body_snapshot
+        if action.type is ActionType.SWIPE and (
+            before_observation.task_id != task_id
+            or before_observation.device_id != task.device_id
+            or before_correlation is None
+        ):
+            raise ValueError("SWIPE verifier requires the Action's correlated before Observation")
+        return verify(
+            kernel_action_id=action.id,
+            snapshot_id=correlation.snapshot_id,
+            binding_id=correlation.binding_id,
+            device_boot_id=correlation.device_boot_id,
+            capture_request_id=correlation.capture_request_id,
+            sequence=correlation.sequence,
+            caused_by_body_command_id=correlation.caused_by_body_command_id,
+            before_snapshot_id=(
+                before_correlation.snapshot_id if before_correlation is not None else None
+            ),
+            before_binding_id=(
+                before_correlation.binding_id if before_correlation is not None else None
+            ),
+            before_device_boot_id=(
+                before_correlation.device_boot_id if before_correlation is not None else None
+            ),
+            before_capture_request_id=(
+                before_correlation.capture_request_id
+                if before_correlation is not None
+                else None
+            ),
+            before_sequence=(
+                before_correlation.sequence if before_correlation is not None else None
+            ),
+        )
 
     def execute_action(
         self,
@@ -631,33 +956,50 @@ class RuntimeKernel:
         3. 真实 ADB 执行
         4. record_action_execution() 结果持久化
         """
-        if self._action_executor is None:
+        if self._action_executor is None and self._body_dispatcher is None:
             raise RuntimeError("action executor is not configured")
         
         # 1. 栅栏检查
         action = self.prepare_action_execution(task_id=task_id, action_id=action_id)
         task = self._store.load_task(task_id)
         
-        # 2. 获取设备独占 Lease
-        lease_id = self._id_factory()
-        acquired_at = self._clock()
-        import os
-        lease = self._store.acquire_lease(
-            device_id=task.device_id,
-            task_id=task_id,
-            holder_process_id=str(os.getpid()),
-            ttl_seconds=60,
-            lease_id=lease_id,
-            acquired_at=acquired_at,
-        )
+        # 2. 获取设备独占 Lease。进程重启可能留下同一 Task/Action 的
+        # in-flight Lease；此时必须复用它，让 DeviceBody 以已持久化的
+        # command_id 对账。只有这个精确 owner/action 组合可重入，其他
+        # Task 或尚未关联 Action 的 Lease 仍由 acquire_lease fail closed。
+        lease = self._store.get_lease_for_device(task.device_id)
+        if not (
+            lease is not None
+            and lease.task_id == task_id
+            and lease.action_id == action_id
+        ):
+            lease_id = self._id_factory()
+            acquired_at = self._clock()
+            import os
+            lease = self._store.acquire_lease(
+                device_id=task.device_id,
+                task_id=task_id,
+                holder_process_id=str(os.getpid()),
+                ttl_seconds=60,
+                lease_id=lease_id,
+                acquired_at=acquired_at,
+            )
         
         try:
             # 3. 更新 Lease 关联 Action（用于崩溃恢复）
             self._store.update_lease_action(lease.id, action_id)
             
-            # 4. 根据 Action 类型调用执行器
+            # 4. A DeviceBody dispatcher owns one command/receipt lifecycle.
+            # It is intentionally selected ahead of the legacy executor, so
+            # a configured R4 binding cannot bypass the canonical command
+            # ledger.  It returns transport facts only; verification remains
+            # below this method's caller.
             result: ActionExecutionResult
-            if action.type == ActionType.TAP:
+            if self._body_dispatcher is not None:
+                result = self._body_dispatcher.dispatch(
+                    action=action, task_id=task_id, device_id=task.device_id
+                )
+            elif action.type == ActionType.TAP:
                 result = self._action_executor.execute_tap(
                     device_id=task.device_id,
                     x=action.params["x"],
@@ -680,9 +1022,21 @@ class RuntimeKernel:
                     duration_ms=action.params.get("duration_ms", 300),
                 )
             elif action.type == ActionType.INPUT_TEXT:
+                text = self._transient_typed_text.get(action.id)
+                if text is None:
+                    raise RuntimeError("typed text plaintext is unavailable after restart; fresh replan required")
                 result = self._action_executor.execute_input_text(
                     device_id=task.device_id,
-                    text=action.params["text"],
+                    text=text,
+                )
+            elif action.type == ActionType.INPUT_TEXT_UNICODE:
+                text = self._transient_typed_text.get(action.id)
+                if text is None:
+                    raise RuntimeError("typed text plaintext is unavailable after restart; fresh replan required")
+                result = self._action_executor.execute_input_text_unicode(
+                    device_id=task.device_id,
+                    text=text,
+                    target_hint=action.params.get("target_hint"),
                 )
             elif action.type == ActionType.BACK:
                 result = self._action_executor.execute_back(
@@ -690,6 +1044,18 @@ class RuntimeKernel:
                 )
             elif action.type == ActionType.HOME:
                 result = self._action_executor.execute_home(
+                    device_id=task.device_id,
+                )
+            elif action.type == ActionType.RECENTS:
+                result = self._action_executor.execute_recents(device_id=task.device_id)
+            elif action.type == ActionType.OPEN_APP:
+                result = self._action_executor.execute_open_app(
+                    device_id=task.device_id,
+                    package=action.params["package"],
+                    component=action.params.get("component"),
+                )
+            elif action.type == ActionType.CAPTURE_SNAPSHOT:
+                result = self._action_executor.execute_capture_snapshot(
                     device_id=task.device_id,
                 )
             else:
@@ -708,6 +1074,8 @@ class RuntimeKernel:
                 started_at=result.started_at,
                 finished_at=result.finished_at,
                 lease_ref=lease.id,
+                body_command_id=result.body_command_id,
+                body_receipt_id=result.body_receipt_id,
             )
             
             return execution
@@ -779,7 +1147,15 @@ class RuntimeKernel:
                 }
                 else TaskStatus.RUNNING
             )
-            after = task.transition_to(resume_status, at=now)
+            # A pre-control observation/proposed Action cannot be used after
+            # the user has paused or taken over.  Clearing the durable latest
+            # pointer makes both ``prepare_action_execution`` and a later
+            # proposal require a newly captured observation before dispatch.
+            after = replace(
+                task.transition_to(resume_status, at=now),
+                last_observation_id=None,
+                updated_at=now,
+            )
             event_type = "TaskResumed"
         elif command is ControlCommand.CANCEL:
             if task.terminal:
@@ -847,6 +1223,7 @@ class RuntimeKernel:
     ) -> tuple[Verification, Checkpoint | None]:
         before_task = self._store.load_task(task_id)
         before_action = self._store.load_action(task_id, action_id)
+        execution = self._store.load_action_execution(action_id)
         before_stage = self._store.load_stage(task_id, before_action.stage_id)
         before_observation = self._store.load_observation(before_observation_id)
         after_observation = self._store.load_observation(after_observation_id)
@@ -860,6 +1237,40 @@ class RuntimeKernel:
             or before_task.last_observation_id != after_observation_id
         ):
             raise ValueError("Verification requires the Task's fresh current Observation")
+        execution_finished = _as_utc(execution.finished_at)
+        after_times = (
+            after_observation.capture_started_at,
+            after_observation.capture_completed_at,
+            after_observation.screenshot.captured_at,
+            after_observation.ui_tree.captured_at,
+        )
+        if any(
+            value is not None and _as_utc(value) <= execution_finished
+            for value in after_times
+        ):
+            raise ValueError(
+                "Verification after Observation channels must be strictly captured after ActionExecution"
+            )
+        if execution.body_command_id is not None:
+            correlation = after_observation.body_snapshot
+            if (
+                correlation is None
+                or correlation.caused_by_body_command_id != execution.body_command_id
+            ):
+                raise ValueError(
+                    "DeviceBody Action verification requires its fresh correlated Snapshot Observation"
+                )
+            validate_verdict = getattr(
+                self._body_dispatcher, "validate_verification_verdict", None
+            )
+            if not callable(validate_verdict):
+                raise RuntimeError(
+                    "DeviceBody verification requires a durable receipt verdict gate"
+                )
+            validate_verdict(
+                kernel_action_id=action_id,
+                verdict=verdict.value,
+            )
         now = self._clock()
         verification = Verification.create(
             verification_id=verification_id or self._id_factory(),
@@ -1072,6 +1483,21 @@ class RuntimeKernel:
             lease.device_id for lease in leases if not lease.is_expired(now)
         )
 
+    def release_exact_action_lease(self, *, task_id: str, action_id: str) -> bool:
+        """Release only the lease durably owned by this exact Task/Action.
+
+        This narrow takeover seam never searches by a device hint and cannot
+        release another Task's writer lease.
+        """
+
+        lease = self._store.get_lease_for_task(task_id)
+        if lease is None:
+            return False
+        if lease.task_id != task_id or lease.action_id != action_id:
+            raise StoreConflict("Task action does not own the current device lease")
+        self._store.release_lease(lease.id)
+        return True
+
     def _build_checkpoint_draft(
         self,
         *,
@@ -1193,3 +1619,9 @@ class RuntimeKernel:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _as_utc(value: str) -> datetime:
+    """Parse ISO facts for causal action/observation ordering."""
+
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)

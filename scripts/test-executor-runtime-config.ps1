@@ -27,13 +27,12 @@ function Read-StrictExecutorConfig {
 }
 
 $config = Read-StrictExecutorConfig
-Assert-Condition ($config.Count -eq 3) 'Executor configuration must contain exactly the three approved keys.'
+Assert-Condition ($config.Count -eq 3) 'Executor configuration must contain exactly the three emulator executor keys.'
 Assert-Condition ($config['AI_GAME_GUI_EXECUTOR_ENABLED'] -eq '1') 'Local executor configuration must enable the executor.'
 Assert-Condition ([System.IO.Path]::IsPathRooted($config['AI_GAME_ADB_PATH'])) 'Executor configuration must use an absolute adb.exe path.'
 Assert-Condition ([System.IO.Path]::GetFileName($config['AI_GAME_ADB_PATH']) -ieq 'adb.exe') 'Executor configuration must point to adb.exe.'
 Assert-Condition (Test-Path -LiteralPath $config['AI_GAME_ADB_PATH'] -PathType Leaf) 'Configured adb.exe does not exist.'
 Assert-Condition ($config['AI_GAME_ADB_SERIAL'] -match '^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$') 'Executor configuration serial is not a valid ADB serial.'
-
 $consoleContent = Get-Content -LiteralPath $ConsoleScript -Raw
 Assert-Condition ($consoleContent.Contains('Import-ExecutorRuntimeConfiguration')) 'Console must import the executor runtime configuration.'
 Assert-Condition ($consoleContent.Contains('$AllowedExecutorEnvironmentNames')) 'Console must whitelist executor environment keys.'
@@ -58,11 +57,14 @@ $previousSerial = $env:AI_GAME_ADB_SERIAL
 try {
     $env:AI_GAME_GUI_EXECUTOR_ENABLED = '0'
     $env:AI_GAME_ADB_SERIAL = 'R58M1234AB'
-    $statusOutput = & $ConsoleScript status *>&1 | Out-String
+    # Use a wide formatting buffer so a long absolute adb.exe path cannot
+    # insert line wraps into the following serial field and create a false
+    # contract-test failure.
+    $statusOutput = & $ConsoleScript status *>&1 | Out-String -Width 4096
     $statusSucceeded = $?
     Assert-Condition $statusSucceeded "Console status failed while checking explicit environment precedence: $statusOutput"
     Assert-Condition ($statusOutput.Contains('Executor runtime config: enabled=0;')) 'Explicit AI_GAME_GUI_EXECUTOR_ENABLED=0 did not override config file.'
-    Assert-Condition ($statusOutput.Contains('serial=R58M1234AB')) 'Console rejected or replaced a valid USB ADB serial.'
+    Assert-Condition ($statusOutput.Contains('serial=R58M1234AB')) "Console rejected or replaced a valid USB ADB serial. Output: $statusOutput"
 } finally {
     if ($null -eq $previousEnabled) { Remove-Item Env:AI_GAME_GUI_EXECUTOR_ENABLED -ErrorAction SilentlyContinue }
     else { $env:AI_GAME_GUI_EXECUTOR_ENABLED = $previousEnabled }

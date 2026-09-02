@@ -247,7 +247,7 @@ def test_fail_verdict_is_resolved_and_does_not_block_next_action(tmp_path: Path)
         after_observation_id=obs2.id,
         verdict=VerificationVerdict.FAIL,
         reason="Action did not achieve expected outcome",
-        evidence_refs=(f"observation:{obs2.id}",),
+        evidence_refs=(obs2.screenshot.artifact.reference,),
         method=VerificationMethod.RUNTIME_RULE,
     )
 
@@ -341,7 +341,7 @@ def test_uncertain_verdict_with_checkpoint_blocks_replay_after_reopen(
         after_observation_id=obs2.id,
         verdict=VerificationVerdict.UNCERTAIN,
         reason="Cannot determine physical outcome",
-        evidence_refs=(f"observation:{obs2.id}",),
+        evidence_refs=(obs2.screenshot.artifact.reference,),
         method=VerificationMethod.RUNTIME_RULE,
     )
 
@@ -450,7 +450,7 @@ def test_checkpoint_with_resolved_action_allows_new_action_after_reopen(
         after_observation_id=obs2.id,
         verdict=VerificationVerdict.SUCCESS,
         reason="Stage completed successfully",
-        evidence_refs=(f"observation:{obs2.id}",),
+        evidence_refs=(obs2.screenshot.artifact.reference,),
         method=VerificationMethod.RUNTIME_RULE,
         verified_facts=(fact,),
         complete_stage=True,

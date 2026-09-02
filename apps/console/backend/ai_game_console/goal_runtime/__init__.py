@@ -1,6 +1,7 @@
 """Universal GoalRun compatibility facade."""
 
 from .api import create_goal_router, goal_error_handler
+from .attention_selector import QwenAttentionSelector, build_qwen_attention_scheduler
 from .domain import (
     CapabilityBindingPlan,
     CriterionAssessment,
@@ -11,7 +12,7 @@ from .domain import (
 )
 from .preflight import GoalPreflight, PreflightResult
 from .production_repair import ProductionGoalRepairs
-from .qwen import StructuredGoalModel
+from .qwen import StructuredGoalModel, StructuredSessionPlanner
 from .repair import GoalRepairManager, RepairApplyError
 from .routing import RouteDecision, decide_route
 from .service import GoalService
@@ -28,6 +29,8 @@ from .stzb_daily_benchmark import DailyFixtureReport, run_stzb_daily_fixture_ben
 
 __all__ = [
     "GoalPreflight",
+    "QwenAttentionSelector",
+    "build_qwen_attention_scheduler",
     "CapabilityBindingPlan",
     "GoalSpecificationDraft",
     "GoalNotification",
@@ -35,6 +38,7 @@ __all__ = [
     "CriterionAssessment",
     "SuccessCriterion",
     "StructuredGoalModel",
+    "StructuredSessionPlanner",
     "GoalRepairManager",
     "RepairApplyError",
     "RouteDecision",

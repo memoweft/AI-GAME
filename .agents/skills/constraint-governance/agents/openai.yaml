@@ -1,4 +1,0 @@
-interface:
-  display_name: "Constraint Governance"
-  short_description: "Stop unsupported constraints from becoming policy"
-  default_prompt: "Use $constraint-governance to source and bound every new AI-GAME rule, gate, blocker, or precondition."

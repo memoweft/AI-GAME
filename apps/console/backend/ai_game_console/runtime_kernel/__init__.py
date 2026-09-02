@@ -1,4 +1,4 @@
-"""Persistent fact spine for the isolated Soul Mobile Runtime kernel."""
+"""Persistent fact spine for the shared mobile RuntimeKernel."""
 
 from .action import (
     Action,
@@ -24,6 +24,7 @@ from .lease.errors import LeaseConflict, LeaseExpired, LeaseNotFound
 from .kernel import RuntimeKernel
 from .observation import (
     ArtifactRef,
+    BodySnapshotCorrelation,
     ChannelAvailability,
     ConnectionState,
     ConsistencyStatus,
@@ -40,6 +41,7 @@ from .observation import (
 )
 from .ports import (
     ArtifactStorePort,
+    BodyCommandDispatcherPort,
     ObservationProviderPort,
     RecordNotFound,
     RuntimeStoreError,
@@ -66,6 +68,8 @@ __all__ = [
     "ActionValidationStatus",
     "ArtifactRef",
     "ArtifactStorePort",
+    "BodyCommandDispatcherPort",
+    "BodySnapshotCorrelation",
     "ChannelAvailability",
     "Checkpoint",
     "CheckpointDraft",

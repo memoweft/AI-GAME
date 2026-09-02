@@ -12,6 +12,7 @@ from .domain import (
     CriterionAssessment,
     GoalCompletionAssessment,
     GoalControlUnsupported,
+    GoalOwnerUnavailable,
     GoalRecord,
     GoalSpecificationDraft,
     GoalStateConflict,
@@ -52,6 +53,7 @@ class GoalService:
                  long_lived_mobile_runtime: Any | None = None,
                  long_lived_mobile_archive: Any | None = None,
                  discover_mobile_application: Callable[[str], str] | None = None,
+                 target_id_resolver: Callable[[str], str] | None = None,
                  experience: Any | None = None,
                  answer_language: Callable[[str], str] | None = None) -> None:
         self.store = store
@@ -83,13 +85,123 @@ class GoalService:
             long_lived_mobile_archive or long_lived_mobile_runtime
         )
         self.discover_mobile_application = discover_mobile_application
+        self.target_id_resolver = target_id_resolver
         self.experience = experience
         self.answer_language = answer_language
         self._binding_lock = threading.RLock()
 
-    def create(self, goal: str, idempotency_key: str) -> GoalRecord:
+    def prepare_goal(self, goal: str, idempotency_key: str) -> GoalRecord:
+        """Persist one GoalRun without selecting or starting an execution owner.
+
+        R2 uses this boundary while a complete AgentSession GoalGraph revision
+        is being committed.  The durable GoalRun can be prepared repeatedly
+        with its stable key, but no model, route, device, or application side
+        effect occurs until :meth:`activate_goal` is called after that graph
+        transaction has committed.
+        """
+
         record, _ = self.store.create(goal=goal, idempotency_key=idempotency_key)
-        return self._ensure_binding(record)
+        return record
+
+    def activate_goal(self, goal_id: str) -> GoalRecord:
+        """Idempotently freeze route/specification and bind a prepared GoalRun."""
+
+        return self._ensure_binding(self.store.inspect(goal_id))
+
+    def goal_available_for_activation(self, goal_id: str) -> bool:
+        """Report whether a prepared GoalRun has a usable execution owner."""
+
+        record = self.store.inspect(goal_id)
+        if record.bound_task_id is None:
+            return True
+        if self._runtime_for(record) is not None:
+            return True
+        waiting_code = "bound_goal_owner_runtime_not_configured"
+        if (record.waiting_reason or {}).get("code") != waiting_code:
+            self.store.mark_waiting_configuration(
+                goal_id,
+                code=waiting_code,
+                message=(
+                    "GoalRun 已有历史 owner binding，但当前进程未配置对应 runtime；"
+                    "不会把该 Goal 选入执行。"
+                ),
+            )
+        return False
+
+    def activate_selected_goal(
+        self, goal_id: str, idempotency_key: str
+    ) -> GoalRecord:
+        """Start or resume exactly the GoalRun selected by AttentionScheduler.
+
+        ``activate_goal`` remains the stable prepare-to-owner transition.  A
+        GoalRun which was selected in an earlier decision can already have a
+        durable owner that a later decision paused; in that case a new,
+        decision-derived Resume key is required instead of replaying the
+        original activation key.
+        """
+
+        record = self.store.inspect(goal_id)
+        if record.bound_task_id is None:
+            return self.activate_goal(goal_id)
+        runtime = self._runtime_for(record)
+        if runtime is None:
+            raise GoalOwnerUnavailable(
+                "bound Goal owner runtime is not configured"
+            )
+        try:
+            archive = runtime if self._is_kernel_binding(record) else self._archive_for(record)
+            state = archive.inspect(record.bound_task_id)
+        except Exception as error:
+            raise GoalOwnerUnavailable(
+                "bound Goal owner state is temporarily unavailable"
+            ) from error
+        if str(_value(state, "status", "")).lower() != "paused":
+            return self._project(record, state=state)
+        try:
+            return self.control(goal_id, "resume", idempotency_key)
+        except Exception as error:
+            if isinstance(error, GoalOwnerUnavailable):
+                raise
+            raise GoalOwnerUnavailable(
+                "bound Goal owner resume is temporarily unavailable"
+            ) from error
+
+    def pause_goal_at_checkpoint(
+        self, goal_id: str, idempotency_key: str
+    ) -> GoalRecord:
+        """Apply the downstream physical-action fence for a deselected Goal."""
+
+        record = self.store.inspect(goal_id)
+        if record.bound_task_id is None:
+            return self._project(record)
+        runtime = self._runtime_for(record)
+        if runtime is None:
+            raise GoalOwnerUnavailable(
+                "bound Goal owner runtime is not configured"
+            )
+        try:
+            archive = runtime if self._is_kernel_binding(record) else self._archive_for(record)
+            state = archive.inspect(record.bound_task_id)
+        except Exception as error:
+            raise GoalOwnerUnavailable(
+                "bound Goal owner state is temporarily unavailable"
+            ) from error
+        status = str(_value(state, "status", "")).lower()
+        if status in {"paused", "stopped", "completed", "failed"}:
+            return self._project(record, state=state)
+        try:
+            return self.control(goal_id, "pause", idempotency_key)
+        except Exception as error:
+            if isinstance(error, GoalOwnerUnavailable):
+                raise
+            raise GoalOwnerUnavailable(
+                "bound Goal owner pause fence is temporarily unavailable"
+            ) from error
+
+    def create(self, goal: str, idempotency_key: str) -> GoalRecord:
+        """R1-compatible convenience wrapper for prepare then activate."""
+
+        return self.activate_goal(self.prepare_goal(goal, idempotency_key).id)
 
     def inspect(self, goal_id: str) -> GoalRecord:
         return self._project(self.store.inspect(goal_id))
@@ -176,7 +288,6 @@ class GoalService:
                 f"{record.binding_kind} 当前不支持 {action}。"
             )
         if action == "stop":
-            # [constraint-source: ARCH_INVARIANT; ref: user stop and one-owner fence]
             # Serialize an unbound stop with every binding path.  Otherwise an
             # owner can become ready between the local cancellation and a
             # pending bind, which would resurrect work the user has stopped.
@@ -307,10 +418,10 @@ class GoalService:
             ):
                 raise GoalStateConflict("长期移动运行时尚未配置。")
             try:
-                application_id = self.discover_mobile_application(target_id).strip()
+                initial_application_context = self.discover_mobile_application(target_id).strip()
             except (OSError, RuntimeError, ValueError):
-                application_id = ""
-            if not application_id:
+                initial_application_context = ""
+            if not initial_application_context:
                 self.store.mark_waiting_configuration(
                     goal_id,
                     code="foreground_application_not_ready",
@@ -324,13 +435,16 @@ class GoalService:
                     **result.projection(),
                     "state": "READY",
                     "selected_target_id": target_id,
-                    "selected_application_id": application_id,
+                    "initial_application_context": initial_application_context,
+                    # R3 reader compatibility; new R4 code reads the explicit
+                    # initial context key and never treats this as foreground.
+                    "selected_application_id": initial_application_context,
                     "facts": [
                         *result.facts,
                         {
                             "capability": "android.foreground_application",
                             "state": "READY",
-                            "detail": f"当前前台应用已冻结为 {application_id}。",
+                            "detail": f"创建绑定时观察到初始应用 {initial_application_context}。",
                         },
                     ],
                 },
@@ -340,7 +454,7 @@ class GoalService:
                 self.store.inspect(goal_id),
                 specification=self.store.specification(goal_id),
                 target_id=target_id,
-                application_id=application_id,
+                initial_application_context=initial_application_context,
             )
         return self._bind(
             self.store.inspect(goal_id),
@@ -364,8 +478,7 @@ class GoalService:
             return record
         existing_plan = self.store.binding_plan(record.id)
         if _is_legacy_default_soul_plan(existing_plan):
-            # [constraint-source: USER_DECISION; ref: U8 route correction 2026-08-23]
-            # Earlier U8 code froze every generic long-lived application goal
+            # An earlier route froze every generic long-lived application goal
             # to Soul. Preserve that immutable ledger, but never auto-start or
             # replay it under the corrected generic mobile route.
             waiting_code = "legacy_default_soul_route_requires_migration"
@@ -400,7 +513,6 @@ class GoalService:
             finite_binding_kind=finite_binding_kind,
         )
         if route is None:
-            # [constraint-source: PRODUCT_SPEC; ref: U8 DESIGN]
             # An unrecognized classification cannot authorize a physical
             # owner. Keep the same GoalRun retryable and side-effect free.
             self.store.mark_waiting_configuration(
@@ -452,7 +564,7 @@ class GoalService:
             self.store.mark_waiting_configuration(
                 record.id,
                 code="default_android_target_not_configured",
-                message="尚未配置默认 Android 目标；U1 不会自行猜测设备。",
+                message="尚未配置默认 Android 目标；系统不会自行猜测设备。",
             )
             return self.store.inspect(record.id)
         selected_runtime = (
@@ -606,12 +718,15 @@ class GoalService:
             target_id = f"adb:{self.configured_serial}"
             facts = []
 
+        if self.target_id_resolver is not None:
+            target_id = self.target_id_resolver(target_id)
+
         try:
-            application_id = self.discover_mobile_application(target_id).strip()
+            initial_application_context = self.discover_mobile_application(target_id).strip()
         except (OSError, RuntimeError, ValueError):
-            application_id = ""
-        if not application_id:
-            message = "当前 Android 目标没有可冻结的前台业务应用；未启动设备动作。"
+            initial_application_context = ""
+        if not initial_application_context:
+            message = "当前 Android 目标没有可记录的初始应用上下文；未启动设备动作。"
             self.store.record_preflight(
                 record.id,
                 state="WAITING_CONFIGURATION",
@@ -639,7 +754,7 @@ class GoalService:
             {
                 "capability": "android.foreground_application",
                 "state": "READY",
-                "detail": f"当前前台应用已冻结为 {application_id}。",
+                "detail": f"创建绑定时观察到初始应用 {initial_application_context}。",
             }
         )
         self.store.record_preflight(
@@ -650,7 +765,8 @@ class GoalService:
                 "facts": facts,
                 "target_options": [],
                 "selected_target_id": target_id,
-                "selected_application_id": application_id,
+                "initial_application_context": initial_application_context,
+                "selected_application_id": initial_application_context,
             },
             waiting_reason=None,
         )
@@ -658,7 +774,7 @@ class GoalService:
             self.store.inspect(record.id),
             specification=specification,
             target_id=target_id,
-            application_id=application_id,
+            initial_application_context=initial_application_context,
         )
 
     def _bind_long_lived_mobile(
@@ -667,7 +783,7 @@ class GoalService:
         *,
         specification: dict[str, Any],
         target_id: str,
-        application_id: str,
+        initial_application_context: str,
     ) -> GoalRecord:
         with self._binding_lock:
             latest = self.store.inspect(record.id)
@@ -683,7 +799,7 @@ class GoalService:
                     client_request_id=f"goal:{latest.id}:prepare",
                     goal_id=latest.id,
                     target_id=target_id,
-                    application_id=application_id,
+                    initial_application_context=initial_application_context,
                     initial_input=latest.original_goal,
                 )
             except ApplicationRuntimeError as error:
@@ -713,7 +829,7 @@ class GoalService:
                 specification=specification,
                 instance_id=instance_id,
                 target_id=target_id,
-                application_id=application_id,
+                application_id=initial_application_context,
             )
             try:
                 state = runtime.activate(instance_id)
@@ -766,6 +882,19 @@ class GoalService:
                 record.id, error_type=type(error).__name__
             )
 
+    def _recoverable_goal_records(
+        self, *, bound_only: bool = True
+    ) -> list[GoalRecord]:
+        """Load the complete launcher-recovery set with a fake-store shim."""
+
+        recoverable = getattr(self.store, "recoverable_records", None)
+        if callable(recoverable):
+            return list(recoverable(bound_only=bound_only))
+        # Older injected stores only expose the UI-shaped list method.  This
+        # branch is test/compatibility-only; SQLiteGoalStore uses the unbounded
+        # recovery query above.
+        return list(self.store.list(500))
+
     def fence_stopped_long_lived_mobile_bindings_before_start(self) -> None:
         runtime = self.long_lived_mobile_runtime
         if runtime is None:
@@ -773,7 +902,7 @@ class GoalService:
         fence = getattr(runtime, "fence_stop_before_start", None)
         if not callable(fence):
             return
-        for record in self.store.list(500):
+        for record in self._recoverable_goal_records():
             if (
                 record.binding_kind == "long_lived_mobile_composition"
                 and record.bound_task_id is not None
@@ -785,42 +914,181 @@ class GoalService:
                     f"goal:{record.id}:recovery-stop-fence",
                 )
 
-    def recover_long_lived_mobile_bindings(self) -> None:
+    def fence_nonselected_long_lived_bindings_before_start(
+        self, selected_goal_run_ids: set[str] | frozenset[str]
+    ) -> None:
+        """Pause every historical mobile owner not selected by R3.
+
+        This runs before ``LongLivedMobileApplicationRuntimeGateway.startup``.
+        It is the physical startup fence for R2 databases that can contain
+        several already-activated bindings; merely changing
+        ``AgentSession.active_goal_id`` would leave those owners recoverable.
+        """
+
         runtime = self.long_lived_mobile_runtime
         if runtime is None:
             return
-        for record in self.store.list(500):
+        fence = getattr(runtime, "fence_pause_before_start", None)
+        if not callable(fence):
+            return
+        allowed = set(selected_goal_run_ids)
+        for record in self._recoverable_goal_records():
+            if (
+                record.binding_kind != "long_lived_mobile_composition"
+                or record.bound_task_id is None
+                or record.terminal_at is not None
+                or record.control_state in {"STOP_REQUESTED", "TAKEOVER"}
+                or record.id in allowed
+            ):
+                continue
+            fence(
+                record.bound_task_id,
+                f"goal:{record.id}:attention-nonselected-startup-fence",
+            )
+
+    def fence_nonselected_application_bindings_before_start(
+        self, selected_goal_run_ids: set[str] | frozenset[str]
+    ) -> None:
+        """Pause historical managed/external owners before catalog startup."""
+
+        runtime = self.application_runtime
+        if runtime is None:
+            return
+        fence = getattr(runtime, "fence_pause_before_start", None)
+        if not callable(fence):
+            return
+        allowed = set(selected_goal_run_ids)
+        for record in self._recoverable_goal_records():
+            if (
+                record.binding_kind != "application_runtime"
+                or record.bound_task_id is None
+                or record.terminal_at is not None
+                or record.control_state in {"STOP_REQUESTED", "TAKEOVER"}
+                or record.id in allowed
+            ):
+                continue
+            fence(
+                record.bound_task_id,
+                f"goal:{record.id}:attention-nonselected-application-startup-fence",
+            )
+
+    def recover_selected_application_bindings(
+        self, selected_goal_run_ids: set[str] | frozenset[str]
+    ) -> None:
+        """Resume only selected historical catalog-backed owners."""
+
+        allowed = set(selected_goal_run_ids)
+        for record in self._recoverable_goal_records():
+            if (
+                record.id not in allowed
+                or record.binding_kind != "application_runtime"
+                or record.bound_task_id is None
+                or record.terminal_at is not None
+                or record.control_state in {"STOP_REQUESTED", "TAKEOVER"}
+            ):
+                continue
+            self.activate_selected_goal(
+                record.id,
+                f"goal:{record.id}:attention-selected-application-startup-resume",
+            )
+
+    def fence_nonselected_kernel_bindings_before_recover(
+        self, selected_goal_run_ids: set[str] | frozenset[str]
+    ) -> None:
+        """Persist Kernel pause controls before coordinator recovery submits work."""
+
+        if self.kernel_runtime is None:
+            return
+        allowed = set(selected_goal_run_ids)
+        for record in self._recoverable_goal_records():
+            if (
+                not self._is_kernel_binding(record)
+                or record.bound_task_id is None
+                or record.terminal_at is not None
+                or record.control_state in {"STOP_REQUESTED", "TAKEOVER"}
+                or record.id in allowed
+            ):
+                continue
+            self.pause_goal_at_checkpoint(
+                record.id,
+                f"goal:{record.id}:attention-nonselected-kernel-startup-fence",
+            )
+
+    def recover_selected_kernel_bindings(
+        self, selected_goal_run_ids: set[str] | frozenset[str]
+    ) -> None:
+        """Resume only selected historical Kernel owners after recovery."""
+
+        if self.kernel_runtime is None:
+            return
+        allowed = set(selected_goal_run_ids)
+        for record in self._recoverable_goal_records():
+            if (
+                record.id not in allowed
+                or not self._is_kernel_binding(record)
+                or record.bound_task_id is None
+                or record.terminal_at is not None
+                or record.control_state in {"STOP_REQUESTED", "TAKEOVER"}
+            ):
+                continue
+            self.activate_selected_goal(
+                record.id,
+                f"goal:{record.id}:attention-selected-kernel-startup-resume",
+            )
+
+    def recover_long_lived_mobile_bindings(
+        self,
+        selected_goal_run_ids: set[str] | frozenset[str] | None = None,
+    ) -> None:
+        """Recover only scheduler-selected bindings when a selection is given.
+
+        ``None`` retains the legacy direct-Goal API behavior.  Normal R3
+        composition always passes the durable selected set, including an
+        empty set when no Goal is currently eligible.
+        """
+
+        runtime = self.long_lived_mobile_runtime
+        if runtime is None:
+            return
+        allowed = None if selected_goal_run_ids is None else set(selected_goal_run_ids)
+        for record in self._recoverable_goal_records(bound_only=False):
             if record.binding_kind != "long_lived_mobile_composition":
                 continue
             if record.terminal_at is not None:
+                continue
+            if allowed is not None and record.id not in allowed:
                 continue
             if record.bound_task_id is None:
                 environment = self.store.environment(record.id) or {}
                 target_id = str(
                     environment.get("selected_target_id") or ""
                 ).strip()
-                application_id = str(
-                    environment.get("selected_application_id") or ""
+                initial_application_context = str(
+                    environment.get("initial_application_context")
+                    or environment.get("selected_application_id")
+                    or ""
                 ).strip()
                 if environment.get("state") != "READY" or not (
-                    target_id and application_id
+                    target_id and initial_application_context
                 ):
                     continue
                 self._bind_long_lived_mobile(
                     record,
                     specification=self.store.specification(record.id),
                     target_id=target_id,
-                    application_id=application_id,
+                    initial_application_context=initial_application_context,
                 )
                 continue
             if record.control_state in {"STOP_REQUESTED", "TAKEOVER"}:
                 self._project(record)
                 continue
             try:
-                state = runtime.activate(record.bound_task_id)
+                self.activate_selected_goal(
+                    record.id,
+                    f"goal:{record.id}:attention-selected-startup-resume",
+                )
             except ApplicationRuntimeError:
                 continue
-            self._project(record, state=state)
 
     def _bind(
         self,
@@ -932,7 +1200,6 @@ class GoalService:
                 )
                 return self.store.inspect(latest.id)
             if owner_kind == "external_owner" and owner_binding_ref is None:
-                # [constraint-source: ARCH_INVARIANT; ref: docs/product/03_TARGET_ARCHITECTURE.md section 8]
                 # An external-effect GoalRun must resolve to this frozen owner
                 # binding, not a process-global adapter label.  Local managed
                 # GoalRuns intentionally do not need an external owner ref.
@@ -960,7 +1227,6 @@ class GoalService:
                     initial_input=latest.original_goal,
                 )
             except ApplicationRuntimeError as error:
-                # [constraint-source: PRODUCT_SPEC; ref: U8 resumable capability wait]
                 reason = str(getattr(error, "reason", getattr(error, "code", "")))
                 external = (
                     owner_kind == "external_owner"
@@ -1071,7 +1337,6 @@ class GoalService:
                         ),
                     )
                 except Exception as error:
-                    # [constraint-source: ARCH_INVARIANT; ref: evidence truth separation]
                     # Execution truth remains owned by ApplicationRuntime. A
                     # failed additive learning write is recorded separately and
                     # must not fabricate a runtime failure.
@@ -1097,7 +1362,6 @@ class GoalService:
             try:
                 result = self.answer_language(latest.original_goal)
             except Exception:
-                # [constraint-source: PRODUCT_SPEC; ref: U8 honest resumable capability wait]
                 self.store.mark_waiting_configuration(
                     latest.id,
                     code="local_language_capability_unavailable",
@@ -1267,7 +1531,6 @@ class GoalService:
                     confidence=float(data.get("confidence", 1.0)),
                 )
             except (TypeError, ValueError):
-                # [constraint-source: ARCH_INVARIANT; ref: attributable experience scope]
                 # The source event still projects as evidence; malformed
                 # attribution cannot contaminate reusable experience.
                 continue

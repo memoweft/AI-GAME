@@ -45,23 +45,28 @@ TIMES = tuple(f"2026-08-17T15:{minute:02d}:00+00:00" for minute in range(60))
 
 class FakeObservationProvider:
     """测试用 Observation Provider"""
+
+    def __init__(self) -> None:
+        self._capture_count = 0
     
     def capture(self, device_id: str) -> RawObservation:
+        minute = 10 + self._capture_count * 5
+        self._capture_count += 1
         return RawObservation(
             device_id=device_id,
-            capture_started_at=TIMES[10],
-            capture_completed_at=TIMES[12],
+            capture_started_at=TIMES[minute],
+            capture_completed_at=TIMES[minute + 2],
             screenshot=RawScreenshot(
                 status=ChannelAvailability.AVAILABLE,
                 content=b"fake-screenshot",
                 width=1080,
                 height=2400,
-                captured_at=TIMES[11],
+                captured_at=TIMES[minute + 1],
             ),
             ui_tree=RawUiTree(
                 status=ChannelAvailability.AVAILABLE,
                 content=b"<hierarchy/>",
-                captured_at=TIMES[12],
+                captured_at=TIMES[minute + 2],
             ),
             device_state=DeviceState(
                 status=ChannelAvailability.AVAILABLE,
@@ -70,7 +75,7 @@ class FakeObservationProvider:
                 orientation=Orientation.PORTRAIT,
                 keyboard_state=KeyboardState.HIDDEN,
                 connection_state=ConnectionState.CONNECTED,
-                captured_at=TIMES[11],
+                captured_at=TIMES[minute + 1],
             ),
             consistency=ObservationConsistency(
                 status=ConsistencyStatus.CONSISTENT,
@@ -413,8 +418,8 @@ class FullFakeExecutor(ActionExecutorPort):
             accepted=True,
             adapter_code=0,
             error=None,
-            started_at=_clock(),
-            finished_at=_clock(),
+            started_at=TIMES[13],
+            finished_at=TIMES[14],
         )
 
     def execute_tap(
@@ -538,7 +543,7 @@ def test_execute_action_complete_flow_integration(tmp_path: Path) -> None:
         after_observation_id=after_obs.id,
         verdict=VerificationVerdict.SUCCESS,
         reason="Claim button shows the tapped state",
-        evidence_refs=(f"observation:{after_obs.id}",),
+        evidence_refs=(after_obs.screenshot.artifact.reference,),
         method=VerificationMethod.RUNTIME_RULE,
         verified_facts=(fact,),
         complete_stage=True,
@@ -617,7 +622,7 @@ def test_execute_action_complete_flow_fail_verdict_integration(tmp_path: Path) -
         after_observation_id=after_obs.id,
         verdict=VerificationVerdict.FAIL,
         reason="Button state is unchanged",
-        evidence_refs=(f"observation:{after_obs.id}",),
+        evidence_refs=(after_obs.screenshot.artifact.reference,),
         method=VerificationMethod.RUNTIME_RULE,
     )
     assert verification.verdict is VerificationVerdict.FAIL

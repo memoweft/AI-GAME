@@ -220,7 +220,7 @@ class RuntimeProbe:
             )
 
         # Runtime truth must not be promoted merely because an injected adapter
-        # happens to report ready: physical execution is opt-in through these
+        # happens to report ready: emulator execution is opt-in through these
         # three explicit process settings.
         if not self.settings.gui_executor_enabled:
             executor_probe = AdbGuiExecutor.from_settings(self.settings).probe()
@@ -325,7 +325,7 @@ class ControlPlaneService:
             level="info" if discovery.status in {"ready", "not_configured"} else "warning",
             data={
                 "adb_status": discovery.status,
-                "device_count": len(discovery.devices),
+                "device_count": len(discovery.targets),
             },
         )
         return TargetDiscoveryView(targets=targets, discovery=discovery)

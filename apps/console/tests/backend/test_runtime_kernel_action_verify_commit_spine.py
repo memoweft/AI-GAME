@@ -108,7 +108,7 @@ def _kernel(tmp_path: Path) -> tuple[RuntimeKernel, SQLiteRuntimeStore]:
 
 
 def _prepare_executed_action(
-    kernel: RuntimeKernel, *, suffix: str = "1"
+    kernel: RuntimeKernel, *, suffix: str = "1", execution_finished: str | None = None,
 ) -> tuple[str, str, str, str]:
     task_id = f"task-{suffix}"
     stage_id = f"stage-{suffix}"
@@ -150,6 +150,7 @@ def _prepare_executed_action(
         accepted=True,
         adapter_code=0,
         error=None,
+        finished_at=execution_finished,
     )
     after = kernel.capture_observation(
         task_id=task_id,
@@ -180,6 +181,7 @@ def test_success_commits_verification_fact_stage_and_checkpoint_atomically(
 ) -> None:
     kernel, store = _kernel(tmp_path)
     task_id, stage_id, action_id, after_observation_id = _prepare_executed_action(kernel)
+    after_evidence = kernel.load_observation(after_observation_id).screenshot.artifact.reference
 
     verification, checkpoint = kernel.verify_action(
         task_id=task_id,
@@ -189,7 +191,7 @@ def test_success_commits_verification_fact_stage_and_checkpoint_atomically(
         after_observation_id=after_observation_id,
         verdict=VerificationVerdict.SUCCESS,
         reason="The target is visible in the fresh Observation.",
-        evidence_refs=("observation:observation-after-1",),
+        evidence_refs=(after_evidence,),
         method=VerificationMethod.RUNTIME_RULE,
         verified_facts=(_verified_fact(task_id, stage_id, "1"),),
         complete_stage=True,
@@ -237,6 +239,61 @@ def test_success_commits_verification_fact_stage_and_checkpoint_atomically(
     assert reopened.latest_checkpoint(task_id) == checkpoint
 
 
+@pytest.mark.parametrize("evidence_refs", [("arbitrary-proof",), ("observation:forged",)])
+def test_verification_rejects_non_artifact_evidence_refs(
+    tmp_path: Path, evidence_refs: tuple[str, ...],
+) -> None:
+    kernel, _store = _kernel(tmp_path)
+    task_id, _stage_id, action_id, after_observation_id = _prepare_executed_action(kernel)
+
+    with pytest.raises(StoreConflict, match="exact before/after Observations"):
+        kernel.verify_action(
+            task_id=task_id,
+            action_id=action_id,
+            before_observation_id="observation-before-1",
+            after_observation_id=after_observation_id,
+            verdict=VerificationVerdict.SUCCESS,
+            reason="A forged string is not evidence.",
+            evidence_refs=evidence_refs,
+            method=VerificationMethod.RUNTIME_RULE,
+        )
+
+
+def test_success_requires_fresh_after_observation_artifact(tmp_path: Path) -> None:
+    kernel, _store = _kernel(tmp_path)
+    task_id, _stage_id, action_id, after_observation_id = _prepare_executed_action(kernel)
+    before_ref = kernel.load_observation("observation-before-1").screenshot.artifact.reference
+
+    with pytest.raises(StoreConflict, match="fresh after Observation"):
+        kernel.verify_action(
+            task_id=task_id,
+            action_id=action_id,
+            before_observation_id="observation-before-1",
+            after_observation_id=after_observation_id,
+            verdict=VerificationVerdict.SUCCESS,
+            reason="Before-only proof is stale.",
+            evidence_refs=(before_ref,),
+            method=VerificationMethod.RUNTIME_RULE,
+        )
+
+
+def test_verification_rejects_after_observation_that_precedes_execution(tmp_path: Path) -> None:
+    kernel, _store = _kernel(tmp_path)
+    task_id, _stage_id, action_id, after_observation_id = _prepare_executed_action(
+        kernel, suffix="causal", execution_finished=TIMES[40],
+    )
+    after_evidence = kernel.load_observation(after_observation_id).screenshot.artifact.reference
+    # An after screenshot from minute 22 cannot prove a receipt at minute 40.
+    with pytest.raises(ValueError, match="captured after"):
+        kernel.verify_action(
+            task_id=task_id, action_id=action_id,
+            before_observation_id="observation-before-causal",
+            after_observation_id=after_observation_id,
+            verdict=VerificationVerdict.SUCCESS, reason="causal ordering",
+            evidence_refs=(after_evidence,), method=VerificationMethod.RUNTIME_RULE,
+        )
+
+
 @pytest.mark.parametrize(
     ("verdict", "expected_action_status"),
     [
@@ -254,6 +311,7 @@ def test_fail_and_uncertain_never_commit_facts_or_stage_progress(
     task_id, stage_id, action_id, after_observation_id = _prepare_executed_action(
         kernel, suffix=suffix
     )
+    after_evidence = kernel.load_observation(after_observation_id).screenshot.artifact.reference
 
     verification, checkpoint = kernel.verify_action(
         task_id=task_id,
@@ -263,7 +321,7 @@ def test_fail_and_uncertain_never_commit_facts_or_stage_progress(
         after_observation_id=after_observation_id,
         verdict=verdict,
         reason=f"{verdict.value} evidence",
-        evidence_refs=(f"observation:{after_observation_id}",),
+        evidence_refs=(after_evidence,),
         method=VerificationMethod.RUNTIME_RULE,
     )
 
@@ -376,6 +434,7 @@ def test_success_commit_rolls_back_every_fact_when_fact_insert_fails(
     task_id, stage_id, action_id, after_observation_id = _prepare_executed_action(
         kernel, suffix="rollback"
     )
+    after_evidence = kernel.load_observation(after_observation_id).screenshot.artifact.reference
 
     def fail_fact(*_args: object, **_kwargs: object) -> None:
         raise sqlite3.IntegrityError("injected Fact failure")
@@ -390,7 +449,7 @@ def test_success_commit_rolls_back_every_fact_when_fact_insert_fails(
             after_observation_id=after_observation_id,
             verdict=VerificationVerdict.SUCCESS,
             reason="would otherwise succeed",
-            evidence_refs=(f"observation:{after_observation_id}",),
+            evidence_refs=(after_evidence,),
             method=VerificationMethod.RUNTIME_RULE,
             verified_facts=(_verified_fact(task_id, stage_id, "rollback"),),
             complete_stage=True,

@@ -1,63 +1,40 @@
-# AI-GAME repository instructions
+# AI-GAME 仓库规则
 
-## Canonical product specification
+本仓库当前处于“项目修复阶段”。本文件只保存长期有效边界，不保存阶段流水、任务编号、代理角色、Work Order（工单）或测试计数。
 
-Before changing product behavior, architecture, public contracts, runtime composition, learning, configuration, or user experience, read these documents in order:
+## 先读
 
-1. `docs/product/00_INDEX.md`
-2. `docs/product/01_PRODUCT_SPEC.md`
-3. `docs/product/02_CURRENT_STATE.md`
-4. `docs/product/03_TARGET_ARCHITECTURE.md`
-5. `docs/product/04_AUTONOMY_AND_LEARNING.md`
-6. `docs/product/05_MODELS_AND_AUTO_CONFIGURATION.md`
-7. `docs/product/06_IMPLEMENTATION_ROADMAP.md`
-8. `docs/product/07_ACCEPTANCE_AND_EVIDENCE.md`
-9. `docs/product/08_AI_EXECUTION_PROTOCOL.md`
-10. `docs/product/09_DECISIONS_AND_OPEN_QUESTIONS.md`
-11. The active work order under `docs/product/work-orders/`, if one is explicitly active
+处理本仓库前读取：
 
-The documents above are the only current product and implementation authority. Current user instructions override them.
+1. `docs/product/VISION.md`；
+2. `docs/product/PROJECT_MAP.md`；
+3. `docs/product/EXECUTION_CONTRACT.md`；
+4. 相关代码、测试和 `git status --short --branch`。
 
-## Superseded and historical material
+用户当前指令优先。旧 U/R/Phase、Stage 4C、归档文档和历史聊天只能用于调查，不能自动恢复施工。
 
-- `RUNTIME_KERNEL_ROADMAP_STATUS.md`, root `PHASE_*.md`, and `docs/NEW/PHASE_*.md` are historical implementation evidence. They may describe code that exists, but they do not define the current product boundary or future roadmap.
-- `README.md`, `docs/console-architecture.md`, `docs/mobile-task-runtime.md`, `docs/runtime-layout.md`, and `contracts/` describe implemented behavior until it is migrated. When they conflict with `docs/product/`, treat the implemented behavior as a current-state constraint and `docs/product/` as the target.
-- Never infer that the product is complete because an old roadmap says Phase 0-7 is complete.
-- Never implement from a superseded roadmap or design baseline.
+## 产品边界
 
-## Execution rules
+- 最终用户只在 WeftMate 中与 DeepSeek Harness（DSH，执行智能体运行时）对话。
+- AI-GAME 是 DSH 调用的 Android 模拟器任务后端，不是第二个聊天、通用规划、审批或个人记忆产品。
+- 只使用 Android 模拟器。不得恢复真机、Companion、无线 ADB、ADB reverse 或旧真机验收路线。
+- 正式新任务只使用 `/api/execution/v2`、稳定 `{principal_id, controller_id}`、canonical Task（权威任务）与 `android_ui_agent/1`。
+- `/api/execution/v1`、旧数据库字段和旧事件名只可为历史读取/迁移兼容存在，不能创建或伪装成新产品能力。
+- 本机 Console（控制台）只供开发诊断；4310 是开发地址。正式用户不手工启动它，未来由 WeftMate 管理生命周期。
 
-- Preserve user work. Start with `git status --short --branch` and inspect overlapping changes before editing.
-- Follow the active work order. Do not silently broaden one vertical slice into a whole-platform rewrite.
-- Prefer the earliest real end-to-end break: goal ingress -> orchestration -> environment -> execution -> verification -> experience -> user result.
-- Keep compatibility adapters until the replacement path has runtime evidence and rollback coverage.
-- Do not claim success from source code, mocks, transport acceptance, or a model statement. Use the evidence levels in `docs/product/07_ACCEPTANCE_AND_EVIDENCE.md`.
-- Keep runtime invariants even in open-development autonomy mode: one device owner, user stop, revision fences, action validation, post-action observation, no uncertain replay, bounded runaway protection, and durable evidence.
-- Do not add application-specific keyword bans or fixed coordinate macros to the generic core.
-- Make focused local commits only when the user or active work order authorizes commits. Never push automatically.
+## 执行规则
 
-## Documentation discipline
+- 动作前必须确认当前 owner、Task revision、Profile、设备身份和 fresh observation（新鲜观察）；动作后重新观察并验证。
+- 通道接受请求、ADB 返回成功或模型声称完成都不等于用户目标完成。
+- 崩溃或未知物理结果先对账，不换新 action identity（动作身份）盲发。
+- 用户的暂停、修改、接管和停止优先于迟到的模型或 runner（执行器）结果。
+- 普通错误进入等待、恢复或重新规划。立即阻断仅限重复真实副作用、身份/设备串线、凭据暴露和伪造成功。
+- 不以固定动作数、固定迭代数或“最多 2 步”限制用户目标；用终止条件、无进展检测、退避、等待和用户控制约束循环。
 
-- Update `docs/product/02_CURRENT_STATE.md` when a completed work order changes confirmed capability.
-- Update the roadmap and work-order status only after the specified verification passes.
-- Record unresolved product choices in `docs/product/09_DECISIONS_AND_OPEN_QUESTIONS.md`; do not hide them in implementation comments.
-- Keep artifact, automated test, runtime, real-device acceptance, deployment, and external outcome as separate facts.
+## 施工纪律
 
-## Stage completion report
-
-At the end of every roadmap stage or work-order delivery, the final user-facing
-report must contain these four sections in this order:
-
-1. `总路线` — show U0-U9 and the current status of every stage.
-2. `完成了什么` — state the observable capability and its artifact,
-   automated-test, current-source runtime, real-device, learning, and
-   deployment evidence separately.
-3. `还有什么没完成` — list every open acceptance gate, unavailable evidence,
-   deviation, and blocker without treating silence as a pass.
-4. `下一阶段是什么` — name the next work order, its business outcome, and
-   whether it is allowed to start under the roadmap advancement rule.
-
-Do not replace this structure with a tool log or a generic summary. A stage
-that lacks mandatory real-device or deployment evidence must still be reported
-as `PARTIAL`, `BLOCKED`, `FAILED`, or `NOT RUN` as defined by the canonical
-product documents.
+- 保留用户脏工作区。未经明确授权不 reset、clean、stash、覆盖、提交、推送、发布或删除。
+- 新代码必须服务模拟器任务的身份、调度、观察、动作、验证、恢复、控制或有范围经验；不要扩展旧 Console 为普通用户产品。
+- 测试使用 fake/temp SQLite（临时数据库）和模拟适配器时，必须明确它只证明工程合同。
+- 真实服务、模型、模拟器、WeftMate 可见性、安装包和产品所有者 dogfood（亲自试用）分别报告，不互相替代。
+- 形成固定候选并完成有限内部验证后停止，等待产品所有者反馈；不自动进入无限找 Bug/修 Bug 循环。

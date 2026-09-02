@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import asdict
@@ -23,6 +24,7 @@ from ...runtime_kernel.lease import DeviceExecutionLease, LeaseStats
 from ...runtime_kernel.lease.errors import LeaseConflict, LeaseExpired, LeaseNotFound
 from ...runtime_kernel.observation import (
     ArtifactRef,
+    BodySnapshotCorrelation,
     ChannelAvailability,
     ConnectionState,
     ConsistencyStatus,
@@ -40,12 +42,12 @@ from ...runtime_kernel.task import FailureState, Task, TaskSource, TaskStatus
 from ...runtime_kernel.verify import Verification, VerificationMethod, VerificationVerdict
 
 
-_SCHEMA_REVISION = 5
+_SCHEMA_REVISION = 7
 
 # Week 5: 默认 Lease 绝对 Deadline = 获取后 300 秒（续期不可推迟）
 DEFAULT_LEASE_DEADLINE_SECONDS = 300
 
-_PHASE_2_SCHEMA = """
+_RUNTIME_SCHEMA = """
 CREATE TABLE IF NOT EXISTS runtime_schema (
     revision INTEGER PRIMARY KEY,
     applied_at TEXT NOT NULL
@@ -319,6 +321,51 @@ CREATE INDEX ix_runtime_device_leases_deadline
 ON runtime_device_leases(deadline_at);
 """
 
+# Runtime action types were a SQLite CHECK constraint before R4.  Rebuild the
+# table rather than silently mapping new physical actions to an old spelling;
+# existing rows keep their exact values and child references remain intact.
+_MIGRATION_5_TO_6 = """
+CREATE TABLE runtime_actions_r4 (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES runtime_tasks(id) ON DELETE RESTRICT,
+    stage_id TEXT NOT NULL REFERENCES runtime_stages(id) ON DELETE RESTRICT,
+    based_on_observation_id TEXT NOT NULL REFERENCES runtime_observations(id) ON DELETE RESTRICT,
+    type TEXT NOT NULL CHECK (type IN (
+        'tap', 'long_press', 'swipe', 'input_text', 'input_text_unicode',
+        'back', 'home', 'recents', 'open_app', 'capture_snapshot', 'wait', 'screenshot'
+    )),
+    params_json TEXT NOT NULL,
+    expected_outcome TEXT NOT NULL,
+    proposed_by_call_id TEXT NOT NULL,
+    proposed_at TEXT NOT NULL,
+    validation_status TEXT NOT NULL CHECK (validation_status IN ('accepted', 'rejected')),
+    rejection_code TEXT,
+    status TEXT NOT NULL CHECK (status IN ('PROPOSED', 'EXECUTED', 'VERIFIED', 'FAILED', 'UNCERTAIN')),
+    updated_at TEXT NOT NULL,
+    CHECK ((validation_status = 'accepted' AND rejection_code IS NULL)
+        OR (validation_status = 'rejected' AND rejection_code IS NOT NULL AND status = 'FAILED'))
+);
+INSERT INTO runtime_actions_r4
+SELECT * FROM runtime_actions;
+DROP TABLE runtime_actions;
+ALTER TABLE runtime_actions_r4 RENAME TO runtime_actions;
+CREATE INDEX ix_runtime_actions_task_created
+ON runtime_actions(task_id, proposed_at, id);
+CREATE INDEX ix_runtime_actions_stage_created
+ON runtime_actions(stage_id, proposed_at, id);
+ALTER TABLE runtime_action_executions ADD COLUMN body_command_id TEXT;
+ALTER TABLE runtime_action_executions ADD COLUMN body_receipt_id TEXT;
+"""
+
+_MIGRATION_6_TO_7 = """
+ALTER TABLE runtime_observations ADD COLUMN body_snapshot_id TEXT;
+ALTER TABLE runtime_observations ADD COLUMN body_binding_id TEXT;
+ALTER TABLE runtime_observations ADD COLUMN body_device_boot_id TEXT;
+ALTER TABLE runtime_observations ADD COLUMN body_capture_request_id TEXT;
+ALTER TABLE runtime_observations ADD COLUMN body_snapshot_sequence INTEGER;
+ALTER TABLE runtime_observations ADD COLUMN body_caused_by_command_id TEXT;
+"""
+
 
 class SQLiteRuntimeStore:
     """SQLite adapter implementing the Runtime Store port without live wiring."""
@@ -336,7 +383,7 @@ class SQLiteRuntimeStore:
                 )
             }
             if not tables:
-                connection.executescript(_PHASE_2_SCHEMA)
+                connection.executescript(_RUNTIME_SCHEMA)
                 connection.execute(
                     "INSERT INTO runtime_schema(revision, applied_at) VALUES (1, ?)",
                     (datetime.now(timezone.utc).isoformat(),),
@@ -384,6 +431,34 @@ class SQLiteRuntimeStore:
                     target_revision=5,
                 )
                 self._backfill_lease_deadlines(connection)
+                revision = 5
+            if revision == 5:
+                self._apply_action_type_migration(connection)
+                revision = 6
+            if revision == 6:
+                self._apply_migration(
+                    connection,
+                    statements=_MIGRATION_6_TO_7,
+                    target_revision=7,
+                )
+
+    @staticmethod
+    def _apply_action_type_migration(connection: sqlite3.Connection) -> None:
+        # SQLite cannot alter an existing CHECK constraint.  Foreign keys must
+        # be disabled outside the transaction while the parent table is rebuilt;
+        # the copied primary keys and a final foreign_key_check retain integrity.
+        connection.execute("PRAGMA foreign_keys = OFF")
+        try:
+            SQLiteRuntimeStore._apply_migration(
+                connection,
+                statements=_MIGRATION_5_TO_6,
+                target_revision=6,
+            )
+        finally:
+            connection.execute("PRAGMA foreign_keys = ON")
+        violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise StoreConflict("R4 runtime action migration violated foreign keys")
 
     @staticmethod
     def _backfill_lease_deadlines(connection: sqlite3.Connection) -> None:
@@ -688,6 +763,17 @@ class SQLiteRuntimeStore:
             raise RecordNotFound(f"Action {action_id} for Task {task_id} was not found")
         return self._action_from_row(row)
 
+    def load_action_by_id(self, action_id: str) -> Action:
+        """Resolve the globally unique Kernel Action used by a late Body result."""
+
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM runtime_actions WHERE id = ?", (action_id,)
+            ).fetchone()
+        if row is None:
+            raise RecordNotFound(f"Action {action_id} was not found")
+        return self._action_from_row(row)
+
     def list_actions(self, task_id: str) -> tuple[Action, ...]:
         with self._connection() as connection:
             rows = connection.execute(
@@ -722,6 +808,115 @@ class SQLiteRuntimeStore:
                 return self._insert_event(connection, before_task.id, event)
         except sqlite3.IntegrityError as exc:
             raise StoreConflict(f"could not record ActionExecution: {exc}") from exc
+
+    def record_body_execution_once(
+        self,
+        *,
+        before_task: Task,
+        after_task: Task,
+        before_action: Action,
+        after_action: Action,
+        execution: ActionExecution,
+        event: RuntimeEventDraft,
+    ) -> tuple[ActionExecution, bool]:
+        """Atomically merge one Body receipt into the Kernel execution ledger.
+
+        The triple ``action_id + body_command_id + body_receipt_id`` is the
+        durable identity.  A synchronous result, a retained result after
+        restart, and concurrent duplicate delivery all return the first row.
+        Reusing any member of that identity for another physical fact is a
+        conflict, never a second execution.
+        """
+
+        self._validate_action_task_mutation(
+            before_task, after_task, before_action, after_action
+        )
+        if execution.body_command_id is None or execution.body_receipt_id is None:
+            raise StoreConflict("Body execution requires command and receipt identities")
+        if execution.action_id != before_action.id or execution.device_id != before_task.device_id:
+            raise StoreConflict("Body ActionExecution does not match its Action or Task device")
+        try:
+            with self._transaction() as connection:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM runtime_action_executions
+                    WHERE action_id = ? OR body_command_id = ? OR body_receipt_id = ?
+                    """,
+                    (
+                        execution.action_id,
+                        execution.body_command_id,
+                        execution.body_receipt_id,
+                    ),
+                ).fetchall()
+                if rows:
+                    if len(rows) != 1:
+                        raise StoreConflict(
+                            "Body execution identity is split across existing executions"
+                        )
+                    existing = self._action_execution_from_row(rows[0])
+                    if (
+                        existing.action_id != execution.action_id
+                        or existing.body_command_id != execution.body_command_id
+                        or existing.body_receipt_id != execution.body_receipt_id
+                        or existing.device_id != execution.device_id
+                    ):
+                        raise StoreConflict(
+                            "Kernel Action already has a different Body command/receipt identity"
+                        )
+                    self._release_exact_body_execution_lease(
+                        connection,
+                        device_id=existing.device_id,
+                        task_id=before_task.id,
+                        action_id=existing.action_id,
+                    )
+                    return existing, False
+
+                self._require_current_task_and_action(
+                    connection, before_task, before_action
+                )
+                self._insert_action_execution(connection, before_task.id, execution)
+                self._update_action(connection, after_action)
+                self._update_task(connection, after_task)
+                self._insert_event(connection, before_task.id, event)
+                self._release_exact_body_execution_lease(
+                    connection,
+                    device_id=execution.device_id,
+                    task_id=before_task.id,
+                    action_id=execution.action_id,
+                )
+                return execution, True
+        except sqlite3.IntegrityError as exc:
+            raise StoreConflict(f"could not record Body ActionExecution: {exc}") from exc
+
+    @staticmethod
+    def _release_exact_body_execution_lease(
+        connection: sqlite3.Connection, *, device_id: str, task_id: str, action_id: str
+    ) -> None:
+        """Release only the lease owned by this durable physical fact.
+
+        This runs in the same BEGIN IMMEDIATE transaction as ActionExecuted,
+        so restart reconciliation cannot observe the result and then race a
+        different owner while attempting a query-then-release cleanup.
+        """
+
+        connection.execute(
+            "DELETE FROM runtime_device_leases "
+            "WHERE device_id=? AND task_id=? AND action_id=?",
+            (device_id, task_id, action_id),
+        )
+
+    def release_lease_for_body_execution(
+        self, *, device_id: str, task_id: str, action_id: str
+    ) -> None:
+        """Atomically release exactly one already-recorded body execution lease."""
+
+        with self._transaction() as connection:
+            self._release_exact_body_execution_lease(
+                connection,
+                device_id=device_id,
+                task_id=task_id,
+                action_id=action_id,
+            )
 
     def load_action_execution(self, action_id: str) -> ActionExecution:
         with self._connection() as connection:
@@ -992,11 +1187,13 @@ class SQLiteRuntimeStore:
             (verification.action_id,),
         ).fetchone()
         before_row = connection.execute(
-            "SELECT task_id FROM runtime_observations WHERE id = ?",
+            "SELECT task_id, screenshot_artifact_ref, ui_tree_artifact_ref "
+            "FROM runtime_observations WHERE id = ?",
             (verification.before_observation_id,),
         ).fetchone()
         after_row = connection.execute(
-            "SELECT task_id FROM runtime_observations WHERE id = ?",
+            "SELECT task_id, screenshot_artifact_ref, ui_tree_artifact_ref "
+            "FROM runtime_observations WHERE id = ?",
             (verification.after_observation_id,),
         ).fetchone()
         if action_row is None or before_row is None or after_row is None:
@@ -1008,6 +1205,25 @@ class SQLiteRuntimeStore:
             or after_row["task_id"] != verification.task_id
         ):
             raise StoreConflict("Verification references facts from another Task")
+        before_refs = {
+            str(value)
+            for value in (before_row["screenshot_artifact_ref"], before_row["ui_tree_artifact_ref"])
+            if value is not None
+        }
+        after_refs = {
+            str(value)
+            for value in (after_row["screenshot_artifact_ref"], after_row["ui_tree_artifact_ref"])
+            if value is not None
+        }
+        evidence = set(verification.evidence_refs)
+        if not evidence.issubset(before_refs | after_refs):
+            raise StoreConflict(
+                "Verification evidence must be an artifact from its exact before/after Observations"
+            )
+        if verification.verdict.value == "SUCCESS" and not evidence.intersection(after_refs):
+            raise StoreConflict(
+                "SUCCESS Verification requires evidence from its fresh after Observation"
+            )
 
     @staticmethod
     def _validate_fact_ownership(connection: sqlite3.Connection, fact: Fact) -> None:
@@ -1113,10 +1329,13 @@ class SQLiteRuntimeStore:
                 ui_tree_sha256, ui_tree_captured_at, ui_tree_error_code,
                 device_state_status, foreground_app, screen_width, screen_height,
                 orientation, keyboard_state, connection_state,
-                device_state_captured_at, consistency_status, consistency_reason
+                device_state_captured_at, consistency_status, consistency_reason,
+                body_snapshot_id, body_binding_id, body_device_boot_id,
+                body_capture_request_id, body_snapshot_sequence,
+                body_caused_by_command_id
             ) VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             """,
             self._observation_values(observation),
@@ -1156,8 +1375,9 @@ class SQLiteRuntimeStore:
             """
             INSERT INTO runtime_action_executions (
                 id, action_id, task_id, device_id, lease_ref, accepted, adapter_code,
-                error_code, error_message, error_retryable, started_at, finished_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                error_code, error_message, error_retryable, started_at, finished_at,
+                body_command_id, body_receipt_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 execution.id,
@@ -1172,6 +1392,8 @@ class SQLiteRuntimeStore:
                 int(execution.error.retryable) if execution.error else None,
                 execution.started_at,
                 execution.finished_at,
+                execution.body_command_id,
+                execution.body_receipt_id,
             ),
         )
 
@@ -1324,13 +1546,28 @@ class SQLiteRuntimeStore:
 
     @staticmethod
     def _action_values(action: Action) -> tuple[Any, ...]:
+        params = dict(action.params)
+        if action.type in {ActionType.INPUT_TEXT, ActionType.INPUT_TEXT_UNICODE}:
+            text = params.get("text")
+            if isinstance(text, str):
+                # Runtime actions are durable audit facts, not a typed-text
+                # vault.  The live kernel keeps plaintext only in a transient
+                # envelope; all SQLite/event/checkpoint paths receive this
+                # bounded opaque description instead.
+                params["text"] = {
+                    "redacted": True,
+                    "length": len(text),
+                    "opaque_digest": hashlib.sha256(
+                        b"ai-game:runtime-input:v1\0" + text.encode("utf-8")
+                    ).hexdigest(),
+                }
         return (
             action.id,
             action.task_id,
             action.stage_id,
             action.based_on_observation_id,
             action.type.value,
-            _json(action.params),
+            _json(params),
             action.expected_outcome,
             action.proposed_by_call_id,
             action.proposed_at,
@@ -1412,6 +1649,7 @@ class SQLiteRuntimeStore:
     @staticmethod
     def _observation_values(observation: Observation) -> tuple[Any, ...]:
         ui_artifact = observation.ui_tree.artifact
+        body_snapshot = observation.body_snapshot
         return (
             observation.id,
             observation.task_id,
@@ -1444,6 +1682,12 @@ class SQLiteRuntimeStore:
             observation.device_state.captured_at,
             observation.consistency.status.value,
             observation.consistency.reason,
+            body_snapshot.snapshot_id if body_snapshot else None,
+            body_snapshot.binding_id if body_snapshot else None,
+            body_snapshot.device_boot_id if body_snapshot else None,
+            body_snapshot.capture_request_id if body_snapshot else None,
+            body_snapshot.sequence if body_snapshot else None,
+            body_snapshot.caused_by_body_command_id if body_snapshot else None,
         )
 
     @staticmethod
@@ -1523,6 +1767,8 @@ class SQLiteRuntimeStore:
             error=error,
             started_at=row["started_at"],
             finished_at=row["finished_at"],
+            body_command_id=row["body_command_id"],
+            body_receipt_id=row["body_receipt_id"],
         )
 
     @staticmethod
@@ -1616,6 +1862,16 @@ class SQLiteRuntimeStore:
                 size_bytes=row["ui_tree_size_bytes"],
                 sha256=row["ui_tree_sha256"],
             )
+        body_snapshot = None
+        if row["body_snapshot_id"] is not None:
+            body_snapshot = BodySnapshotCorrelation(
+                snapshot_id=row["body_snapshot_id"],
+                binding_id=row["body_binding_id"],
+                device_boot_id=row["body_device_boot_id"],
+                capture_request_id=row["body_capture_request_id"],
+                sequence=row["body_snapshot_sequence"],
+                caused_by_body_command_id=row["body_caused_by_command_id"],
+            )
         return Observation(
             id=row["id"],
             task_id=row["task_id"],
@@ -1650,6 +1906,7 @@ class SQLiteRuntimeStore:
                 status=ConsistencyStatus(row["consistency_status"]),
                 reason=row["consistency_reason"],
             ),
+            body_snapshot=body_snapshot,
         )
 
     def acquire_lease(

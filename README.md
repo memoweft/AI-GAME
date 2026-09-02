@@ -1,271 +1,47 @@
 # AI-GAME
 
-> **产品规范与当前状态入口**：唯一权威产品定义、实施路线、验收规则和执行指针位于 [`docs/product/00_INDEX.md`](docs/product/00_INDEX.md)。当前默认有限手机目标路径已经在 U7 本地切换为 Kernel；U8 仍为 `PARTIAL`，准确能力与证据边界见 [`docs/product/02_CURRENT_STATE.md`](docs/product/02_CURRENT_STATE.md) 第 15 节。
->
-> [constraint-source: PRODUCT_SPEC; ref: `docs/product/00_INDEX.md` section 1]
->
-> **兼容文档边界**：本 README 的多数组件、命令和执行链说明保留的是 Legacy/迁移期兼容快照，不是当前默认组合或 U0-U9 状态真源。不要从下文的旧现在时推导当前 active work order、默认模型、router 缺口或验收 gate。
->
-> **D20 退役覆盖**：下文所有 `F:\dating-copilot` 和 Soul owner 链路仅保留为历史实现/接口证据。该项目已经退役，不得启动、探测或用于当前 U8。普通长期移动目标不得据此推导 `external_owner.soul` 或 `soul-reply-v1`；当前目标路线是 ApplicationRuntime 生命周期与有界 RuntimeKernel 手机周期的组合。
+AI-GAME 是 WeftMate / DeepSeek Harness（DSH，执行智能体运行时）的本地 Android 模拟器任务后端。用户只在 WeftMate 中与 DSH 对话；当目标需要操作 Android 时，DSH 通过 `phone_execution` 调用 AI-GAME，结果回到原对话。
 
-AI-GAME 是一个通用的本机手机智能体平台。普通有限手机目标当前经统一 GoalRun 入口绑定到 Kernel；`MobileTaskRuntime` 作为 Legacy 只读历史和显式回滚兼容路径保留。`ApplicationRuntime` 仍为长期应用 Profile 提供持久周期能力。
+- [产品愿景](docs/product/VISION.md)
+- [当前代码地图](docs/product/PROJECT_MAP.md)
+- [V2 执行契约](docs/product/EXECUTION_CONTRACT.md)
 
-历史上，`F:\dating-copilot` 曾作为 `soul-reply-v1` 的专用设备与物理 ledger owner；D20 已将该集成从当前 U8 排除。`soul-reply-v1` 代码只作为可选专用 Adapter 保留，不是普通长期应用目标的默认路由或前置条件。
+## 当前状态
 
-Soul 只是 AI-GAME 支持的一个应用，不是产品本身。Mobile-Agent 只作为设计与实现参考；AI-GAME 没有把 Mobile-Agent 安装成父运行时，也不依赖它才能启动。
+- 正式方向只使用 Android 模拟器和通用 `android_ui_agent/1`。
+- 稳定 owner pair（所有者二元组）、canonical Task（权威任务）、模拟器 Profile、常驻调度、观察/动作/验证、恢复和 scoped experience（有范围经验）已形成工程基础。
+- 旧真机、Android Companion、无线 ADB、ADB reverse、固定 Settings-only runner（仅设置页执行器）和旧阶段治理已退出活动路线。
+- 当前不属于产品所有者 dogfood（亲自试用）候选。WeftMate 还没有管理 AI-GAME 生命周期，因此用户界面不发布依赖本服务的全局入口。
 
-## 现在可以使用什么
+## 开发诊断
 
-- 在“一句话开始”中提交通用 Android MobileTask，查看持久计划、子目标、动作尝试、验证、Reflection 与技能版本；
-- 执行中追加的指令会递增 `input_revision`；过时的模型决策不能跨过最后的设备下发 fence，但已经下发的原子动作无法撤回；
-- 同一本地 GUI-Owl endpoint 顺序完成规划、单动作提案、BEFORE 单图摘要、AFTER 单图摘要、零图片的摘要对比验证和有界 Reflection，不启动常驻角色 Agent，也不在一次模型请求中传两张图；
-- 连续 3 次无可见进展会持久化 Reflection 并改变策略；尺寸与 PNG 字节完全相同的 BEFORE/AFTER 画面只会在 Verifier **未确认 Subgoal 已满足**时把伪进展压成 `progress=false`，不会单独构成失败证据；若同一静态终态已经由可见事实确认满足，则保留 `satisfied=true / progress=true`；当前实现会在 Planner 生成的全部 Subgoal 被验证后把任务标成完成并推进 SkillMemory，但尚无独立验证器把这些 Subgoal 与原始用户目标逐项核对，因此存在已记录的假完成/错误记忆缺陷，详见 [`docs/product/02_CURRENT_STATE.md`](docs/product/02_CURRENT_STATE.md)；
-- 默认一句话入口会在内部推导稳定的自动技能作用域，普通用户无需填写 `skill_id`；显式旧 `skill_id` 仍兼容，但与自动作用域隔离；
-- MobileTask 使用一个内部队列 worker，并在整个任务会话期间持有 `DeviceExecutionLease`；Chat、Game Learning 与 MobileTask 不会在同一进程内交错操作同一个设备；
-- 正常关闭会拒绝新写入、等待已下发动作完成结算，并把未下发工作留在安全检查点；重启恢复按固定优先级处理：未收口物理 `act` 意图先终结为 `uncertain / restart_open_intent` 且永不重放，否则已接受停止的任务成为 `stopped`，其余安全活动检查点才回到 `queued`；
-- 兼容 Chat API 仍可建立持久会话并读取历史消息，但 Chat 不再是默认一级入口；
-- 会话空闲时发送会创建一个新的 `ChatTurn`；当前 `ChatTurn` 处于 `accepted`、`queued`、`thinking`、`planning` 或 `executing` 时继续发送，会把用户消息追加到同一个 Turn、递增 `input_revision`，并由原 worker 继续处理，不会启动第二个 worker；`stopping` 时拒绝新消息；
-- 用户消息的 `delivery_status` 区分 `queued`（已持久化、模型尚未读取）、`applied`（已进入一次模型决策快照，不代表回复、动作或成功）和 `rejected`（停止、取消、失败或重启先发生，模型从未读取）；
-- 选择“本地直聊”：只调用本地 GUI-Owl 生成文字，不读取屏幕、不调用云端、不操作设备；
-- 选择“云端对话 + 本地执行”：云端模型生成用户回复和设备目标，本地 GUI-Owl 根据当前截图连续执行点击、长按、滑动、普通文本输入、系统返回/主页、等待和结束；
-- 每一步都执行“新截图 → 本地模型提出一个动作 → ADB 传输 → 动作后新截图”，回复状态和设备执行状态分别显示；
-- 当前测试模式不逐步弹审批，也不根据页面内容设置敏感类别 hard-stop；账号凭据、验证码/生物识别、实名/身份核验、付款、CAPTCHA、系统权限、法律确认或无法可靠判断的页面都不会自动触发暂停；
-- 当前设备循环没有固定动作步数上限，只在用户主动停止、设备/ADB 或模型异常，或者本地模型返回 `terminate` 时结束；这是现状缺口，vNext 要求加入有界的动作、时间和恢复预算，不能把无限循环当作目标能力；
-- 若兼容旧版 GUI-Owl 的 `interact` 输出，控制台只记录一次重定向并要求模型根据新画面继续规划，不会转为人工暂停；
-- 发现并展示当前 Android ADB 目标、连接类型、能力、模型/执行器状态、智能任务进度和活动事件；
-- 保留 `soul-reply-v1` 专用 Adapter 和工作台的兼容读写表面，但其历史 owner 已退役，当前不得据此启动真实 Soul 周期或声称 scheduler ready；普通长期移动目标走统一 Goal composer，并在内部 ApplicationRuntime + RuntimeKernel 组合补齐前诚实等待；
-- 停止正在处理的一轮对话。停止后不会再发送新动作，但已经传输到设备的原子动作无法撤回。
-
-当前自动闭环接入 Android ADB，可绑定发现到的模拟器、USB 或无线连接的手机/平板；Windows 本机目标仍可展示，但 Windows 软件的鼠标键盘执行 Adapter 尚未接入。前端一级导航只有 **一句话开始 / Soul / 设备 / 设置**。Chat、Game Learning、Workflow、Run 和 Approval 的后端 routes 与历史记录为兼容/高级用途保留。v2 Goal composer 已能冻结有限手机、纯语言、本地长期和长期移动能力计划；长期移动计划当前仍缺少 ApplicationRuntime + RuntimeKernel 组合，不会默认转去 Soul owner。
-
-代码、自动测试、已加载运行时和真实设备结果必须分开陈述。当前已有一条率土之滨真实任务完成记录：Task `daac81a7-1af9-47e3-9566-66e73509a0fd`，共 23 次 ActionAttempt，技能作用域 `auto:stzb/tutorial/v1`。它只证明这一条任务的完成事实，不证明通用游戏能力。新的 Soul 回复链仍待本轮 live 验收，不能据代码或测试声称已经实机跑通。
-
-“控制台在线”“回复已生成”“ADB 已接收动作”“动作后画面已取得”“本地模型结束本轮”是不同事实，界面与数据库分别记录，不会把传输成功伪装成目标完成。
-
-这是全部放开的测试模式，不是针对真实账号、付款、授权或法律确认流程的安全代理。请只在你明确授权和可控的测试目标中运行；页面内容本身不会替你停止循环，需要时应主动点击停止。
-
-当前闭环是低频、顺序、单指的离散截图—动作链路，适合菜单和普通应用操作；它不具备持续视觉状态估计、高频本地控制或多点触控，尚不能宣称能够连续游玩实时动作游戏。历史/候选 readiness 设计见 `docs/gameplay-readiness.md`；它不是当前 canonical 验收 authority。
-
-## 通用 ApplicationRuntime 平台
-
-`ApplicationRuntime` 是应用循环的深 Module。一个 Profile 注入 `ObservationPort`、`Policy`、`ExecutionOwner`、`Verifier`、可选 `MemoryGate` 和持久化脱敏投影；调用方只管理实例，不编排截图、模型请求、物理 ledger 或恢复步骤。当前可达的 `local-managed-v1` 是无设备连续性能力；`soul-reply-v1` 是未获当前真实 owner 验收的可选专用 Adapter，不是通用长期移动组合。
-
-调用 Interface 为：
-
-```text
-start(profile_id, client_request_id, target_id=None, initial_input=None)
-command(instance_id, Input|Pause|Resume|Stop, client_request_id)
-inspect(instance_id)
-list(limit=100)
-shutdown(timeout=5)
-```
-
-本机 HTTP Adapter 对应：
-
-- `POST /api/v1/application-instances`：创建实例，body 为 `profile_id`、`client_request_id`、可选 `target_id` 和 `initial_input`；
-- `GET /api/v1/application-instances?limit=100`：读取最近实例；
-- `GET /api/v1/application-instances/{instance_id}`：读取一个实例；
-- `POST /api/v1/application-instances/{instance_id}/commands`：body 为 `command: Input|Pause|Resume|Stop`、`client_request_id`，且只有 `Input` 携带非空 `content`。
-- `GET /api/v1/application-profiles/soul-reply-v1/scheduler`：只读投影 matcher 的目标态、有效态、控制权一致性和稳定状态码；不返回 identity、消息或 controller ref。
-
-两个 POST 还要求同源控制台请求头 `X-AI-Game-Client: console-v1`；缺少或错误时返回 403。这个 CSRF/来源门槛不改变 `client_request_id` 的持久幂等语义。
-
-所有写请求都使用与规范化 payload 绑定的 `client_request_id`：同 ID、同 payload 返回同一个持久结果；同 ID 改 payload 冲突。HTTP 只投影 lifecycle、revision、degraded/hard-risk、脱敏 intent phase、Outcome 状态和时间，不返回输入正文、对方消息、回复草稿、截图、owner receipt 细节或验证证据正文。
-
-## 通用 MobileTask 运行时
-
-当本地 GUI-Owl、已启用的 Android executor 和 ADB executable 已配置时，后端组装一个通用 `MobileTaskRuntime`；默认界面要求选择就绪 Target，并按其动态 serial 绑定，所以不要求全局默认 serial。兼容 API 若省略 Target 才尝试默认 serial；默认值也不存在时，请求可先持久化为 `202 queued`，随后以 `executor_not_configured` 收口。缺少整个运行时依赖时，控制台与持久历史仍可打开：`GET /api/v1/tasks` 和 `GET /api/v1/tasks/{task_id}` 通过只读 `MobileTaskArchive` 查询 `mobile-tasks.db`，而创建、追加输入和停止三个写 routes 返回 `503 mobile_task_runtime_not_configured`，不伪造已经排队或正在执行的状态。
-
-调用 Interface 只需要五类操作：
-
-- `POST /api/v1/tasks`：提交目标；
-- `GET /api/v1/tasks`：列出最近任务；
-- `GET /api/v1/tasks/{task_id}`：查看完整 TaskState；
-- `POST /api/v1/tasks/{task_id}/inputs`：追加 owner 指令；
-- `POST /api/v1/tasks/{task_id}/stop`：请求停止。
-
-元数据位于 `runtime/console/mobile-tasks.db`（独立 schema v2），本地原始画面证据位于 `runtime/sessions/mobile-tasks/evidence/`。证据目录在每次新增画面后尽力清理不完整文件和旧记录，默认按 256 帧、1 GiB、7 天修剪，同时始终保留刚写入的一对文件，因此这些是 best-effort retention 而不是对最新证据的绝对总量上限；SQLite 任务历史可以比原始帧保留更久。HTTP 中的 ActionAttempt 不返回原子动作参数、必须原样输入的文本、原始模型输出或 BEFORE/AFTER 截图引用；事件也只返回序号、类型和时间。传给下一次 Executor 的近期动作历史只使用脱敏指纹：点击/长按只保留 4×4 屏幕区域，滑动只保留方向，文本固定为 `text(redacted)`。用户自己提交的 goal 和 input 仍是任务 Interface 的一部分，会在查询时显示。
-
-完整的 Module、Interface、seam、Adapter、并发、验证、SkillMemory 和恢复规则见 [`docs/mobile-task-runtime.md`](docs/mobile-task-runtime.md)；精确 HTTP 请求、响应、错误和脱敏契约见 [`contracts/mobile-task-v1.md`](contracts/mobile-task-v1.md)。
-
-## 兼容的实验性有界游戏学习
-
-首版 `GameLearner` 为低频离散 GUI 提供有界的 `LearningJob` / `LearningEpisode`：它记录追加式 `Transition` ledger，把画面证据保存为本机文件，由独立 `OutcomeVerifier` 判断后置条件，再生成 `RewardSignal`，并在证据门槛满足时把合格轨迹蒸馏成版本化 `PolicyMemory`。这条链路只做轨迹蒸馏，不训练或微调模型权重。
-
-调用界面保持为一句话：`start` / `shutdown` 管生命周期，`list_profiles`、`learn`、`list_jobs`、`inspect`、`stop` 管有界学习工作；调用方不直接编排截图、验证、奖励、蒸馏或 PolicyMemory 晋升。对应的本机 HTTP routes 是：
-
-- `GET /api/v1/learning/profiles`；
-- `POST /api/v1/learning/jobs`；
-- `GET /api/v1/learning/jobs`；
-- `GET /api/v1/learning/jobs/{job_id}`；
-- `POST /api/v1/learning/jobs/{job_id}/stop`。
-
-首个 `stzb-tutorial-v1` Profile 只允许固定、已授权、已登录环境中的教程推进和只读菜单导航；它禁止登录/账号、验证码、实名、支付/充值、领取/招募/强化、聊天/联盟、出征、真人交互和公开竞争等目标。这个名称是一个窄 Profile，不代表 AI-GAME 已适配、已认证或“已经会玩率土之滨”。
-
-学习元数据使用独立的 `runtime/console/learning.db`，证据位于 `runtime/sessions/game-learning/`。ADB 接受动作不等于 Outcome 已确认。首版不持久化候选：只有 Episode 被证据确认成功且含至少一个正奖励物理 Transition 时，确定性轨迹蒸馏才会在同一事务中插入并自动晋升不可变 PolicyMemory 新版本；否则保持 `unchanged` / `not_learned`。`candidate`、`rejected`、`distilling`、`validating` 只为未来显式候选流程保留，未来候选也不得因创建或重启而自动激活。停止或重启不会重放物理动作，不确定的停止必须保留为 `stopped_uncertain`，不得自动补发。
-
-完整设计与 HTTP 语义见 [`docs/game-learning.md`](docs/game-learning.md) 和 [`contracts/game-learning-v1.md`](contracts/game-learning-v1.md)。
-
-## 启动控制台
-
-最简单的方式是双击根目录下的 `启动控制台.cmd`。控制台准备好后会自动打开：
-
-```text
-http://127.0.0.1:4310
-```
-
-第一次使用，或者依赖尚未安装时，在 PowerShell 中运行：
+PowerShell：
 
 ```powershell
-cd F:\AI-GAME
 .\scripts\console.ps1 setup
+.\scripts\console.ps1 build
 .\scripts\console.ps1 start
+.\scripts\console.ps1 status
+.\scripts\console.ps1 stop
 ```
 
-常用命令：
+默认开发地址是 `http://127.0.0.1:4310`。这是开发者诊断地址，不是最终用户应配置、理解或手工开关的产品前置条件。
+
+运行测试：
 
 ```powershell
-.\scripts\console.ps1 status    # 查看控制台是否已启动
-.\scripts\console.ps1 stop      # 停止控制台，不影响其他程序
-.\scripts\console.ps1 test      # 运行后端、前端测试并重新打包
+.\scripts\console.ps1 test -NoBrowser
 ```
 
-也可以双击 `停止控制台.cmd` 安全停止。对于由 launcher 启动的实例，停止脚本会用每次启动随机生成的本机 token 请求 Uvicorn 优雅退出，并等待运行时收口；只有优雅退出超时或旧版 state 不支持该协议时，才会在核对进程身份后使用强制回退。它不会在端口被其他程序占用时误杀其他程序。
-
-本地直聊和设备执行需要 GUI-Owl 服务。查看或启动它：
-
-```powershell
-cd F:\AI-GAME
-.\scripts\model-runtime.ps1 status
-.\scripts\model-runtime.ps1 start
-```
-
-控制台本身不会擅自启动或停止模型服务；两者有独立的生命周期。
-
-本地 GUI-Owl 的机器配置位于 `config\model-runtime.env`；首次配置时复制
-`config\model-runtime.env.example`，再按本机 WSL 路径和显存条件调整。真实
-`model-runtime.env` 不应进入版本控制。其 `GUI_MODEL_API_KEY` 仅是回环 GUI-Owl
-服务使用的本地 bearer token，也会被控制台读取为本地模型 key；不要在该文件中
-写入任何云端凭据。云端 API key 仍只应通过下文的进程环境变量或控制台 DPAPI
-设置保存。
-
-## 配置 Android ADB 执行器
-
-执行 Adapter 使用已配置的 ADB executable 组装运行时；默认 serial 是可选兼容 fallback，不是组装 MobileTask 的前提。只读发现执行 `adb devices -l`，会把就绪 Android 目标标记为 `emulator`、`usb` 或 `wireless`，并报告 `screen_capture`、`touch_input`、`ascii_text_input` 等能力。MobileTask 显式选择某个就绪 Android Target 时，会在同一 ADB executable 上为该 Target 动态绑定 serial；默认 serial 只在没有显式选择 Target 时使用。当前 TaskSession 绑定后不会因发现结果变化静默切换设备；恢复会用持久化 `target_id` 重新解析并打开新的 Session。
-
-AI-GAME 不会替用户启动模拟器、打开 USB 调试、批准设备授权或建立无线配对。真实手机/平板必须先由用户在操作系统和 ADB 中完成授权并出现在 `adb devices -l`；“已发现/transport ready”也不等于任务或应用结果已经通过验证。
-
-### 可选的 MuMu 配置助手
-
-MuMu 的 ADB 端口可能随本机实例变化。仅当 MuMu VM 0 已由你自己启动后，运行：
-
-```powershell
-.\scripts\sync-mumu-executor.ps1
-```
-
-该脚本只读取 `mumu-cli info --vmindex 0`，拒绝未启动实例和非回环地址；随后使用 MuMu 自带的 `adb.exe` 连接并验证 `device`，再原子更新非秘密配置 `config\executor-runtime.env`（当前 `enabled=1`）。它绝不会自动启动、创建、控制或删除 MuMu 实例。
-
-控制台启动时会安全地读取这个配置的三项白名单环境变量：
-`AI_GAME_GUI_EXECUTOR_ENABLED`、`AI_GAME_ADB_PATH`、`AI_GAME_ADB_SERIAL`；已在启动命令中显式设置的同名环境变量优先。可重复检查：
-
-```powershell
-.\scripts\test-executor-runtime-config.ps1          # 静态配置与优先级检查，不接触 MuMu
-.\scripts\test-executor-runtime-config.ps1 -Live    # 再执行一次只读发现和 ADB 连通性验证
-```
-
-“执行器配置已验证”仅表示当前动态 ADB 目标可连接，不是“任务已执行”或“任务已完成”。每次原子动作前执行器都会重新核对设备状态；端口变化后不会静默改投另一个设备，需要重新运行同步脚本并重新发现目标。
-
-## 兼容 Chat 的云端对话模型
-
-云端模式使用独立的 OpenAI-compatible 配置，不读取其他项目或应用的密钥。
-
-1. 打开控制台左侧“设置”，在“云端模型配置”中填写服务地址、模型名称和独立 API key；
-2. 点击“保存配置”。保存后立即用于之后新建的 Turn，无需停止或重启控制台；已经运行的 Turn（包括执行中追加的消息）继续使用它开始时捕获的模型连接；
-3. 如需验证兼容性，点击“测试连接”。这是一次真实的模型请求，可能产生服务方计费。
-
-API key 由后端使用 Windows DPAPI 按当前 Windows 用户保护后保存；页面和设置接口只显示“是否已有密钥”，不会回显密钥。端点、模型、受保护的密钥数据与配置修订保存在本机控制台数据库中，不写入消息、事件或日志。DPAPI 保护意味着保存的密钥跟随当前 Windows 用户边界；无法解密时控制台会要求重新保存，不会退回明文存储。
-
-`config\cloud-runtime.env` 和进程环境变量只用于没有控制台保存记录时的首次启动引导或自动化部署。环境文件只能放非秘密的端点和模型：
-
-   ```text
-   CLOUD_CHAT_ENDPOINT=https://你的服务地址/v1
-   CLOUD_CHAT_MODEL=你的模型名
-   ```
-
-如需使用启动引导密钥，只在启动控制台的同一个 PowerShell 进程中设置占位值，绝不要把密钥写进 `cloud-runtime.env`：
-
-   ```powershell
-   $env:AI_GAME_CLOUD_CHAT_API_KEY = '你的独立 API key'
-   .\scripts\console.ps1 start
-   ```
-
-一旦通过控制台保存或清除配置，本机保存的配置修订在后续启动时优先于启动引导；保存、测试和清除都会热更新运行状态，不需要重启。正在处理的请求不会被追溯改写，后续请求使用最新已保存配置。云端模式会发送本会话的文字内容；原始设备截图不会发送给云端，只会发给 `127.0.0.1` 上的本地 GUI-Owl 服务。未完成配置时，控制台仍可使用本地直聊，并会明确把云端模式显示为未配置。
-
-## 目录规范
+## 目录
 
 ```text
-F:\AI-GAME
-├─ apps\console\
-│  ├─ backend\                 Windows 本机控制面 API 与 SQLite 持久化
-│  └─ frontend\                中文浏览器控制台
-├─ config\                     非敏感配置示例与运行配置
-├─ contracts\                  控制面接口和数据边界
-├─ docs\                       架构、运行目录与操作说明
-├─ scripts\                    控制台和模型服务的生命周期脚本
-├─ services\gui-model\         预留的本地 GUI 模型服务集成
-├─ workflows\                  后续按应用/模拟器拆分的工作流
-└─ runtime\                    自动生成的数据，全部忽略版本控制
-   ├─ console\                 本机 SQLite 状态
-   │  ├─ console.db            控制面、对话与云端配置
-   │  ├─ learning.db           独立的游戏学习 ledger 与 PolicyMemory 元数据
-   │  ├─ mobile-tasks.db       MobileTask 状态、意图、验证与 SkillMemory
-   │  ├─ application-runtime.db 通用 ApplicationInstance 周期、意图和 Outcome
-   │  ├─ soul-scheduler-lifecycle.db Soul matcher 持久目标与单调控制代次
-   │  ├─ soul-reply-learning.db Soul 草稿 lineage 与延迟互动结果
-   │  └─ soul-integration.db   旧 SoulIntegration 兼容数据，不是当前写路径
-   ├─ envs\console\            控制台独立 Python 环境
-   ├─ logs\                    控制台与服务日志
-   ├─ run\                     PID 等实时状态
-   ├─ models\                  后续下载的模型快照
-   ├─ sessions\                每次运行的轨迹与证据
-   │  ├─ game-learning\        LearningEpisode 的本机证据与派生物
-   │  └─ mobile-tasks\evidence\ MobileTask 的本机 PNG/尺寸证据
-   └─ screenshots\             按保留策略保存的截图
+apps/console/backend/     本地 API、V2 Task、调度、模拟器与持久化
+apps/console/frontend/    开发者诊断控制台
+config/                   非秘密配置示例
+docs/product/             当前愿景、代码地图和执行契约
+scripts/                  开发启动、模型与构建工具
+runtime/                  本机数据库、日志、证据和进程状态（不入 Git）
 ```
 
-控制台生产模式由后端在同一个本机地址提供前端页面，不需要同时维护两个端口。数据库、环境、日志和打包产物都与源代码分开保存。
-
-## Legacy MobileTask 兼容执行边界
-
-迁移期“一句话开始”的 MobileTask 执行链为：
-
-```text
-owner goal / 追加指令 + 自动或显式作用域中的上一版 SkillMemory
-→ 本地 GUI-Owl Planner 生成版本化 TaskPlan / Subgoal
-→ 获取新鲜 BEFORE 画面
-→ 同一个本地 GUI-Owl Executor 提出一个结构化动作
-→ 先持久化 ActionAttempt 与物理意图
-→ 最后一次 stop / input_revision fence
-→ Android ADB Adapter 最多下发一个原子动作
-→ 接收物理动作后等待 1 秒 settle（显式 wait 使用请求的 0–10 秒）
-→ 获取新鲜 AFTER 画面
-→ BEFORE 摘要角色只读一张 BEFORE 图并产出可见事实
-→ AFTER 摘要角色只读一张 AFTER 图并产出可见事实与遮挡信号
-→ Verifier 不读取图片，只比较两份文字摘要 + 本机同帧判定
-→ 推进 Subgoal，或在连续 3 次无进展后由 Reflection 改变策略
-```
-
-MobileTask 不调用云端聊天模型：Planner、Executor、BEFORE/AFTER 摘要、Verifier 和 Reflection 共用同一个本地 GUI-Owl endpoint，并按角色顺序调用，不是多个并行进程。最终 Verifier 只收到两份有界可见事实、AFTER 遮挡信号和本机同帧判定；任何单次模型请求都不会同时收到 BEFORE 与 AFTER。固定动作解析器只接受受支持的 `mobile_use` 动作和归一化坐标，ADB 始终使用参数数组并关闭 shell。1 秒 settle 只给界面留出刷新时间，不代表应用已经稳定或目标成功。`accepted` transport 也只说明设备通道接受了输入；只有 Verifier 基于新鲜画面把当前 Subgoal 判定为 `satisfied` 才能推进，全部 Subgoal 都满足后任务才会 `completed`。生产配置把 2,048 次 ActionAttempt 和 64 次 Reflection 作为长任务的 runaway guard；每逢连续 3 次无进展仍先 Reflection，而不是盲目重复。
-
-追加指令、停止和运行时关闭都与物理下发 seam 共享最后的串行 fence。它们先到达时，旧意图会以 `not_sent` 收口；动作已经进入下发 seam 后无法撤回。运行时会先保存真实 transport、AFTER 与 Verification 结算事实：新 revision 或停止会阻止旧结果推进，shutdown 则允许已经下发的这一个动作正常结算，随后不再开始新动作。正常 shutdown 把下一安全检查点重新置为 `queued`，并由下一进程恢复；异常重启发现未收口物理 `act` 意图时，任务进入 `uncertain` 并且不重放。
-
-“云端对话 + 本地执行”是独立的 Chat Module：云端模型只能生成文字回复和高层目标，不能生成或发送 ADB 命令，也看不到原始截图。本地 GUI 模型一次只提出一个动作；生产 Chat 循环没有固定步骤上限，也不运行页面敏感类别分类器。它会持续到用户停止、设备/模型异常或本地模型返回 `terminate`。Provider 回复、GUI 动作提案和 `terminate` 都绑定到产生它们的 `input_revision`；若期间收到更新，旧输出会被丢弃，同一个 worker 根据最新消息重新规划。更新若在最后一次动作发送前检查之后才到达，只能影响下一次决策，不能撤回已经交给 ADB 的原子输入。Chat 的模型结束信号不是应用内部业务状态证明。
-
-相关目录规则见 [`docs/runtime-layout.md`](docs/runtime-layout.md)，MobileTask 设计与精确契约见 [`docs/mobile-task-runtime.md`](docs/mobile-task-runtime.md) 和 [`contracts/mobile-task-v1.md`](contracts/mobile-task-v1.md)，其余控制面 HTTP 与状态契约见 [`contracts/control-plane-v1.md`](contracts/control-plane-v1.md)，有界学习契约见 [`contracts/game-learning-v1.md`](contracts/game-learning-v1.md)。
-实时游戏控制尚未实现；训练/自定义/沙盒限定的历史候选架构与遥测说明见 `docs/gameplay-readiness.md`，但其中的候选 gate 不自动成为 U0-U9 前置条件。
-
-## Historical Soul specialized-owner compatibility
-
-旧 `soul-reply-v1` / `F:\dating-copilot` owner 流程只保留为历史契约、ledger、at-most-once 和 no-replay 证据。D20 已把该项目从当前执行中排除：不得启动它、探测 `127.0.0.1:5000`、设置隐式 `AI_GAME_SOUL_CONSOLE_URL`，也不得把这个兼容章节当成普通 Soul 或长期移动目标的路由说明。
-
-旧 reserve/dispatch/inspect 和 scheduler wire shape 仍可在 [`contracts/control-plane-v1.md`](contracts/control-plane-v1.md) 中查阅；它不指定当前 owner，也不阻止对已授权、已登录 Android 应用的通用操作。当前产品路线和 U8 验收只以 [`docs/product/00_INDEX.md`](docs/product/00_INDEX.md) 为准。
+通道接受、模型输出、ADB 命令成功和 UI 可见都不是完成证明。涉及真实动作时，必须由当前设备的新鲜观察、动作回执和后置验证共同支持结果。

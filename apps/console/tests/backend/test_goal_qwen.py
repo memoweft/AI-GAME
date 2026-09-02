@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from ai_game_console.execution import AndroidScreenshot
 from ai_game_console.goal_runtime import StructuredGoalModel
 from ai_game_console.mobile_task_adapter import (
@@ -215,6 +217,7 @@ def test_mobile_application_readiness_requires_goal_match_and_login_frame(
                                     "arguments": json.dumps(
                                         {
                                             "ready": True,
+                                            "authentication_required": True,
                                             "authenticated": True,
                                             "application_matches_goal": True,
                                             "blocking_state": "none",
@@ -246,6 +249,7 @@ def test_mobile_application_readiness_requires_goal_match_and_login_frame(
 
     assert verdict == {
         "ready": True,
+        "authentication_required": True,
         "authenticated": True,
         "application_matches_goal": True,
         "blocking_state": "none",
@@ -253,9 +257,128 @@ def test_mobile_application_readiness_requires_goal_match_and_login_frame(
     }
     tool = observed["tools"][0]["function"]
     assert tool["name"] == "record_application_readiness"
+    assert "authentication_required" in tool["parameters"]["required"]
     assert "application_matches_goal" in tool["parameters"]["required"]
     assert observed["tool_choice"] == "required"
     assert any(
         item["type"] == "image_url"
         for item in observed["messages"][1]["content"]
     )
+
+
+def test_mobile_application_readiness_accepts_system_surface_without_login(
+    tmp_path: Path,
+) -> None:
+    evidence = LocalMobileEvidenceStore(tmp_path / "evidence")
+    frame = evidence.record(
+        "application-cycle-settings",
+        AndroidScreenshot(PNG, width=100, height=200),
+    )
+
+    def transport(endpoint, payload, headers, timeout):
+        del endpoint, payload, headers, timeout
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "record_application_readiness",
+                                    "arguments": json.dumps(
+                                        {
+                                            "ready": True,
+                                            "authentication_required": False,
+                                            "authenticated": False,
+                                            "application_matches_goal": True,
+                                            "blocking_state": "none",
+                                            "evidence": "Android 系统设置可交互且没有账号会话概念",
+                                        },
+                                        ensure_ascii=False,
+                                    ),
+                                }
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+
+    model = StructuredGoalModel(
+        OpenAICompatibleToolRoleModel(
+            endpoint="http://127.0.0.1:8080/v1/chat/completions",
+            model="qwen3.8-27b",
+            evidence=evidence,
+            transport=transport,
+        )
+    )
+
+    assert model.assess_mobile_application_readiness(
+        "持续浏览 OnePlus 系统设置",
+        frame,
+        "com.android.settings",
+    ) == {
+        "ready": True,
+        "authentication_required": False,
+        "authenticated": False,
+        "application_matches_goal": True,
+        "blocking_state": "none",
+        "evidence": "Android 系统设置可交互且没有账号会话概念",
+    }
+
+
+def test_mobile_application_readiness_rejects_account_app_without_login(
+    tmp_path: Path,
+) -> None:
+    evidence = LocalMobileEvidenceStore(tmp_path / "evidence")
+    frame = evidence.record(
+        "application-cycle-social-login",
+        AndroidScreenshot(PNG, width=100, height=200),
+    )
+
+    def transport(endpoint, payload, headers, timeout):
+        del endpoint, payload, headers, timeout
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "record_application_readiness",
+                                    "arguments": json.dumps(
+                                        {
+                                            "ready": True,
+                                            "authentication_required": True,
+                                            "authenticated": False,
+                                            "application_matches_goal": True,
+                                            "blocking_state": "none",
+                                            "evidence": "微信登录页可见",
+                                        },
+                                        ensure_ascii=False,
+                                    ),
+                                }
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+
+    model = StructuredGoalModel(
+        OpenAICompatibleToolRoleModel(
+            endpoint="http://127.0.0.1:8080/v1/chat/completions",
+            model="qwen3.8-27b",
+            evidence=evidence,
+            transport=transport,
+        )
+    )
+
+    with pytest.raises(
+        ValueError, match="application readiness response is contradictory"
+    ):
+        model.assess_mobile_application_readiness(
+            "有微信新消息时查看微信但不发送",
+            frame,
+            "com.tencent.mm",
+        )

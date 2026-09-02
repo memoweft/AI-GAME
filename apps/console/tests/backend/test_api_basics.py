@@ -21,7 +21,7 @@ def test_startup_migrates_and_seeds_idempotently(settings: Settings) -> None:
     second = SQLiteRepository(settings.database_path)
     second.initialize()
 
-    assert len(second.list_workflows()) == 3
+    assert len(second.list_workflows()) == 2
     assert [target.id for target in second.list_targets()] == ["windows-local"]
 
 
@@ -42,15 +42,12 @@ def test_health_seed_contract_and_local_host_guard(client: TestClient) -> None:
     )["status"] == "not_configured"
 
     workflows = client.get("/api/v1/workflows").json()
-    assert workflows["count"] == 3
+    assert workflows["count"] == 2
     by_id = {item["id"]: item for item in workflows["items"]}
     assert by_id["windows-general"]["name"] == "通用 Windows 软件"
     assert by_id["windows-general"]["status"] == "available"
     assert by_id["windows-general"]["target_kinds"] == ["windows"]
-    assert by_id["soul"]["name"] == "Soul 本地应用"
-    assert by_id["soul"]["enabled"] is False
-    assert by_id["soul"]["status"] == "external"
-    assert "Soul 工作台" in by_id["soul"]["description"]
+    assert set(by_id) == {"windows-general", "android-emulator"}
 
     targets = client.get("/api/v1/targets").json()
     assert targets["count"] == 1
@@ -113,12 +110,8 @@ def test_target_discovery_persists_ready_and_non_ready_states(
         assert result.status_code == 200
         payload = result.json()
         assert payload["discovery"]["adb_status"] == "ready"
-        assert payload["discovery"]["device_count"] == 3
-        assert {item["status"] for item in payload["items"]} == {
-            "ready",
-            "offline",
-            "unauthorized",
-        }
+        assert payload["discovery"]["device_count"] == 1
+        assert {item["status"] for item in payload["items"]} == {"ready"}
         assert any(item["id"] == "windows-local" for item in payload["items"])
 
         events = client.get("/api/v1/events").json()["items"]
@@ -145,20 +138,6 @@ def test_settings_honor_project_and_data_overrides(tmp_path: Path) -> None:
     )
 
 
-def test_settings_require_an_explicit_soul_owner_endpoint(tmp_path: Path) -> None:
-    project_root = tmp_path / "project"
-    unconfigured = Settings.from_env({"AI_GAME_PROJECT_ROOT": str(project_root)})
-    configured = Settings.from_env(
-        {
-            "AI_GAME_PROJECT_ROOT": str(project_root),
-            "AI_GAME_SOUL_CONSOLE_URL": "http://127.0.0.1:5000/",
-        }
-    )
-
-    assert unconfigured.soul_console_url is None
-    assert configured.soul_console_url == "http://127.0.0.1:5000"
-
-
 def test_settings_load_explicit_loopback_mobile_role_binding_without_echoing_key(
     tmp_path: Path,
 ) -> None:
@@ -183,31 +162,3 @@ def test_settings_load_explicit_loopback_mobile_role_binding_without_echoing_key
     assert settings.mobile_role_api_key == "SENTINEL_LOCAL_KEY"
     assert settings.mobile_role_control_script == str(tmp_path / "control.ps1")
     assert "SENTINEL" not in repr(settings)
-
-
-@pytest.mark.parametrize(
-    ("raw_value", "expected"),
-    [
-        (None, 90.0),
-        ("42.7", 42.7),
-        ("0.5", 90.0),
-        ("121", 90.0),
-        ("not-a-number", 90.0),
-    ],
-)
-def test_settings_bound_soul_observation_timeout_separately(
-    tmp_path: Path,
-    raw_value: str | None,
-    expected: float,
-) -> None:
-    env = {
-        "AI_GAME_PROJECT_ROOT": str(tmp_path / "project"),
-        "AI_GAME_SOUL_TIMEOUT_SECONDS": "3",
-    }
-    if raw_value is not None:
-        env["AI_GAME_SOUL_OBSERVATION_TIMEOUT_SECONDS"] = raw_value
-
-    settings = Settings.from_env(env)
-
-    assert settings.soul_request_timeout_seconds == 3.0
-    assert settings.soul_observation_timeout_seconds == expected

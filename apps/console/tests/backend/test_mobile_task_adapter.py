@@ -72,6 +72,24 @@ def _valid_png(width: int, height: int, *, invert: bool = False, pulse: int = 0)
     )
 
 
+def _solid_png(width: int, height: int, value: int) -> bytes:
+    def chunk(name: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + name + data + struct.pack(
+            ">I", binascii.crc32(name + data) & 0xFFFFFFFF
+        )
+
+    rows = bytearray()
+    for _ in range(height):
+        rows.append(0)
+        rows.extend((value, value, value) * width)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(bytes(rows)))
+        + chunk(b"IEND", b"")
+    )
+
+
 class FakeRepository:
     def __init__(self, target: Target | None) -> None:
         self.target = target
@@ -1133,6 +1151,43 @@ def test_tool_role_verifier_rejects_animation_only_progress_but_keeps_scene_chan
     assert scene_change.evidence == "model claimed progress"
     assert unsupported_finish.progress is False
     assert unsupported_finish.satisfied is False
+
+
+def test_tool_role_verifier_keeps_progress_for_material_dhash_collision(
+    tmp_path: Path,
+) -> None:
+    evidence = LocalMobileEvidenceStore(tmp_path / "evidence")
+    before = evidence.record(
+        "task-1", AndroidScreenshot(_solid_png(64, 64, 16), width=64, height=64)
+    )
+    changed = evidence.record(
+        "task-1", AndroidScreenshot(_solid_png(64, 64, 96), width=64, height=64)
+    )
+
+    def transport(endpoint, payload, headers, timeout):
+        del endpoint, headers, timeout
+        tool = payload["tools"][0]["function"]["name"]
+        return {"choices": [{"message": {"tool_calls": [{"function": {
+            "name": tool,
+            "arguments": json.dumps({
+                "verdict": "progress", "evidence": "visible page changed",
+            }),
+        }}]}}]}
+
+    model = OpenAICompatibleToolRoleModel(
+        endpoint="http://127.0.0.1:8080/v1/chat/completions",
+        model="qwen-role", evidence=evidence, transport=transport,
+    )
+    result = model.verify(VerificationContext(
+        "task-1", "浏览系统设置", Subgoal(0, "打开应用详情", "active"),
+        ActionDecision("act", PhysicalIntent("tap", {
+            "x": 10, "y": 10, "target_description": "应用条目",
+        })),
+        before, TransportReceipt("accepted"), changed,
+    ))
+
+    assert result.progress is True
+    assert result.evidence == "visible page changed"
 
 
 def test_tool_role_verifier_rejects_unchanged_stzb_activity_middle_success(

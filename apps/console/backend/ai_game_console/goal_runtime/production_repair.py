@@ -54,8 +54,8 @@ class ProductionGoalRepairs:
         if shell is None or script is None or not script.is_file():
             return False
         status = self._model_status(shell, script)
-        # Missing configuration/install is governed by the D12 plan approval,
-        # not by this reversible-start work order.
+        # Missing configuration or installation is not repaired by this
+        # reversible startup path.
         if status.get("status") not in {"stopped", "stale_pid", "pid_mismatch", "running"}:
             return False
         repair_key = self._retryable_key(goal_id, "model-start:" + _fingerprint({

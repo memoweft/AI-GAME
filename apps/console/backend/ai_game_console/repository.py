@@ -67,18 +67,6 @@ WORKFLOW_SEEDS: tuple[dict[str, Any], ...] = (
         "integration_status": "ready",
         "requires_approval": False,
     },
-    {
-        "id": "soul",
-        "name": "Soul 本地应用",
-        "description": (
-            "已通过独立 Soul 工作台接入；传统任务队列不执行该应用，"
-            "请从 Soul 工作台查看和控制。"
-        ),
-        "target_kind": "android",
-        "enabled": False,
-        "integration_status": "external",
-        "requires_approval": True,
-    },
 )
 
 

@@ -1,4 +1,0 @@
-interface:
-  display_name: "Evidence-Based Defenses"
-  short_description: "Reject speculative guards and fallbacks"
-  default_prompt: "Use $avoid-overdefensive-programming to make this AI-GAME change without speculative guards or fallbacks."

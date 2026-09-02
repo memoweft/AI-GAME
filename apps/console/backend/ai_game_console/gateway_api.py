@@ -1,14 +1,13 @@
-"""HTTP surface for the frozen Gateway contract (Phase 6, Weeks 3-4).
+"""HTTP surface retained for Gateway compatibility.
 
 Implements the §2 canonical paths on a standalone ``APIRouter``. The app
-factory mounts it for the normal U7 Kernel-active composition and also accepts
+factory mounts it for the normal Kernel-active composition and also accepts
 an explicitly injected composition for tests/integration. The router is
 registered *before*
 the legacy router, so the conflicting canonical paths (``POST /tasks``,
 ``GET /tasks``, ``GET /tasks/{task_id}``) resolve to the new contract —
-registration-order precedence previews the cutover end state; the legacy
-duplicates are removed by the separate cutover work order (§2: no payload
-sniffing, no hybrid mounting).
+registration-order precedence keeps the canonical paths stable without
+payload sniffing or hybrid mounting.
 
 Contract rules enforced at this layer:
 
@@ -18,8 +17,7 @@ Contract rules enforced at this layer:
 * ``Idempotency-Key`` is required for create / message / control (§3);
   ``X-Client-Id`` is required for create and the conversation entry.
 * ``GET /devices`` returns the Week-3 port-only shape
-  ``{"items": [{"id", "availability"}]}``; the richer §4 fields are
-  deferred to the lease-layer work order.
+  ``{"items": [{"id", "availability"}]}``.
 * Event pagination (§10) is a task-scoped, strictly ascending sequence
   cursor with ``next_after_sequence`` = last item (or the cursor on an
   empty page).
@@ -79,9 +77,7 @@ __all__ = [
     "gateway_error_handler",
 ]
 
-# §14 code -> HTTP status. The contract freezes the error *shape* and the
-# ten codes; the status mapping is the Week-3 design decision documented
-# in PHASE_6_GATEWAY_CONTRACT_PLAN.md.
+# Compatibility error code to HTTP status mapping.
 GATEWAY_ERROR_STATUS: dict[str, int] = {
     "VALIDATION_ERROR": 400,
     "EVENT_CURSOR_INVALID": 400,

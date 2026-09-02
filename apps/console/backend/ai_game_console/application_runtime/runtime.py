@@ -315,6 +315,14 @@ class ApplicationRuntime:
                 self._queue.put_nowait(instance_id)
             else:
                 self._release_slot(instance_id)
+        elif continue_reconciliation and tag in {"Pause", "Stop"}:
+            # The durable wait row becomes visible just before the coordinator
+            # registers its Timer.  A command can land in that narrow window,
+            # so ``_pop_timer`` legitimately returns None even though an
+            # in-flight owner action must be reconciled immediately.  Queue
+            # the reconciliation explicitly; the same owner action is only
+            # inspected and is never replayed.
+            self._queue.put_nowait(instance_id)
         elif resume_slot:
             self._queue.put_nowait(instance_id)
         return self._store.inspect(instance_id)

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -36,9 +36,11 @@ class AdbActionExecutor:
         self,
         adb_path: str | Path,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+        runner: Callable[[Sequence[str], float], subprocess.CompletedProcess[bytes]] | None = None,
     ) -> None:
         self.adb_path = Path(adb_path)
         self.timeout_seconds = timeout_seconds
+        self._runner = runner
     
     def execute_tap(
         self,
@@ -150,10 +152,14 @@ class AdbActionExecutor:
         if not text or len(text) > 1000:
             raise ValueError(f"invalid text length: {len(text)}")
         
-        # 简化：只支持基本 ASCII，空格替换为 %s
+        # Plain ADB input is not a Unicode transport.  Do not quietly coerce
+        # Chinese or other non-ASCII text into a command that may corrupt it.
         sanitized = text.replace(" ", "%s")
         if not all(32 <= ord(c) <= 126 or c == '%' for c in sanitized):
-            raise ValueError("text contains non-ASCII characters")
+            started_at = datetime.now(timezone.utc).isoformat()
+            return self._rejected_result(
+                "adb_unicode_transport_unsupported", started_at, started_at
+            )
         
         started_at = datetime.now(timezone.utc).isoformat()
         
@@ -169,6 +175,46 @@ class AdbActionExecutor:
         
         result = self._run_command(command, timeout_ms / 1000.0, started_at)
         return result
+
+    def execute_open_app(
+        self,
+        device_id: str,
+        package: str,
+        component: str | None = None,
+        timeout_ms: int = 5000,
+    ) -> ActionExecutionResult:
+        """Launch exactly one requested package with optional component.
+
+        The request is always an argument array.  Package-only launch uses
+        Android's launcher-compatible monkey form; component launch uses
+        ``am start -n`` and never substitutes another package.
+        """
+
+        package = _validated_package(package)
+        component = _validated_component(package, component)
+        started_at = datetime.now(timezone.utc).isoformat()
+        prefix = (str(self.adb_path.resolve()), "-s", _serial_from_device_id(device_id), "shell")
+        command = (
+            (*prefix, "am", "start", "-n", component)
+            if component is not None
+            else (*prefix, "monkey", "-p", package, "-c", "android.intent.category.LAUNCHER", "1")
+        )
+        return self._run_command(command, timeout_ms / 1000.0, started_at)
+
+    def execute_recents(
+        self, device_id: str, timeout_ms: int = 5000
+    ) -> ActionExecutionResult:
+        started_at = datetime.now(timezone.utc).isoformat()
+        command = (
+            str(self.adb_path.resolve()),
+            "-s",
+            _serial_from_device_id(device_id),
+            "shell",
+            "input",
+            "keyevent",
+            "KEYCODE_APP_SWITCH",
+        )
+        return self._run_command(command, timeout_ms / 1000.0, started_at)
     
     def execute_back(
         self,
@@ -226,11 +272,15 @@ class AdbActionExecutor:
         from datetime import datetime, timezone
         
         try:
-            completed = subprocess.run(
-                command,
-                timeout=timeout_seconds,
-                capture_output=True,
-                check=False,
+            completed = (
+                self._runner(command, timeout_seconds)
+                if self._runner is not None
+                else subprocess.run(
+                    command,
+                    timeout=timeout_seconds,
+                    capture_output=True,
+                    check=False,
+                )
             )
             finished_at = datetime.now(timezone.utc).isoformat()
             
@@ -284,6 +334,22 @@ class AdbActionExecutor:
                 finished_at=finished_at,
             )
 
+    @staticmethod
+    def _rejected_result(
+        code: str, started_at: str, finished_at: str
+    ) -> ActionExecutionResult:
+        return ActionExecutionResult(
+            accepted=False,
+            adapter_code=-1,
+            error=ExecutionError(
+                code=code,
+                message="ADB adapter does not support this transport",
+                retryable=False,
+            ),
+            started_at=started_at,
+            finished_at=finished_at,
+        )
+
 
 class GuiExecutorActionAdapter:
     """Expose the validated GUI executor through RuntimeKernel's action port.
@@ -295,8 +361,14 @@ class GuiExecutorActionAdapter:
     replaying them.
     """
 
-    def __init__(self, executor_for_serial: Callable[[str], GuiExecutor]) -> None:
+    def __init__(
+        self,
+        executor_for_serial: Callable[[str], GuiExecutor],
+        *,
+        transport_device_id_resolver: Callable[[str], str] | None = None,
+    ) -> None:
         self._executor_for_serial = executor_for_serial
+        self._transport_device_id_resolver = transport_device_id_resolver
 
     def execute_tap(
         self, device_id: str, x: int, y: int, timeout_ms: int = 5000
@@ -384,10 +456,41 @@ class GuiExecutorActionAdapter:
             ),
         )
 
+    def execute_open_app(
+        self,
+        device_id: str,
+        package: str,
+        component: str | None = None,
+        timeout_ms: int = 5000,
+    ) -> ActionExecutionResult:
+        del timeout_ms
+        return self._execute(
+            device_id,
+            GuiAction(
+                target_id=device_id,
+                action="open_app",
+                package=package,
+                component=component,
+            ),
+        )
+
+    def execute_recents(
+        self, device_id: str, timeout_ms: int = 5000
+    ) -> ActionExecutionResult:
+        del timeout_ms
+        return self._execute(device_id, GuiAction(target_id=device_id, action="recents"))
+
     def _execute(self, device_id: str, action: GuiAction) -> ActionExecutionResult:
         started_at = datetime.now(timezone.utc).isoformat()
         try:
-            executor = self._executor_for_serial(_serial_from_device_id(device_id))
+            transport_device_id = (
+                self._transport_device_id_resolver(device_id)
+                if self._transport_device_id_resolver is not None
+                else device_id
+            )
+            executor = self._executor_for_serial(
+                _serial_from_device_id(transport_device_id)
+            )
             transport = executor.execute(action)
             finished_at = datetime.now(timezone.utc).isoformat()
             if transport.accepted:
@@ -424,3 +527,35 @@ class GuiExecutorActionAdapter:
             started_at=started_at,
             finished_at=finished_at,
         )
+
+
+def _validated_package(value: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 255
+        or value.startswith("-")
+        or any(character.isspace() or ord(character) < 33 for character in value)
+        or any(character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_." for character in value)
+    ):
+        raise ValueError("invalid Android package")
+    return value
+
+
+def _validated_component(package: str, value: str | None) -> str | None:
+    if value is None:
+        return None
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 512
+        or value.startswith("-")
+        or any(character.isspace() or ord(character) < 33 for character in value)
+        or any(character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.$/" for character in value)
+    ):
+        raise ValueError("invalid Android component")
+    component = value if "/" in value else f"{package}/{value}"
+    component_package, _, component_class = component.partition("/")
+    if component_package != package or not component_class:
+        raise ValueError("component must belong to requested Android package")
+    return component

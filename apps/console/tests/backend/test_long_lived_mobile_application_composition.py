@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,7 +21,11 @@ from ai_game_console.goal_runtime.preflight import PreflightResult
 from ai_game_console.goal_runtime.store import SQLiteGoalStore
 from ai_game_console.kernel_canary import KernelApplicationCycleResult
 from ai_game_console.long_lived_mobile_application_composition import (
+    ActivitySliceDispatchRequest,
+    ActivitySliceDispatchResult,
+    ActivitySliceStepDispatch,
     LongLivedMobileApplicationRuntimeGateway,
+    _ExecutionOwner,
 )
 
 
@@ -48,6 +53,16 @@ class _ObservationProvider:
             screen_size=(1280, 720),
             captured_at=f"2026-08-23T00:00:{self.calls:02d}+00:00",
         )
+
+
+class _ChangingForegroundObservationProvider(_ObservationProvider):
+    """A legacy binding can survive a normal foreground transition in R4."""
+
+    def read_device_state(self, target_id: str):
+        state = super().read_device_state(target_id)
+        if self.calls >= 1:
+            state.foreground_app = "com.android.settings"
+        return state
 
 
 class _Kernel:
@@ -89,6 +104,142 @@ class _Kernel:
         return self.by_cycle.get(cycle_key)
 
 
+class _BlockingKernel(_Kernel):
+    """Hold owner dispatch open to inspect its durable authorization window."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def execute_application_cycle(self, **arguments):
+        self.entered.set()
+        assert self.release.wait(timeout=5.0)
+        return super().execute_application_cycle(**arguments)
+
+
+class _PreActionFailureKernel(_Kernel):
+    """Persist a failed no-action cycle, then simulate the synchronous error."""
+
+    def execute_application_cycle(self, **arguments):
+        call = dict(arguments)
+        self.calls.append(call)
+        result = KernelApplicationCycleResult(
+            task_id="kernel-task-pre-action-failure",
+            cycle_key=str(arguments["cycle_key"]),
+            target_id=TARGET_ID,
+            status="confirmed_failure",
+            application_id=APPLICATION_ID,
+            application_ready=False,
+            before_observation_id="before-observation-failure",
+            before_evidence_id="before-evidence-failure",
+            action_id=None,
+            execution_id=None,
+            after_observation_id=None,
+            after_evidence_id=None,
+            verification_id=None,
+            verdict=None,
+            evidence="readiness tool response was invalid",
+            physical_action_sent=False,
+        )
+        self.by_cycle[result.cycle_key] = result
+        raise RuntimeError("readiness model failed before action")
+
+
+class _PostActionFailureKernel(_PreActionFailureKernel):
+    """A physical receipt keeps the exception on the fail-closed path."""
+
+    def execute_application_cycle(self, **arguments):
+        call = dict(arguments)
+        self.calls.append(call)
+        result = KernelApplicationCycleResult(
+            task_id="kernel-task-post-action-failure",
+            cycle_key=str(arguments["cycle_key"]),
+            target_id=TARGET_ID,
+            status="uncertain",
+            application_id=APPLICATION_ID,
+            application_ready=True,
+            before_observation_id="before-observation-action",
+            before_evidence_id="before-evidence-action",
+            action_id="action-uncertain",
+            execution_id="execution-uncertain",
+            after_observation_id=None,
+            after_evidence_id=None,
+            verification_id=None,
+            verdict=None,
+            evidence="execution accepted before verification failed",
+            physical_action_sent=True,
+        )
+        self.by_cycle[result.cycle_key] = result
+        raise RuntimeError("verification model failed after action")
+
+
+class _ThreeStepActivitySliceRunner:
+    """Durable fake for the narrow Supervisor adapter contract."""
+
+    def __init__(self) -> None:
+        self.dispatch_requests: list[ActivitySliceDispatchRequest] = []
+        self.dispatch_invocations = 0
+        self.executed_steps: list[ActivitySliceStepDispatch] = []
+        self._by_key: dict[str, ActivitySliceDispatchResult] = {}
+        self._by_receipt: dict[str, ActivitySliceDispatchResult] = {}
+        self._active: dict[str, ActivitySliceStepDispatch] = {}
+
+    def dispatch_activity_slice(self, request, execute_step):
+        self.dispatch_invocations += 1
+        self.dispatch_requests.append(request)
+        existing = self._by_key.get(request.idempotency_key)
+        if existing is not None:
+            return existing
+
+        slice_id = f"slice:{request.idempotency_key}"
+        step_ids: list[str] = []
+        kernel_results: list[KernelApplicationCycleResult] = []
+        for ordinal in range(1, 4):
+            step = ActivitySliceStepDispatch(
+                step_id=f"{slice_id}:step:{ordinal}",
+                ordinal=ordinal,
+                idempotency_key=f"{slice_id}:step-key:{ordinal}",
+            )
+            self._active[request.idempotency_key] = step
+            try:
+                kernel_result = execute_step(step)
+            finally:
+                self._active.pop(request.idempotency_key, None)
+            self.executed_steps.append(step)
+            step_ids.append(step.step_id)
+            kernel_results.append(kernel_result)
+
+        first = kernel_results[0]
+        last = kernel_results[-1]
+        result = ActivitySliceDispatchResult(
+            receipt_id=f"activity-slice-receipt:{slice_id}",
+            slice_id=slice_id,
+            status="confirmed_success",
+            evidence="three ActivitySlice steps verified",
+            accepted=True,
+            physical_action_sent=all(
+                item.physical_action_sent for item in kernel_results
+            ),
+            before_evidence_id=first.before_evidence_id,
+            after_evidence_id=last.after_evidence_id,
+            step_ids=tuple(step_ids),
+            kernel_task_ids=tuple(item.task_id for item in kernel_results),
+        )
+        self._by_key[request.idempotency_key] = result
+        self._by_receipt[result.receipt_id] = result
+        return result
+
+    def inspect_activity_slice(self, receipt_id):
+        return self._by_receipt[receipt_id]
+
+    def reconcile_activity_slice(self, idempotency_key):
+        return self._by_key.get(idempotency_key)
+
+    def active_activity_step(self, idempotency_key):
+        return self._active.get(idempotency_key)
+
+
 def _wait_for(predicate, *, timeout: float = 5.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -97,6 +248,53 @@ def _wait_for(predicate, *, timeout: float = 5.0):
             return value
         time.sleep(0.02)
     raise AssertionError("condition did not become true before timeout")
+
+
+def test_long_lived_gateway_exposes_only_the_single_dispatching_child_authorization(
+    tmp_path: Path,
+) -> None:
+    """The DeviceBody resolver gets correlation facts, never broad Goal access."""
+
+    database = tmp_path / "application.db"
+    kernel = _BlockingKernel()
+    runtime = LongLivedMobileApplicationRuntimeGateway(
+        database,
+        kernel=kernel,
+        observation_provider=_ObservationProvider(),
+    )
+    runtime.startup()
+    try:
+        prepared = runtime.prepare(
+            client_request_id="prepare-authorization-1",
+            goal_id="goal-authorization-1",
+            target_id=TARGET_ID,
+            application_id=APPLICATION_ID,
+            initial_input=GOAL,
+        )
+        _wait_for(lambda: runtime.inspect(prepared.instance_id).status == "waiting")
+        runtime.activate(prepared.instance_id)
+        assert kernel.entered.wait(timeout=5.0)
+
+        authorization = runtime.durable_child_authorization(prepared.instance_id)
+        assert authorization is not None
+        assert authorization.instance_id == prepared.instance_id
+        assert authorization.goal_id == "goal-authorization-1"
+        assert authorization.target_id == TARGET_ID
+        assert authorization.activated_at is not None
+        assert authorization.intent_phase == "dispatching"
+        assert authorization.reservation_id
+        # prepare wait + activation wait complete before the first physical cycle
+        assert authorization.application_cycle == 3
+
+        kernel.release.set()
+        _wait_for(
+            lambda: runtime.inspect(prepared.instance_id).status == "waiting",
+            timeout=5.0,
+        )
+        assert runtime.durable_child_authorization(prepared.instance_id) is None
+    finally:
+        kernel.release.set()
+        runtime.shutdown()
 
 
 def test_long_lived_mobile_gateway_waits_then_consumes_each_trigger_once(
@@ -225,6 +423,199 @@ def test_long_lived_mobile_gateway_waits_then_consumes_each_trigger_once(
             assert len(kernel.calls) == 3
         finally:
             recovered.shutdown()
+    finally:
+        runtime.shutdown()
+
+
+def test_activity_slice_mode_runs_three_verified_steps_inside_one_outer_dispatch(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "activity-slice-application.db"
+    kernel = _Kernel()
+    provider = _ObservationProvider()
+    slice_runner = _ThreeStepActivitySliceRunner()
+    runtime = LongLivedMobileApplicationRuntimeGateway(
+        database,
+        kernel=kernel,
+        observation_provider=provider,
+        activity_slice_runner=slice_runner,
+    )
+    runtime.startup()
+    try:
+        prepared = runtime.prepare(
+            client_request_id="prepare-slice-1",
+            goal_id="goal-slice-1",
+            target_id=TARGET_ID,
+            application_id=APPLICATION_ID,
+            initial_input=GOAL,
+        )
+        _wait_for(lambda: runtime.inspect(prepared.instance_id).status == "waiting")
+        runtime.activate(prepared.instance_id)
+        settled = _wait_for(
+            lambda: (
+                runtime.inspect(prepared.instance_id)
+                if len(kernel.calls) == 3
+                and runtime.inspect(prepared.instance_id).status == "waiting"
+                else None
+            ),
+            timeout=6.0,
+        )
+
+        # One persisted trigger owns one outer ApplicationRuntime Intent and
+        # one ActivitySlice.  The three ACT steps remain distinct Kernel
+        # ledgers rather than three timer-driven outer cycles.
+        assert len(settled.intents) == 1
+        assert len(settled.outcomes) == 1
+        assert settled.outcomes[0].status == "confirmed_success"
+        assert len(slice_runner.dispatch_requests) == 1
+        request = slice_runner.dispatch_requests[0]
+        assert request.trigger_kind == "activation_timer"
+        assert len(slice_runner.executed_steps) == 3
+        assert len({item.step_id for item in slice_runner.executed_steps}) == 3
+        assert len({str(call["cycle_key"]) for call in kernel.calls}) == 3
+        assert all(
+            ":activity-step:" in str(call["cycle_key"])
+            for call in kernel.calls
+        )
+        assert len(
+            {
+                kernel.by_cycle[str(call["cycle_key"])].action_id
+                for call in kernel.calls
+            }
+        ) == 3
+        assert {int(call["application_cycle"]) for call in kernel.calls} == {3}
+        assert all(
+            str(call["stage_objective"]).startswith("推进当前 Goal 的下一步：")
+            and GOAL in str(call["stage_objective"])
+            for call in kernel.calls
+        )
+        assert [
+            tuple(call["completion_criteria"]) for call in kernel.calls
+        ] == [
+            (f"ActivitySlice Step {ordinal} 完成一个真实原子动作，并形成动作后观察与验证",)
+            for ordinal in range(1, 4)
+        ]
+
+        intent_open = next(
+            event.sequence
+            for event in settled.events
+            if event.event_type == "intent_open"
+        )
+        cycle_finished = next(
+            event.sequence
+            for event in settled.events
+            if event.event_type == "cycle_finished"
+            and event.sequence > intent_open
+        )
+        assert not any(
+            event.event_type == "wait_scheduled"
+            and intent_open < event.sequence < cycle_finished
+            for event in settled.events
+        ), "ActivitySlice steps must not fall back to the 300 second outer wait"
+
+        # A repeated owner dispatch observes the persisted Slice result, and
+        # reconciliation is inspect-only.  Neither path replays a Kernel step.
+        runtime_intent = settled.intents[0]
+        assert runtime_intent.reservation_id is not None
+        owner = _ExecutionOwner(
+            runtime._bindings,
+            kernel,
+            provider,
+            slice_runner,
+        )
+        duplicate = owner.dispatch(
+            runtime_intent.reservation_id,
+            settled,
+            runtime_intent.intent,
+        )
+        assert duplicate.receipt_id == runtime_intent.receipt.receipt_id
+        assert len(kernel.calls) == 3
+        reconciled = owner.reconcile(settled, runtime_intent)
+        assert reconciled.outcome.status == "confirmed_success"
+        assert reconciled.receipt is not None
+        assert reconciled.receipt.receipt_id == duplicate.receipt_id
+        assert len(kernel.calls) == 3
+    finally:
+        runtime.shutdown()
+
+
+def test_activity_step_reconciles_pre_action_failure_but_keeps_post_action_failure_closed(
+    tmp_path: Path,
+) -> None:
+    provider = _ObservationProvider()
+    instance = SimpleNamespace(instance_id="instance-failure")
+    runtime_intent = SimpleNamespace(cycle=7)
+    binding = SimpleNamespace(goal_id="goal-failure", target_id=TARGET_ID)
+    step = ActivitySliceStepDispatch(
+        step_id="step-failure",
+        ordinal=1,
+        idempotency_key="step-failure-key",
+    )
+
+    pre_action = _PreActionFailureKernel()
+    pre_owner = _ExecutionOwner(
+        SimpleNamespace(), pre_action, provider, SimpleNamespace()
+    )
+    reconciled = pre_owner._execute_activity_step(
+        instance=instance,
+        runtime_intent=runtime_intent,
+        binding=binding,
+        reservation_id="reservation-failure",
+        cycle_goal=GOAL,
+        step=step,
+    )
+    assert reconciled.status == "confirmed_failure"
+    assert reconciled.physical_action_sent is False
+    assert len(pre_action.calls) == 1
+
+    post_action = _PostActionFailureKernel()
+    post_owner = _ExecutionOwner(
+        SimpleNamespace(), post_action, provider, SimpleNamespace()
+    )
+    with pytest.raises(RuntimeError, match="verification model failed after action"):
+        post_owner._execute_activity_step(
+            instance=instance,
+            runtime_intent=runtime_intent,
+            binding=binding,
+            reservation_id="reservation-failure",
+            cycle_goal=GOAL,
+            step=step,
+        )
+    assert len(post_action.calls) == 1
+
+
+def test_old_long_lived_binding_reads_as_initial_app_context(tmp_path: Path) -> None:
+    """The R3 SQL column remains readable without pinning current foreground."""
+
+    database = tmp_path / "application.db"
+    kernel = _Kernel()
+    provider = _ChangingForegroundObservationProvider()
+    runtime = LongLivedMobileApplicationRuntimeGateway(
+        database,
+        kernel=kernel,
+        observation_provider=provider,
+    )
+    runtime.startup()
+    try:
+        prepared = runtime.prepare(
+            client_request_id="prepare-initial-context",
+            goal_id="goal-initial-context",
+            target_id=TARGET_ID,
+            # Deliberately use the legacy request spelling: persisted R3
+            # callers must read it through the explicit R4 projection.
+            application_id=APPLICATION_ID,
+            initial_input=GOAL,
+        )
+        binding = runtime.binding(prepared.instance_id)
+        assert binding.initial_application_context == APPLICATION_ID
+        assert binding.application_id == APPLICATION_ID  # legacy read alias only
+
+        runtime.activate(prepared.instance_id)
+        _wait_for(lambda: len(kernel.calls) == 1, timeout=6.0)
+        # The provider transitioned after the initial app.  The old
+        # application context did not cause a RetryableApplicationError gate.
+        assert provider.calls >= 1
+        assert kernel.calls[0]["expected_application_id"] == "com.android.settings"
     finally:
         runtime.shutdown()
 

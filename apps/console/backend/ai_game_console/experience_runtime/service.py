@@ -3,24 +3,58 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sqlite3
 import uuid
 from datetime import UTC, datetime
-from collections.abc import Callable
-from typing import Any
+from collections.abc import Callable, Mapping
+from typing import Any, Protocol
 
 from .domain import (
     ActionTransition,
+    AndroidExperienceCandidate,
+    AndroidExperienceProjection,
+    AndroidPlannerHint,
+    AuthenticatedAndroidScope,
+    TrustedVerificationAttestation,
+    TrustedVerificationQuery,
     ExperienceCandidate,
     ExperienceEpisode,
     ExperiencePacket,
+    ExperienceProjection,
     OutcomeSignal,
     PolicyRevision,
     RetrievedExperience,
     SceneState,
     ScopeKey,
+    ScopedExperienceHint,
 )
 from .store import SQLiteExperienceStore
 from ..visual_similarity import png_dhash
+from ..android_ui_runtime.domain import (
+    GoalVerificationRecord,
+    ObservationEnvelope,
+    opaque_digest,
+    owner_scope_digest,
+)
+from ..android_ui_runtime.sanitizer import sanitize_text
+from ..android_ui_runtime.store import (
+    CheckpointBaselineAttestationPort,
+    CheckpointBaselineQuery,
+    TrustedCheckpointBaselineAttestation,
+)
+
+
+class TrustedVerificationAttestationPort(Protocol):
+    """K2-owned immutable-checkpoint lookup used by K3 learning only."""
+
+    def attest(self, query: TrustedVerificationQuery) -> TrustedVerificationAttestation | None: ...
+
+
+_OPAQUE_DIGEST = re.compile(r"[a-f0-9]{64}")
+_FABRICATED_SUCCESS_TASK_IDS = frozenset({
+    "0b027ab0-b1c7-4288-be1d-d450a743b915",
+    "5b673e56-c3af-4282-984b-4429c612f4d4",
+})
 
 
 class ExperienceService:
@@ -29,10 +63,19 @@ class ExperienceService:
     def __init__(
         self, store: SQLiteExperienceStore, *, enabled: bool = True,
         observation_payload: Callable[[str], bytes] | None = None,
+        trusted_verification_port: TrustedVerificationAttestationPort | None = None,
+        checkpoint_baseline_port: CheckpointBaselineAttestationPort | None = None,
     ) -> None:
         self.store = store
         self.enabled = enabled
         self.observation_payload = observation_payload
+        # K3 never blesses a record merely because a caller can construct its
+        # dataclass.  Composition supplies K2's typed immutable-checkpoint
+        # attestation; omitted means cold/no learning.
+        self.trusted_verification_port = trusted_verification_port
+        # K2 owns the durable step/checkpoint baseline. K3 never accepts a
+        # checkpoint integer from its caller.
+        self.checkpoint_baseline_port = checkpoint_baseline_port
 
     def begin_mobile_episode(
         self, *, goal_run_id: str, source_task_id: str, goal_spec_revision: int,
@@ -54,6 +97,12 @@ class ExperienceService:
         self, *, goal_run_id: str, source_task_id: str,
         goal_spec_revision: int, frozen_criteria_ids: tuple[str, ...],
         skill_scope_id: str | None, target_id: str | None,
+        task_scope: str = "generic-task",
+        subtask_scope: str = "generic-subtask",
+        device_profile_id: str | None = None,
+        object_ref: str = "none",
+        conversation_ref: str = "none",
+        account_scope: str = "local-default",
     ) -> ExperienceEpisode | None:
         normalized = (skill_scope_id or "auto:generic/unknown/v1").removeprefix("auto:")
         application_id = normalized.split("/", 1)[0] if "/" in normalized else "generic"
@@ -63,7 +112,7 @@ class ExperienceService:
             frozen_criteria_ids=frozen_criteria_ids,
             scope=ScopeKey(
                 user_scope="local-user",
-                account_scope="local-default",
+                account_scope=account_scope,
                 application_id=application_id,
                 goal_family=normalized,
                 ui_version="unknown",
@@ -73,6 +122,15 @@ class ExperienceService:
                 # the scene compatibility key still binds the observed frame
                 # dimensions before any candidate can be retrieved.
                 orientation="unknown",
+                task_scope=task_scope,
+                subtask_scope=subtask_scope,
+                # Existing compatibility callers do not own a DeviceProfile.
+                # They retain the migrated legacy bucket; new long-task code
+                # must pass its stable profile id and therefore gets strict
+                # cross-profile isolation.
+                device_profile_id=(device_profile_id or "legacy-profile"),
+                object_ref=object_ref,
+                conversation_ref=conversation_ref,
             ),
         )
 
@@ -195,6 +253,500 @@ class ExperienceService:
             ) for item in candidates[:8]),
         )
 
+    def retrieve_scoped_hints(
+        self, *, source_task_id: str, objective: str, observation: Any
+    ) -> tuple[ScopedExperienceHint, ...]:
+        """Return bounded, scope-matched hints; this method never dispatches.
+
+        ``retrieve`` performs the exact ScopeKey lookup and creates the usage
+        attribution record.  This projection intentionally drops raw scene,
+        action arguments, evidence references, and any conversation/object
+        reference before the planner receives the result.
+        """
+
+        packet = self.retrieve(
+            source_task_id=source_task_id,
+            objective=objective,
+            observation=observation,
+        )
+        hints: list[ScopedExperienceHint] = []
+        for item in packet.items[:8]:
+            candidate = self.store.candidate(item.candidate_id)
+            hints.append(ScopedExperienceHint(
+                experience_id=candidate.candidate_id,
+                kind=candidate.kind,
+                action_kind=_action_kind(candidate.semantic_action),
+                confidence=candidate.confidence,
+                support_count=candidate.support_count,
+                failure_count=candidate.failure_count,
+                verified_provenance_count=len(candidate.provenance_transition_ids),
+            ))
+        return tuple(hints)
+
+    def project_experience(self, candidate_id: str) -> ExperienceProjection:
+        """Return a bounded projection safe for v2 host/UI consumers.
+
+        It excludes DSH conversation text, opaque object/conversation values,
+        evidence references, UI-tree/screenshot payloads, local paths, action
+        arguments, and policy internals.
+        """
+
+        candidate = self.store.candidate(candidate_id)
+        scope = candidate.scope
+        return ExperienceProjection(
+            schema_version=2,
+            experience_id=candidate.candidate_id,
+            kind=candidate.kind,
+            application_id=scope.application_id,
+            goal_family=scope.goal_family,
+            ui_version=scope.ui_version,
+            device_class=scope.device_class,
+            orientation=scope.orientation,
+            device_profile_id=scope.device_profile_id,
+            task_scoped=scope.task_scope != "generic-task",
+            subtask_scoped=scope.subtask_scope != "generic-subtask",
+            object_scoped=scope.object_ref != "none",
+            conversation_scoped=scope.conversation_ref != "none",
+            status=candidate.status,
+            confidence=candidate.confidence,
+            support_count=candidate.support_count,
+            failure_count=candidate.failure_count,
+            verified_provenance_count=len(candidate.provenance_transition_ids),
+        )
+
+    # --- v4 authenticated Android UI experience ---------------------------------
+
+    def begin_authenticated_android_episode(self, *, scope: AuthenticatedAndroidScope) -> str | None:
+        """Start the v4 task-local ledger from composition-authenticated scope.
+
+        This is intentionally separate from compatibility ``ScopeKey`` paths:
+        no local-user/default/unknown row can enter this API or be promoted.
+        """
+        if not self.enabled:
+            return None
+        try:
+            return self.store.put_android_episode(
+                episode_id=_stable_id(
+                    "episode", scope.task_id, scope.attestation_digest,
+                ), scope=scope, created_at=_utc_now(),
+            )
+        except (OSError, sqlite3.Error, ValueError):
+            return None
+
+    def record_android_ui_progress(
+        self, *, scope: AuthenticatedAndroidScope, step_id: str,
+        checkpoint: CheckpointBaselineQuery, action_kind: str,
+        semantic_anchor: str,
+        kind: str = "progress",
+    ) -> AndroidExperienceCandidate | None:
+        """Record a sanitized, task-local UI edge; it never becomes reusable here."""
+        if not self.enabled:
+            return None
+        attestation = self._trusted_checkpoint(scope, checkpoint)
+        if attestation is None:
+            return None
+        observation = checkpoint.observation
+        try:
+            if kind not in {"progress", "negative", "recovery"}:
+                return None
+            cleaned_anchor = sanitize_text(semantic_anchor, maximum=240)
+            if cleaned_anchor.do_not_learn:
+                return None
+            if action_kind not in {"tap", "long_press", "swipe", "input_text", "back", "home", "recents", "open_app", "wait"}:
+                return None
+            scene_marker = self._fresh_scene_marker(observation)
+            step_provenance = _opaque_provenance("step", step_id)
+        except Exception:
+            return None
+        episode_id = self.begin_authenticated_android_episode(scope=scope)
+        if episode_id is None:
+            return None
+        candidate_id = _stable_id(
+            "local-candidate", scope.attestation_digest, step_provenance,
+            str(attestation.checkpoint_index), attestation.observation_digest,
+            action_kind, kind, scene_marker,
+        )
+        candidate = AndroidExperienceCandidate(
+            candidate_id=candidate_id, source_episode_id=episode_id, scope=scope,
+            kind=kind, action_kind=action_kind, semantic_anchor=cleaned_anchor.text,
+            expected_scene_marker=scene_marker,
+            source_checkpoint_index=attestation.checkpoint_index,
+            source_observation_digest=attestation.observation_digest,
+            support_count=1 if kind in {"progress", "recovery"} else 0,
+            failure_count=1 if kind == "negative" else 0,
+            confidence=_android_confidence(1 if kind in {"progress", "recovery"} else 0,
+                                           1 if kind == "negative" else 0),
+            provenance_ids=(
+                step_provenance,
+                _opaque_provenance("observation", attestation.observation_digest),
+            ),
+            status="task_local", created_at=_utc_now(), updated_at=_utc_now(),
+        )
+        try:
+            return self.store.put_android_candidate(candidate, reusable=False)
+        except (OSError, sqlite3.Error, ValueError):
+            return None
+
+    def derive_verified_android_candidate(
+        self, *, scope: AuthenticatedAndroidScope, source_candidate_id: str,
+        verification: GoalVerificationRecord, checkpoint: CheckpointBaselineQuery,
+        verification_record_id: str | None = None,
+    ) -> AndroidExperienceCandidate | None:
+        """Promote one local edge only after a current K2 semantic success record."""
+        if not self.enabled:
+            return None
+        baseline = self._trusted_checkpoint(scope, checkpoint)
+        if baseline is None:
+            return None
+        attestation = self._verified_terminal_record(
+            scope, verification, verification_record_id=verification_record_id, require_satisfied=True,
+        )
+        if attestation is None:
+            return None
+        if (
+            not scope.cross_task_eligible
+            or scope.task_id in _FABRICATED_SUCCESS_TASK_IDS
+            or checkpoint.observation != verification.after
+            or baseline.checkpoint_index <= 0
+        ):
+            return None
+        try:
+            candidate = self.store.android_candidate(source_candidate_id)
+        except (OSError, sqlite3.Error, KeyError):
+            return None
+        if candidate.scope != scope or candidate.status != "task_local" or candidate.kind == "negative":
+            return None
+        if baseline.checkpoint_index <= candidate.source_checkpoint_index:
+            return None
+        # A progress edge is useful only after the enclosing goal is verified;
+        # then it becomes a reusable positive edge, not a claim that the step
+        # alone completed the original goal.
+        promoted_kind = "positive" if candidate.kind == "progress" else candidate.kind
+        reusable_scope = scope.reusable_scope()
+        verification_digest = self._verification_digest(verification)
+        promoted = AndroidExperienceCandidate(
+            candidate_id=_stable_id(
+                "reusable-candidate", source_candidate_id, verification_digest,
+                str(baseline.checkpoint_index), baseline.observation_digest,
+                baseline.causal_command_id or "no-command",
+            ), source_episode_id=candidate.source_episode_id,
+            scope=reusable_scope, kind=promoted_kind, action_kind=candidate.action_kind,
+            semantic_anchor=candidate.semantic_anchor,
+            expected_scene_marker=candidate.expected_scene_marker,
+            source_checkpoint_index=candidate.source_checkpoint_index,
+            source_observation_digest=candidate.source_observation_digest,
+            support_count=max(1, candidate.support_count), failure_count=candidate.failure_count,
+            confidence=_android_confidence(max(1, candidate.support_count), candidate.failure_count),
+            provenance_ids=(
+                *candidate.provenance_ids,
+                f"verification:{verification_digest}",
+            ),
+            status="active", created_at=_utc_now(), updated_at=_utc_now(),
+        )
+        try:
+            return self.store.promote_android_candidate(
+                source_candidate_id=source_candidate_id, scope=scope,
+                terminal_verification=self._verification_provenance(
+                    verification, attestation, baseline,
+                ),
+                promoted=promoted,
+            )
+        except (OSError, sqlite3.Error, ValueError, KeyError):
+            return None
+
+    def trusted_android_terminal_attestation(
+        self, *, scope: AuthenticatedAndroidScope, record_id: str,
+        revision: int, step_index: int,
+    ) -> TrustedVerificationAttestation | None:
+        """Read exactly one K2-owned terminal proof for K3-only recovery."""
+
+        try:
+            if (
+                self.trusted_verification_port is None
+                or not _opaque_record_id(record_id)
+                or revision != scope.criteria_revision
+                or step_index < 0
+            ):
+                return None
+            query = TrustedVerificationQuery(
+                scope=scope,
+                scope_digest=scope.attestation_digest,
+                record_id=record_id,
+                task_id=scope.task_id,
+                revision=revision,
+                step_index=step_index,
+            )
+            attestation = self.trusted_verification_port.attest(query)
+            if (
+                not isinstance(attestation, TrustedVerificationAttestation)
+                or attestation.record_id != query.record_id
+                or attestation.task_id != query.task_id
+                or attestation.scope_digest != query.scope_digest
+                or attestation.revision != query.revision
+                or attestation.step_index != query.step_index
+                or attestation.already_satisfied
+                or not isinstance(attestation.immutable_record, Mapping)
+            ):
+                return None
+            return TrustedVerificationAttestation(
+                record_id=str(attestation.record_id),
+                task_id=str(attestation.task_id),
+                scope_digest=str(attestation.scope_digest),
+                revision=int(attestation.revision),
+                step_index=int(attestation.step_index),
+                checkpoint_index=int(attestation.checkpoint_index),
+                already_satisfied=bool(attestation.already_satisfied),
+                immutable_record=json.loads(_canonical_json(attestation.immutable_record)),
+            )
+        except Exception:
+            return None
+
+    def derive_verified_android_candidate_from_attestation(
+        self, *, scope: AuthenticatedAndroidScope, source_candidate_id: str,
+        checkpoint: CheckpointBaselineQuery,
+        attestation: TrustedVerificationAttestation,
+    ) -> AndroidExperienceCandidate | None:
+        """Promote a local edge from an attested immutable K2 terminal row.
+
+        This recovery-only path never re-runs the semantic model and cannot
+        mint a K2 result: the K2 attestor must first return the same scoped,
+        immutable terminal record that it owns.
+        """
+
+        if not self.enabled:
+            return None
+        baseline = self._trusted_checkpoint(scope, checkpoint)
+        record = attestation.immutable_record
+        after = record.get("after") if isinstance(record, Mapping) else None
+        observation = checkpoint.observation
+        if (
+            baseline is None
+            or attestation.task_id != scope.task_id
+            or attestation.scope_digest != scope.attestation_digest
+            or attestation.revision != scope.criteria_revision
+            or attestation.step_index + 1 != attestation.checkpoint_index
+            or not isinstance(after, Mapping)
+            or record.get("overall") != "satisfied"
+            or record.get("already_satisfied") is not False
+            or record.get("criteria_digest") != scope.criteria_digest
+            or record.get("runner_kind") != scope.runner_kind
+            or record.get("runner_version") != scope.runner_version
+            or record.get("owner_scope_digest") != scope.owner_scope_digest
+            or after.get("screenshot_digest") != observation.screenshot_digest
+            or after.get("ui_tree_digest") != observation.ui_tree_digest
+            or after.get("device_state_digest") != observation.device_state_digest
+            or after.get("freshness_digest")
+            != opaque_digest("observation-freshness", observation.freshness_token)
+            or after.get("causality_command_id") != observation.causality_command_id
+            or baseline.checkpoint_index != attestation.checkpoint_index
+        ):
+            return None
+        if not scope.cross_task_eligible or scope.task_id in _FABRICATED_SUCCESS_TASK_IDS:
+            return None
+        try:
+            candidate = self.store.android_candidate(source_candidate_id)
+        except (OSError, sqlite3.Error, KeyError):
+            return None
+        if (
+            candidate.scope != scope
+            or candidate.status != "task_local"
+            or candidate.kind == "negative"
+            or baseline.checkpoint_index <= candidate.source_checkpoint_index
+        ):
+            return None
+        verification_digest = hashlib.sha256(
+            _canonical_json(record).encode("utf-8")
+        ).hexdigest()
+        promoted = AndroidExperienceCandidate(
+            candidate_id=_stable_id(
+                "reusable-candidate", source_candidate_id, verification_digest,
+                str(baseline.checkpoint_index), baseline.observation_digest,
+                baseline.causal_command_id or "no-command",
+            ), source_episode_id=candidate.source_episode_id,
+            scope=scope.reusable_scope(), kind="positive",
+            action_kind=candidate.action_kind, semantic_anchor=candidate.semantic_anchor,
+            expected_scene_marker=candidate.expected_scene_marker,
+            source_checkpoint_index=candidate.source_checkpoint_index,
+            source_observation_digest=candidate.source_observation_digest,
+            support_count=max(1, candidate.support_count),
+            failure_count=candidate.failure_count,
+            confidence=_android_confidence(max(1, candidate.support_count), candidate.failure_count),
+            provenance_ids=(*candidate.provenance_ids, f"verification:{verification_digest}"),
+            status="active", created_at=_utc_now(), updated_at=_utc_now(),
+        )
+        provenance = {
+            "digest": verification_digest,
+            "revision": attestation.revision,
+            "criteria_digest": scope.criteria_digest,
+            "after_screenshot_digest": observation.screenshot_digest,
+            "after_tree_digest": observation.ui_tree_digest or "",
+            "after_device_state_digest": observation.device_state_digest,
+            "checkpoint_index": baseline.checkpoint_index,
+            "checkpoint_observation_digest": baseline.observation_digest,
+            "causal_command_digest": hashlib.sha256(
+                (baseline.causal_command_id or "").encode("utf-8")
+            ).hexdigest(),
+            "record_digest": hashlib.sha256(attestation.record_id.encode("utf-8")).hexdigest(),
+        }
+        try:
+            return self.store.promote_android_candidate(
+                source_candidate_id=source_candidate_id,
+                scope=scope,
+                terminal_verification=provenance,
+                promoted=promoted,
+            )
+        except (OSError, sqlite3.Error, ValueError, KeyError):
+            return None
+
+    def retrieve_planner_hints(
+        self, *, scope: AuthenticatedAndroidScope,
+        checkpoint: CheckpointBaselineQuery, step_id: str,
+    ) -> tuple[AndroidPlannerHint, ...]:
+        """Return only persisted, sanitized hints after a fresh observation.
+
+        Retrieval is attribution only.  It cannot create an action, claim a
+        command, or bypass the K2 semantic verifier.
+        """
+        if not self.enabled:
+            return ()
+        attestation = self._trusted_checkpoint(scope, checkpoint)
+        if attestation is None:
+            return ()
+        observation = checkpoint.observation
+        try:
+            self.store.android_episode_scope(scope.task_id, expected_scope=scope)
+        except (KeyError, OSError, sqlite3.Error, ValueError):
+            return ()
+        scene = self._fresh_scene_marker(observation)
+        try:
+            matches = [
+                candidate for candidate, _reusable in self.store.android_candidates_for_scope(scope)
+                if candidate.expected_scene_marker == scene
+            ][:8]
+        except (OSError, sqlite3.Error):
+            return ()
+        try:
+            step_provenance = _opaque_provenance("step", step_id)
+            retrieval_id = _stable_id(
+                "retrieval", scope.attestation_digest, step_provenance,
+                str(attestation.checkpoint_index), attestation.observation_digest,
+            )
+            candidate_ids = self.store.record_android_retrieval(
+                retrieval_id=retrieval_id, task_id=scope.task_id,
+                step_id=step_provenance, scope=scope,
+                observation_token=_opaque_provenance("freshness", observation.freshness_token),
+                observation_digest=attestation.observation_digest,
+                checkpoint_index=attestation.checkpoint_index,
+                candidate_ids=tuple(item.candidate_id for item in matches), created_at=_utc_now(),
+            )
+        except (OSError, sqlite3.Error, ValueError):
+            return ()
+        match_by_id = {item.candidate_id: item for item in matches}
+        canonical_matches = tuple(
+            match_by_id[candidate_id]
+            for candidate_id in candidate_ids
+            if candidate_id in match_by_id
+        )
+        return tuple(AndroidPlannerHint(
+            candidate_id=item.candidate_id, kind=item.kind, action_kind=item.action_kind,
+            semantic_anchor=item.semantic_anchor, expected_scene_marker=item.expected_scene_marker,
+            confidence=item.confidence, support_count=item.support_count,
+            failure_count=item.failure_count, provenance_count=len(item.provenance_ids),
+            retrieval_id=retrieval_id,
+            scope=item.scope, provenance_ids=item.provenance_ids,
+            retrieval_step_id=step_provenance,
+            retrieval_checkpoint_index=attestation.checkpoint_index,
+            retrieval_observation_digest=attestation.observation_digest,
+        ) for item in canonical_matches)
+
+    def record_android_hint_outcome(
+        self, *, scope: AuthenticatedAndroidScope, retrieval_id: str,
+        candidate_id: str, step_id: str, result: str,
+        checkpoint: CheckpointBaselineQuery,
+        verification: GoalVerificationRecord | None,
+        verification_record_id: str | None = None,
+    ) -> bool:
+        """Durably attribute a certain support/contradiction after restart.
+
+        Unknown outcomes deliberately have no confidence effect.  Two certain
+        contradictions deprecate the candidate through a new policy revision;
+        history is append-only and never silently deleted.
+        """
+        if not self.enabled:
+            return False
+        if result not in {"support", "contradiction", "unknown"}:
+            return False
+        baseline = self._trusted_checkpoint(scope, checkpoint)
+        if baseline is None:
+            return False
+        if result == "unknown":
+            digest = None
+            verification_token = None
+            verification_observation_digest = None
+            verification_checkpoint_index = baseline.checkpoint_index
+        else:
+            if verification is None or verification_record_id is None:
+                return False
+            if checkpoint.observation != verification.after:
+                return False
+            attestation = self._verified_terminal_record(
+                scope, verification, verification_record_id=verification_record_id, require_satisfied=False,
+            )
+            if attestation is None:
+                return False
+            if result == "support" and verification.overall != "satisfied":
+                return False
+            if result == "contradiction" and verification.overall != "unsatisfied":
+                return False
+            digest = self._verification_digest(verification)
+            verification_token = _opaque_provenance(
+                "freshness", checkpoint.observation.freshness_token,
+            )
+            verification_observation_digest = baseline.observation_digest
+            verification_checkpoint_index = baseline.checkpoint_index
+        try:
+            return self.store.record_android_usage(
+                usage_id=_stable_id(
+                    "usage", retrieval_id, candidate_id,
+                    _opaque_provenance("step", step_id), result,
+                    digest or baseline.observation_digest,
+                ), retrieval_id=retrieval_id,
+                candidate_id=candidate_id, task_id=scope.task_id,
+                step_id=_opaque_provenance("step", step_id), scope=scope,
+                result=result, verification_digest=digest,
+                verification_token=verification_token,
+                verification_observation_digest=verification_observation_digest,
+                verification_checkpoint_index=verification_checkpoint_index,
+                created_at=_utc_now(),
+            )
+        except (OSError, sqlite3.Error, ValueError, KeyError):
+            return False
+
+    def project_android_experience(
+        self, candidate_id: str, *, requester_scope: AuthenticatedAndroidScope,
+    ) -> AndroidExperienceProjection | None:
+        """Return a coarse projection without owner/device/version/content facts."""
+        try:
+            candidate = self.store.android_candidate(candidate_id)
+        except (OSError, sqlite3.Error):
+            return None
+        if candidate.scope.owner_scope_digest != requester_scope.owner_scope_digest:
+            raise KeyError(candidate_id)
+        if candidate.status == "task_local":
+            if candidate.scope != requester_scope:
+                raise KeyError(candidate_id)
+        elif (
+            candidate.kind == "negative" or not requester_scope.cross_task_eligible
+            or candidate.scope != requester_scope.reusable_scope()
+        ):
+            raise KeyError(candidate_id)
+        return AndroidExperienceProjection(
+            schema_version=4, experience_id=candidate.candidate_id, kind=candidate.kind,
+            runner_kind=candidate.scope.runner_kind, status=candidate.status,
+            confidence=candidate.confidence, support_count=candidate.support_count,
+            failure_count=candidate.failure_count,
+        )
+
     def record_mobile_attempt(
         self, *, source_task_id: str, objective: str, attempt: Any,
         retrieval: ExperiencePacket | None = None,
@@ -226,8 +778,12 @@ class ExperienceService:
             self._scene(episode, after, semantic_hint=hint, confidence=0.82)
             if after is not None else None
         )
-        uncertain = bool(_value(verification, "uncertain", False))
-        satisfied = bool(_value(verification, "satisfied", False))
+        verification_source = str(_value(verification, "source", "device_verifier"))
+        verified_by_device = verification_source in {
+            "device_verifier", "kernel_verifier", "verified_event",
+        }
+        uncertain = bool(_value(verification, "uncertain", False)) or not verified_by_device
+        satisfied = bool(_value(verification, "satisfied", False)) and verified_by_device
         progress = bool(_value(verification, "progress", False))
         detected_failure = failure_class or _failure_class(hint, progress, satisfied)
         outcome = "uncertain" if uncertain else (
@@ -256,7 +812,8 @@ class ExperienceService:
         signal = self.store.put_signal(OutcomeSignal(
             signal_id=str(uuid.uuid4()), episode_id=episode.episode_id,
             transition_id=transition.transition_id, kind=outcome,
-            source="mobile_task_immediate_verifier",
+            source=("mobile_task_immediate_verifier" if verified_by_device
+                    else "untrusted_model_assessment"),
             evidence_refs=tuple(ref for ref in (
                 str(_value(before, "evidence_id", "")),
                 str(_value(after, "evidence_id", "")) if after is not None else "",
@@ -344,7 +901,7 @@ class ExperienceService:
             if episode.scope != candidate.scope or not episode.frozen_criteria_ids:
                 raise ValueError("candidate provenance scope or goal criteria mismatch")
             signal = self.store.latest_signal_for_transition(transition_id)
-            if signal is None or signal.kind == "uncertain" or not signal.evidence_refs:
+            if not _admissible_verified_signal(signal):
                 raise ValueError("candidate provenance lacks admissible outcome evidence")
         return self.store.set_candidate_status(candidate_id, "promoted")
 
@@ -628,10 +1185,8 @@ class ExperienceService:
                 episode.scope != candidate.scope
                 or not episode.frozen_criteria_ids
                 or transition.immediate_outcome not in {"no_progress", "wrong_scene"}
-                or signal is None
+                or not _admissible_verified_signal(signal)
                 or signal.kind not in {"no_progress", "wrong_scene"}
-                or signal.confidence < 1.0
-                or not signal.evidence_refs
             ):
                 return None
         promoted = self.store.set_candidate_status(candidate.candidate_id, "promoted")
@@ -702,9 +1257,290 @@ class ExperienceService:
                     return item.transition_id
         return None
 
+    @staticmethod
+    def _fresh_scene_marker(observation: ObservationEnvelope) -> str:
+        """Text-free structural scene identity; screenshots remain K2 evidence."""
+        payload = json.dumps({
+            "schema": "android-ui-structure-v2",
+            "tree": observation.ui_tree_digest or "no-tree",
+        }, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        return "scene:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+
+    def derive_structural_android_candidate(
+        self, *, source: AndroidExperienceCandidate, ui_tree_digest: str,
+    ) -> AndroidExperienceCandidate | None:
+        """Idempotently derive a v2 marker candidate without mutating legacy proof."""
+        if (
+            not self.enabled or source.status != "active"
+            or source.kind != "positive" or not _OPAQUE_DIGEST.fullmatch(ui_tree_digest)
+        ):
+            return None
+        marker = "scene:" + hashlib.sha256(json.dumps({
+            "schema": "android-ui-structure-v2", "tree": ui_tree_digest,
+        }, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:32]
+        migrated = AndroidExperienceCandidate(
+            candidate_id=_stable_id("structural-marker-v2", source.candidate_id, marker),
+            source_episode_id=source.source_episode_id, scope=source.scope,
+            kind=source.kind, action_kind=source.action_kind,
+            semantic_anchor=source.semantic_anchor, expected_scene_marker=marker,
+            source_checkpoint_index=source.source_checkpoint_index,
+            # This new row deliberately carries no copied screenshot-derived
+            # observation digest.  Its source pointer is stable and opaque,
+            # while the legacy row retains the original K2 provenance.
+            source_observation_digest=hashlib.sha256(
+                ("structural-source-v2\x00" + source.candidate_id + "\x00" + ui_tree_digest)
+                .encode("utf-8")
+            ).hexdigest(),
+            support_count=source.support_count, failure_count=source.failure_count,
+            confidence=source.confidence,
+            # Keep provenance within the store's opaque observation namespace;
+            # it fingerprints the v2 structure marker, never UI text, bounds,
+            # screenshot pixels, or a screenshot digest.
+            provenance_ids=(*source.provenance_ids, _opaque_provenance("observation", marker)),
+            status="active", created_at=_utc_now(), updated_at=_utc_now(),
+        )
+        try:
+            return self.store.put_android_candidate(migrated, reusable=True)
+        except (OSError, sqlite3.Error, ValueError):
+            return None
+
+    @staticmethod
+    def _fresh_observation(scope: AuthenticatedAndroidScope, observation: ObservationEnvelope) -> None:
+        if observation.task_id != scope.task_id:
+            raise ValueError("fresh observation belongs to another task")
+        if observation.profile_id != scope.profile_id or observation.profile_generation != scope.profile_generation:
+            raise ValueError("fresh observation profile binding mismatch")
+        if not observation.freshness_token or not observation.screenshot_digest or not observation.device_state_digest:
+            raise ValueError("fresh observation is incomplete")
+
+    def _trusted_checkpoint(
+        self,
+        scope: AuthenticatedAndroidScope,
+        query: CheckpointBaselineQuery,
+    ) -> TrustedCheckpointBaselineAttestation | None:
+        """Resolve and canonicalize K2's sealed baseline inside one cold boundary."""
+
+        try:
+            port = self.checkpoint_baseline_port
+            if port is None or not isinstance(query, CheckpointBaselineQuery):
+                return None
+            snapshot = query.snapshot
+            criteria = query.criteria
+            observation = query.observation
+            self._fresh_observation(scope, observation)
+            if (
+                snapshot.task_id != scope.task_id
+                or owner_scope_digest(snapshot.owner) != scope.owner_scope_digest
+                or snapshot.profile_id != scope.profile_id
+                or snapshot.profile_generation != scope.profile_generation
+                or snapshot.runner_kind != scope.runner_kind
+                or snapshot.runner_version != scope.runner_version
+                or snapshot.runner_binding_id != scope.subtask_id
+                or snapshot.revision != scope.criteria_revision
+                or criteria.revision != scope.criteria_revision
+                or criteria.digest != scope.criteria_digest
+                or query.runner_kind != scope.runner_kind
+                or query.runner_version != scope.runner_version
+                or observation.boot_id != snapshot.boot_id
+                or observation.canonical_device_id != snapshot.canonical_device_id
+            ):
+                return None
+            attestation = port.attest(query)
+            if (
+                not isinstance(attestation, TrustedCheckpointBaselineAttestation)
+                or port.validates_for(query, attestation) is not True
+                or attestation.task_id != scope.task_id
+                or attestation.owner_scope_digest != scope.owner_scope_digest
+                or attestation.runner_kind != scope.runner_kind
+                or attestation.runner_version != scope.runner_version
+                or attestation.runner_binding_digest
+                != opaque_digest("runner-binding", scope.subtask_id)
+                or attestation.revision != scope.criteria_revision
+                or attestation.criteria_digest != scope.criteria_digest
+                or not isinstance(attestation.checkpoint_index, int)
+                or isinstance(attestation.checkpoint_index, bool)
+                or attestation.checkpoint_index < 1
+                or not _OPAQUE_DIGEST.fullmatch(attestation.observation_digest)
+                or attestation.causal_command_id
+                != observation.causality_command_id
+            ):
+                return None
+            # Rebuild the immutable value so no malformed proxy/subclass can
+            # execute code after the port call or mutate what K3 consumes.
+            return TrustedCheckpointBaselineAttestation(
+                task_id=str(attestation.task_id),
+                owner_scope_digest=str(attestation.owner_scope_digest),
+                runner_kind=str(attestation.runner_kind),
+                runner_version=int(attestation.runner_version),
+                runner_binding_digest=str(attestation.runner_binding_digest),
+                revision=int(attestation.revision),
+                criteria_digest=str(attestation.criteria_digest),
+                checkpoint_index=int(attestation.checkpoint_index),
+                observation_digest=str(attestation.observation_digest),
+                causal_command_id=(
+                    str(attestation.causal_command_id)
+                    if attestation.causal_command_id is not None else None
+                ),
+                _seal=attestation._seal,
+            )
+        except Exception:
+            return None
+
+    def _verified_terminal_record(
+        self, scope: AuthenticatedAndroidScope, verification: GoalVerificationRecord,
+        *, verification_record_id: str | None, require_satisfied: bool,
+    ) -> TrustedVerificationAttestation | None:
+        if verification.task_id != scope.task_id:
+            return None
+        expected_owner = owner_scope_digest(verification.owner)
+        if expected_owner != scope.owner_scope_digest:
+            return None
+        if verification.runner_kind != scope.runner_kind or verification.runner_version != scope.runner_version:
+            return None
+        # The old Settings foreground verifier proves only package foreground.
+        # Reusable Android experience requires the K2 semantic-record protocol.
+        if verification.prompt_version != "android-ui-semantic-v1":
+            return None
+        if (
+            verification.revision != scope.criteria_revision
+            or verification.criteria_digest != scope.criteria_digest
+            or verification.latest_step_index < 0
+        ):
+            return None
+        try:
+            self._fresh_observation(scope, verification.after)
+        except ValueError:
+            return None
+        if not verification.verdicts or any(item.state == "unknown" for item in verification.verdicts):
+            return None
+        if require_satisfied and (
+            verification.overall != "satisfied"
+            or any(item.state != "satisfied" or not item.anchors for item in verification.verdicts)
+        ):
+            return None
+        if verification.overall not in {"satisfied", "unsatisfied"}:
+            return None
+        if verification.already_satisfied:
+            return None
+        return self._record_is_trusted(scope, verification, verification_record_id)
+
+    def _record_is_trusted(
+        self, scope: AuthenticatedAndroidScope, verification: GoalVerificationRecord,
+        verification_record_id: str | None,
+    ) -> TrustedVerificationAttestation | None:
+        try:
+            if self.trusted_verification_port is None or not _opaque_record_id(verification_record_id):
+                return None
+            query = TrustedVerificationQuery(
+                scope=scope, scope_digest=scope.attestation_digest,
+                record_id=verification_record_id, task_id=verification.task_id,
+                revision=verification.revision, step_index=verification.latest_step_index,
+            )
+            attestation = self.trusted_verification_port.attest(query)
+            if not isinstance(attestation, TrustedVerificationAttestation):
+                return None
+            if (
+                attestation.record_id != query.record_id
+                or attestation.task_id != query.task_id
+                or attestation.scope_digest != query.scope_digest
+                or attestation.revision != query.revision
+                or attestation.step_index != query.step_index
+                or not isinstance(attestation.checkpoint_index, int)
+                or isinstance(attestation.checkpoint_index, bool)
+                or attestation.checkpoint_index < 1
+                or attestation.already_satisfied
+                or not isinstance(attestation.immutable_record, Mapping)
+            ):
+                return None
+            expected = verification.private_durable_record()
+            if _canonical_json(attestation.immutable_record) != _canonical_json(expected):
+                return None
+            return TrustedVerificationAttestation(
+                record_id=str(attestation.record_id),
+                task_id=str(attestation.task_id),
+                scope_digest=str(attestation.scope_digest),
+                revision=int(attestation.revision),
+                step_index=int(attestation.step_index),
+                checkpoint_index=int(attestation.checkpoint_index),
+                already_satisfied=bool(attestation.already_satisfied),
+                immutable_record=json.loads(_canonical_json(attestation.immutable_record)),
+            )
+        except Exception:
+            return None
+
+    @staticmethod
+    def _verification_digest(verification: GoalVerificationRecord) -> str:
+        payload = {
+            "task": verification.task_id,
+            "runner": (verification.runner_kind, verification.runner_version),
+            "revision": verification.revision,
+            "criteria": verification.criteria_digest,
+            "step": verification.latest_step_index,
+            "overall": verification.overall,
+            "after": (
+                verification.after.screenshot_digest,
+                verification.after.ui_tree_digest,
+                verification.after.device_state_digest,
+                verification.after.freshness_token,
+            ),
+        }
+        return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+    @classmethod
+    def _verification_provenance(
+        cls, verification: GoalVerificationRecord,
+        attestation: TrustedVerificationAttestation,
+        baseline: TrustedCheckpointBaselineAttestation,
+    ) -> dict[str, str | int]:
+        return {
+            "digest": cls._verification_digest(verification),
+            "revision": verification.revision,
+            "criteria_digest": verification.criteria_digest,
+            "after_screenshot_digest": verification.after.screenshot_digest,
+            "after_tree_digest": verification.after.ui_tree_digest or "",
+            "after_device_state_digest": verification.after.device_state_digest,
+            "checkpoint_index": baseline.checkpoint_index,
+            "checkpoint_observation_digest": baseline.observation_digest,
+            "causal_command_digest": (
+                hashlib.sha256(baseline.causal_command_id.encode("utf-8")).hexdigest()
+                if baseline.causal_command_id is not None else ""
+            ),
+            "record_digest": hashlib.sha256(attestation.record_id.encode("utf-8")).hexdigest(),
+        }
+
 
 def _value(item: Any, name: str, default: Any = None) -> Any:
     return item.get(name, default) if isinstance(item, dict) else getattr(item, name, default)
+
+
+def _opaque_provenance(namespace: str, raw: str) -> str:
+    """Persist a domain-separated opaque reference, never the caller token."""
+    if not isinstance(raw, str) or not raw or len(raw) > 4_096:
+        raise ValueError("Android experience provenance must be bounded")
+    digest = hashlib.sha256((namespace + "\x00" + raw).encode("utf-8")).hexdigest()
+    return f"{namespace}:{digest}"
+
+
+def _stable_id(namespace: str, *parts: str) -> str:
+    if (
+        not isinstance(namespace, str)
+        or not namespace
+        or not parts
+        or any(not isinstance(part, str) or len(part) > 4_096 for part in parts)
+    ):
+        raise ValueError("stable experience identity requires bounded string parts")
+    digest = hashlib.sha256(
+        "\x00".join((namespace, *parts)).encode("utf-8"),
+    ).hexdigest()
+    return f"{namespace}_{digest}"
+
+
+def _opaque_record_id(value: object) -> bool:
+    return isinstance(value, str) and bool(re.fullmatch(r"[A-Za-z0-9_-]{16,160}", value))
+
+
+def _canonical_json(value: Mapping[str, Any] | dict[str, Any]) -> str:
+    return json.dumps(dict(value), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def _objective(value: str) -> str:
@@ -800,6 +1636,23 @@ def _action_region(semantic_action: str) -> str | None:
     return semantic_action.rsplit(marker, 1)[1] if marker in semantic_action else None
 
 
+def _action_kind(semantic_action: str) -> str:
+    return semantic_action.split(":", 1)[0].split("|region=", 1)[0][:64]
+
+
+def _admissible_verified_signal(signal: OutcomeSignal | None) -> bool:
+    """Require a verifier-originated, certain signal with evidence references."""
+
+    return bool(
+        signal is not None
+        and signal.source == "mobile_task_immediate_verifier"
+        and signal.kind != "uncertain"
+        and signal.confidence >= 1.0
+        and signal.evidence_refs
+        and all(item.strip() for item in signal.evidence_refs)
+    )
+
+
 def _semantic_action_matches(left: str, right: str) -> bool:
     left_region = _action_region(left)
     right_region = _action_region(right)
@@ -831,6 +1684,10 @@ def _trial_result(
     if kind == "negative":
         return "support" if adhered and successful else "failure"
     return "support" if adhered and (successful or expected_transition_match) else "failure"
+
+
+def _android_confidence(support: int, failures: int) -> float:
+    return round((support + 1) / (support + failures + 2), 6)
 
 
 def _reward(outcome: str) -> str:

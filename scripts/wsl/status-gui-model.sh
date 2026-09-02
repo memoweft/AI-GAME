@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-config=/mnt/f/AI-GAME/config/model-runtime.env
+config=/mnt/d/AIProjects/AIGame/Repository/config/model-runtime.env
 # shellcheck disable=SC1090
 source "$config"
 runtime="$AI_GAME_RUNTIME_ROOT"

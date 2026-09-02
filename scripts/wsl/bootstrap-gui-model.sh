@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-config=/mnt/f/AI-GAME/config/model-runtime.env
+config=/mnt/d/AIProjects/AIGame/Repository/config/model-runtime.env
 if [[ ! -f "$config" ]]; then
   echo "Missing runtime config: $config" >&2
   exit 1

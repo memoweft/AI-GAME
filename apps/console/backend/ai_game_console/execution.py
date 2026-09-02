@@ -4,7 +4,15 @@ from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
 
-GuiActionName = Literal["tap", "keyevent", "text", "swipe", "long_press"]
+GuiActionName = Literal[
+    "tap",
+    "keyevent",
+    "text",
+    "swipe",
+    "long_press",
+    "open_app",
+    "recents",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,6 +31,8 @@ class GuiAction:
     end_y: int | None = None
     duration_ms: int | None = None
     keycode: str | None = None
+    package: str | None = None
+    component: str | None = None
     text: str | None = field(default=None, repr=False)
 
 

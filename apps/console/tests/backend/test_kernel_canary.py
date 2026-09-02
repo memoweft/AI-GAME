@@ -1,20 +1,28 @@
 from __future__ import annotations
 
 import base64
+import json
 import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 from ai_game_console.device_lease import DeviceExecutionLease
-from ai_game_console.kernel_canary import KernelCanaryCoordinator
+from ai_game_console.kernel_canary import KernelCanaryCoordinator, _kernel_action
 from ai_game_console.mobile_agent import (
     ActionDecision,
+    DecisionContext,
+    PhysicalIntent,
     PlanDraft,
     ReflectionDecision,
+    Subgoal,
     Verification,
 )
-from ai_game_console.mobile_task_adapter import LocalMobileEvidenceStore
+from ai_game_console.execution import AndroidScreenshot
+from ai_game_console.mobile_task_adapter import (
+    LocalMobileEvidenceStore,
+    OpenAICompatibleToolRoleModel,
+)
 from ai_game_console.runtime_adapters.artifacts import FilesystemArtifactStore
 from ai_game_console.runtime_adapters.sqlite import SQLiteRuntimeStore
 from ai_game_console.runtime_kernel import (
@@ -42,6 +50,30 @@ _PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUB"
     "AScY42YAAAAASUVORK5CYII="
 )
+
+
+def test_bounded_application_action_carries_device_body_verification_metadata() -> None:
+    tree_sha256 = "a" * 64
+
+    tap_type, tap_params = _kernel_action(
+        PhysicalIntent("tap", {"x": 10, "y": 20, "target_description": "应用"}),
+        expected_foreground_package="com.android.settings",
+        expected_accessibility_tree_changed_from=tree_sha256,
+    )
+    swipe_type, swipe_params = _kernel_action(
+        PhysicalIntent(
+            "swipe",
+            {"start_x": 10, "start_y": 20, "end_x": 10, "end_y": 200},
+        ),
+        expected_foreground_package="com.android.settings",
+        expected_accessibility_tree_changed_from=tree_sha256,
+    )
+
+    assert tap_type is ActionType.TAP
+    assert tap_params["expected_foreground_package"] == "com.android.settings"
+    assert swipe_type is ActionType.SWIPE
+    assert swipe_params["expected_foreground_package"] == "com.android.settings"
+    assert swipe_params["expected_accessibility_tree_changed_from"] == tree_sha256
 
 
 class ObservationProvider:
@@ -93,6 +125,55 @@ class FinishModel:
         return ReflectionDecision("visual-first")
 
 
+def test_model_action_schema_accepts_open_app(tmp_path: Path) -> None:
+    evidence = LocalMobileEvidenceStore(tmp_path / "evidence")
+    frame = evidence.record(
+        "task-r4",
+        AndroidScreenshot(_PNG, width=1, height=1),
+    )
+    captured_schema: list[dict[str, object]] = []
+
+    def transport(endpoint, payload, headers, timeout):
+        del endpoint, headers, timeout
+        tool = payload["tools"][0]["function"]
+        captured_schema.append(tool["parameters"])
+        return {"choices": [{"message": {"tool_calls": [{"function": {
+            "name": "mobile_use",
+            "arguments": json.dumps({
+                "action": "open_app",
+                "package": "com.android.settings",
+                "component": ".Settings",
+            }),
+        }}]}}]}
+
+    model = OpenAICompatibleToolRoleModel(
+        endpoint="http://127.0.0.1:8080/v1/chat/completions",
+        model="qwen-role",
+        evidence=evidence,
+        transport=transport,
+    )
+    decision = model.decide(DecisionContext(
+        "task-r4",
+        "Open Settings",
+        "adb:emulator-5554",
+        1,
+        Subgoal(0, "Open the exact package", "active"),
+        0,
+        (),
+        frame,
+        "initial",
+        0,
+        (),
+        None,
+    ))
+
+    assert "open_app" in captured_schema[0]["properties"]["action"]["enum"]
+    assert decision.intent == PhysicalIntent(
+        "open_app",
+        {"package": "com.android.settings", "component": ".Settings"},
+    )
+
+
 class PausableFinishModel(FinishModel):
     def __init__(self) -> None:
         self.entered = threading.Event()
@@ -104,7 +185,14 @@ class PausableFinishModel(FinishModel):
         return super().decide(context)
 
 
-def _coordinator(tmp_path: Path, model, *, experience=None):
+def _coordinator(
+    tmp_path: Path,
+    model,
+    *,
+    experience=None,
+    application_readiness_assessor=None,
+    device_id_resolver=None,
+):
     artifacts = FilesystemArtifactStore(tmp_path / "artifacts")
     kernel = RuntimeKernel(
         SQLiteRuntimeStore(tmp_path / "runtime.db"),
@@ -119,8 +207,77 @@ def _coordinator(tmp_path: Path, model, *, experience=None):
         device_lease=DeviceExecutionLease(),
         settle_seconds=0,
         experience=experience,
+        application_readiness_assessor=application_readiness_assessor,
+        device_id_resolver=device_id_resolver,
     )
     return kernel, coordinator
+
+
+def test_kernel_canary_persists_stable_device_identity_for_rotated_transport(
+    tmp_path: Path,
+) -> None:
+    transport_id = "adb:192.168.31.232:46387"
+    canonical_id = "adb:adb-eb646d2b-vJhY31._adb-tls-connect._tcp"
+    kernel, coordinator = _coordinator(
+        tmp_path,
+        FinishModel(),
+        device_id_resolver=lambda device_id: (
+            canonical_id if device_id == transport_id else device_id
+        ),
+    )
+    try:
+        accepted = coordinator.start(
+            "确认设置页",
+            "request-rotated-transport",
+            target_id=transport_id,
+        )
+
+        assert kernel.load_task(accepted.task_id).device_id == canonical_id
+    finally:
+        coordinator.shutdown()
+        kernel.close()
+
+
+def test_application_cycle_accepts_system_surface_without_authentication(
+    tmp_path: Path,
+) -> None:
+    kernel, coordinator = _coordinator(
+        tmp_path,
+        FinishModel(),
+        application_readiness_assessor=lambda *_args: {
+            "ready": True,
+            "authentication_required": False,
+            "authenticated": False,
+            "application_matches_goal": True,
+            "evidence": "Android Settings has no account session concept",
+        },
+    )
+    try:
+        result = coordinator.execute_application_cycle(
+            goal="持续浏览 OnePlus 系统设置",
+            goal_id="goal-settings",
+            application_instance_id="application-settings",
+            application_cycle=1,
+            cycle_key="cycle-settings-no-auth",
+            target_id="adb:device-1",
+            expected_application_id="com.android.settings",
+        )
+
+        readiness = next(
+            event
+            for event in kernel.events(result.task_id)
+            if event.type == "KernelApplicationReadinessAssessed"
+        )
+        assert result.application_ready is True
+        assert readiness.payload["authentication_required"] is False
+        assert readiness.payload["authentication_satisfied"] is True
+        assert (
+            kernel.load_task(result.task_id).failure_state.code
+            != "application_not_ready"
+        )
+    finally:
+        coordinator.shutdown()
+        kernel.close()
 
 
 def _wait_status(coordinator, task_id: str, status: str, timeout: float = 5) -> None:
@@ -183,6 +340,44 @@ def test_pause_fence_prevents_action_proposal_and_resume_requires_fresh_worker_t
         assert len(linked) >= 4
     finally:
         model.release.set()
+        coordinator.shutdown()
+        kernel.close()
+
+
+def test_r5_acceptance_task_is_never_scheduled_by_generic_kernel_worker(
+    tmp_path: Path,
+) -> None:
+    kernel, coordinator = _coordinator(tmp_path, FinishModel())
+    try:
+        task = kernel.create_task(
+            goal="externally driven device verification",
+            source=TaskSource(
+                "r5-acceptance-operator",
+                "goal:r5-goal",
+                "r5-owner-key",
+            ),
+            device_id="adb:device-1",
+        )
+        stage = kernel.create_stage(
+            task_id=task.id,
+            objective="one explicit operator action",
+            completion_criteria=("operator receipt",),
+        )
+        kernel.start_stage(task_id=task.id, stage_id=stage.id)
+
+        coordinator.submit(task.id)
+        coordinator.control(task.id, "pause")
+        coordinator.control(task.id, "resume")
+        coordinator.recover()
+        time.sleep(0.1)
+
+        assert kernel.load_task(task.id).status is TaskStatus.RUNNING
+        assert kernel.list_actions(task.id) == ()
+        assert not any(
+            event.type in {"KernelCanaryAccepted", "KernelTaskAccepted"}
+            for event in kernel.events(task.id)
+        )
+    finally:
         coordinator.shutdown()
         kernel.close()
 
@@ -329,7 +524,9 @@ def test_application_cycle_recovery_completes_durable_success_and_keeps_after_li
             after_observation_id=after_id,
             verdict=VerificationVerdict.SUCCESS,
             reason="fresh effect verified",
-            evidence_refs=(after.evidence_id,),
+                evidence_refs=(
+                    kernel.load_observation(after_id).screenshot.artifact.reference,
+                ),
             method=VerificationMethod.ROLE_ASSISTED,
             complete_stage=True,
             progress_summary="fresh effect verified",
@@ -407,7 +604,9 @@ def test_next_application_cycle_receives_prior_verified_no_progress_attempt(
             after_observation_id=after_id,
             verdict=VerificationVerdict.FAIL,
             reason="no material visual change",
-            evidence_refs=(after.evidence_id,),
+                evidence_refs=(
+                    kernel.load_observation(after_id).screenshot.artifact.reference,
+                ),
             method=VerificationMethod.ROLE_ASSISTED,
         )
 

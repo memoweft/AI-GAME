@@ -1,4 +1,0 @@
-interface:
-  display_name: "AI-GAME Rule Drift Audit"
-  short_description: "Audit stale, conflicting, unsupported rules"
-  default_prompt: "Use $doc-drift to audit AI-GAME instructions and product documents for evidence-backed drift."

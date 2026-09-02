@@ -6,6 +6,7 @@ import subprocess
 from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
+from dataclasses import dataclass
 from xml.etree import ElementTree
 
 from ...adb_executor import parse_png_size
@@ -32,6 +33,14 @@ class AndroidObservationError(RuntimeError):
     """A read-only Android fact could not be captured safely."""
 
 
+@dataclass(frozen=True, slots=True)
+class AndroidForeground:
+    """One read-only foreground fact, with package and activity kept separate."""
+
+    package: str
+    activity: str | None
+
+
 class AndroidObservationProvider:
     """New Runtime read-only ADB adapter bound to an explicit device_id."""
 
@@ -42,14 +51,16 @@ class AndroidObservationProvider:
         runner: CommandRunner | None = None,
         timeout_seconds: float = 5.0,
         clock: Callable[[], str] | None = None,
+        transport_device_id_resolver: Callable[[str], str] | None = None,
     ) -> None:
         self.adb_path = Path(adb_path)
         self._runner = runner
         self._timeout_seconds = timeout_seconds
         self._clock = clock or _utc_now
+        self._transport_device_id_resolver = transport_device_id_resolver
 
     def capture(self, device_id: str) -> RawObservation:
-        serial = _serial_from_device_id(device_id)
+        serial = self._transport_serial(device_id)
         started_at = self._clock()
         self._require_connected(serial)
 
@@ -110,9 +121,29 @@ class AndroidObservationProvider:
         )
 
     def read_device_state(self, device_id: str) -> DeviceState:
-        serial = _serial_from_device_id(device_id)
+        serial = self._transport_serial(device_id)
         self._require_connected(serial)
         return self._read_device_state(serial, fallback_screen_size=None)
+
+    def read_foreground(self, device_id: str) -> AndroidForeground | None:
+        """Read the current package/activity without capturing an old frame.
+
+        This is intentionally a read-only primitive for DeviceBody snapshot
+        capture.  A returned component is a device fact, never a verification
+        verdict for a Kernel action.
+        """
+
+        serial = self._transport_serial(device_id)
+        self._require_connected(serial)
+        return self._read_foreground(serial)
+
+    def _transport_serial(self, device_id: str) -> str:
+        transport_device_id = (
+            self._transport_device_id_resolver(device_id)
+            if self._transport_device_id_resolver is not None
+            else device_id
+        )
+        return _serial_from_device_id(transport_device_id)
 
     def _read_device_state(
         self,
@@ -129,33 +160,8 @@ class AndroidObservationProvider:
         if screen_size is None:
             raise AndroidObservationError("android_screen_size_unavailable")
 
-        window_result = self._run(
-            (self._adb(), "-s", serial, "shell", "dumpsys", "window", "windows")
-        )
-        foreground_app = (
-            _parse_foreground_app(_text(window_result.stdout))
-            if window_result.returncode == 0
-            else None
-        )
-        if foreground_app is None:
-            # Android 15 builds may omit mCurrentFocus/mFocusedApp from the
-            # window dump while exposing the same read-only fact as
-            # topResumedActivity in the activity dump.
-            activity_result = self._run(
-                (
-                    self._adb(),
-                    "-s",
-                    serial,
-                    "shell",
-                    "dumpsys",
-                    "activity",
-                    "activities",
-                )
-            )
-            if activity_result.returncode == 0:
-                foreground_app = _parse_foreground_app(
-                    _text(activity_result.stdout)
-                )
+        foreground = self._read_foreground(serial)
+        foreground_app = foreground.package if foreground is not None else None
 
         input_result = self._run(
             (self._adb(), "-s", serial, "shell", "dumpsys", "input")
@@ -195,6 +201,37 @@ class AndroidObservationProvider:
             keyboard_state=keyboard_state,
             connection_state=ConnectionState.CONNECTED,
             captured_at=self._clock(),
+        )
+
+    def _read_foreground(self, serial: str) -> AndroidForeground | None:
+        window_result = self._run(
+            (self._adb(), "-s", serial, "shell", "dumpsys", "window", "windows")
+        )
+        foreground = (
+            parse_foreground_component(_text(window_result.stdout))
+            if window_result.returncode == 0
+            else None
+        )
+        if foreground is not None:
+            return foreground
+        # Android 15 builds may omit mCurrentFocus/mFocusedApp from the window
+        # dump while exposing the same read-only fact as topResumedActivity in
+        # the activity dump.
+        activity_result = self._run(
+            (
+                self._adb(),
+                "-s",
+                serial,
+                "shell",
+                "dumpsys",
+                "activity",
+                "activities",
+            )
+        )
+        return (
+            parse_foreground_component(_text(activity_result.stdout))
+            if activity_result.returncode == 0
+            else None
         )
 
     def _read_ui_tree(self, serial: str) -> RawUiTree:
@@ -303,15 +340,22 @@ def _parse_screen_size(output: str) -> tuple[int, int] | None:
 
 
 def _parse_foreground_app(output: str) -> str | None:
+    component = parse_foreground_component(output)
+    return component.package if component is not None else None
+
+
+def parse_foreground_component(output: str) -> AndroidForeground | None:
+    """Parse one Android foreground component from common read-only dumps."""
+
     patterns = (
-        r"mCurrentFocus=.*?\s(?:u\d+\s+)?([A-Za-z0-9_.]+)/(?:[A-Za-z0-9_.$]+)",
-        r"mFocusedApp=.*?\s(?:u\d+\s+)?([A-Za-z0-9_.]+)/(?:[A-Za-z0-9_.$]+)",
-        r"(?:topResumedActivity|mResumedActivity|ResumedActivity).*?\su\d+\s+([A-Za-z0-9_.]+)/",
+        r"mCurrentFocus=.*?\s(?:u\d+\s+)?([A-Za-z0-9_.]+)/(\.?[A-Za-z0-9_.$]+)",
+        r"mFocusedApp=.*?\s(?:u\d+\s+)?([A-Za-z0-9_.]+)/(\.?[A-Za-z0-9_.$]+)",
+        r"(?:topResumedActivity|mResumedActivity|ResumedActivity).*?\su\d+\s+([A-Za-z0-9_.]+)/(\.?[A-Za-z0-9_.$]+)",
     )
     for pattern in patterns:
         match = re.search(pattern, output)
         if match:
-            return match.group(1)
+            return AndroidForeground(package=match.group(1), activity=match.group(2))
     return None
 
 

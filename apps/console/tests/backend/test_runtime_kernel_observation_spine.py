@@ -332,10 +332,10 @@ def test_restart_recovers_task_stage_observation_and_events(tmp_path: Path) -> N
     assert artifacts.read(observation.screenshot.artifact) == SCREENSHOT
 
 
-def test_phase_1_database_migrates_to_phase_5_without_losing_facts(tmp_path: Path) -> None:
+def test_phase_1_database_migrates_to_current_revision_without_losing_facts(tmp_path: Path) -> None:
     database_path = tmp_path / "runtime.db"
     with sqlite3.connect(database_path) as connection:
-        connection.executescript(sqlite_store_module._PHASE_2_SCHEMA)
+        connection.executescript(sqlite_store_module._RUNTIME_SCHEMA)
         connection.execute(
             "INSERT INTO runtime_schema(revision, applied_at) VALUES (1, ?)",
             (TIMES[0],),
@@ -396,12 +396,14 @@ def test_phase_1_database_migrates_to_phase_5_without_losing_facts(tmp_path: Pat
     assert [event.sequence for event in reopened.list_events("task-old")] == [1, 2]
     assert reopened.load_observation("obs-migrated").id == "obs-migrated"
     with sqlite3.connect(database_path) as connection:
-        assert connection.execute("SELECT MAX(revision) FROM runtime_schema").fetchone()[0] == 5
+        assert connection.execute("SELECT MAX(revision) FROM runtime_schema").fetchone()[0] == 7
         assert connection.execute("SELECT COUNT(*) FROM runtime_schema WHERE revision=2").fetchone()[0] == 1
         assert connection.execute("SELECT COUNT(*) FROM runtime_schema WHERE revision=3").fetchone()[0] == 1
         assert connection.execute("SELECT COUNT(*) FROM runtime_schema WHERE revision=4").fetchone()[0] == 1
         assert connection.execute("SELECT COUNT(*) FROM runtime_schema WHERE revision=5").fetchone()[0] == 1
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert connection.execute("SELECT COUNT(*) FROM runtime_schema WHERE revision=6").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM runtime_schema WHERE revision=7").fetchone()[0] == 1
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 7
 
 
 def test_android_adapter_uses_only_explicit_read_only_commands() -> None:
@@ -433,15 +435,25 @@ def test_android_adapter_uses_only_explicit_read_only_commands() -> None:
         return subprocess.CompletedProcess(normalized, 0, stdout=output, stderr=b"" if binary else "")
 
     provider = AndroidObservationProvider(
-        adb_path="C:/test/adb.exe", runner=runner, clock=_clock()
+        adb_path="C:/test/adb.exe",
+        runner=runner,
+        clock=_clock(),
+        transport_device_id_resolver=lambda device_id: (
+            "adb:192.168.31.232:46387"
+            if device_id == "adb:stable-oneplus"
+            else device_id
+        ),
     )
-    observation = provider.capture("adb:serial-123")
+    observation = provider.capture("adb:stable-oneplus")
 
-    assert observation.device_id == "adb:serial-123"
+    assert observation.device_id == "adb:stable-oneplus"
     assert observation.screenshot.content == SCREENSHOT
     assert observation.ui_tree.status is ChannelAvailability.AVAILABLE
     assert observation.device_state.foreground_app == "com.example.current"
-    assert all(command[1:3] == ("-s", "serial-123") for command in commands)
+    assert all(
+        command[1:3] == ("-s", "192.168.31.232:46387")
+        for command in commands
+    )
     assert not any(command[3:5] == ("shell", "input") for command in commands)
     assert not any(
         {"tap", "swipe", "keyevent", "am", "monkey"}.intersection(command[3:])

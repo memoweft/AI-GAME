@@ -19,7 +19,12 @@ def test_gui_executor_action_adapter_binds_target_and_preserves_unicode() -> Non
     executor = _GuiExecutor()
     serials: list[str] = []
     adapter = GuiExecutorActionAdapter(
-        lambda serial: serials.append(serial) or executor
+        lambda serial: serials.append(serial) or executor,
+        transport_device_id_resolver=lambda device_id: (
+            "adb:192.168.31.232:46387"
+            if device_id == "adb:device-1"
+            else device_id
+        ),
     )
 
     text = adapter.execute_input_text("adb:device-1", "你好，继续聊聊")
@@ -29,7 +34,7 @@ def test_gui_executor_action_adapter_binds_target_and_preserves_unicode() -> Non
 
     assert text.accepted is True
     assert press.accepted is True
-    assert serials == ["device-1", "device-1"]
+    assert serials == ["192.168.31.232:46387", "192.168.31.232:46387"]
     assert executor.actions[0].target_id == "adb:device-1"
     assert executor.actions[0].action == "text"
     assert executor.actions[0].text == "你好，继续聊聊"

@@ -16,7 +16,7 @@ $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $BackendRoot = Join-Path $ProjectRoot "apps\console\backend"
 $FrontendRoot = Join-Path $ProjectRoot "apps\console\frontend"
 $RuntimeRoot = Join-Path $ProjectRoot "runtime"
-$DataRoot = Join-Path $RuntimeRoot "console"
+$DefaultDataRoot = Join-Path $RuntimeRoot "console"
 $RunRoot = Join-Path $RuntimeRoot "run"
 $LogRoot = Join-Path $RuntimeRoot "logs"
 $EnvRoot = Join-Path $RuntimeRoot "envs\console"
@@ -59,6 +59,91 @@ function Assert-AdbPath {
         -not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
         throw "AI_GAME_ADB_PATH must be an absolute path to an existing adb.exe."
     }
+}
+
+function ConvertTo-NormalizedDataDirectory {
+    param(
+        [Parameter(Mandatory = $true)][string]$Value,
+        [Parameter(Mandatory = $true)][string]$Source,
+        [switch]$RequireExisting
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        throw "$Source must not be empty or whitespace."
+    }
+    $candidate = $Value.Trim()
+    if ($candidate -match '[*?\[\]]' -or
+        $candidate.StartsWith('\\?\', [System.StringComparison]::Ordinal) -or
+        $candidate.StartsWith('\\.\', [System.StringComparison]::Ordinal) -or
+        $candidate.StartsWith('\\', [System.StringComparison]::Ordinal) -or
+        $candidate -notmatch '^[A-Za-z]:[\\/]') {
+        throw "$Source must be a wildcard-free, drive-qualified local path."
+    }
+    try {
+        $normalized = [System.IO.Path]::GetFullPath($candidate)
+    } catch {
+        throw "$Source is not a valid Windows path."
+    }
+    $pathRoot = [System.IO.Path]::GetPathRoot($normalized)
+    if ([string]::IsNullOrWhiteSpace($pathRoot)) {
+        throw "$Source has no filesystem root."
+    }
+    if (-not $normalized.Equals($pathRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        $normalized = $normalized.TrimEnd([char[]]"\/")
+    }
+    if ($normalized.Equals($pathRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "$Source must not be a filesystem root."
+    }
+
+    $normalizedWithSeparator = $normalized + [System.IO.Path]::DirectorySeparatorChar
+    $projectWithSeparator = $ProjectRoot.TrimEnd([char[]]"\/") + [System.IO.Path]::DirectorySeparatorChar
+    $isDefaultDataRoot = $normalized.Equals($DefaultDataRoot, [System.StringComparison]::OrdinalIgnoreCase)
+    if ($normalized.Equals($ProjectRoot, [System.StringComparison]::OrdinalIgnoreCase) -or
+        $ProjectRoot.StartsWith($normalizedWithSeparator, [System.StringComparison]::OrdinalIgnoreCase) -or
+        (-not $isDefaultDataRoot -and
+            $normalized.StartsWith($projectWithSeparator, [System.StringComparison]::OrdinalIgnoreCase))) {
+        throw "$Source is a project root, project source path, or an over-broad directory."
+    }
+
+    $relative = $normalized.Substring($pathRoot.Length)
+    $current = $pathRoot
+    foreach ($segment in $relative.Split([char[]]"\/", [System.StringSplitOptions]::RemoveEmptyEntries)) {
+        $current = Join-Path $current $segment
+        if (-not (Test-Path -LiteralPath $current)) { break }
+        $item = Get-Item -LiteralPath $current -Force
+        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "$Source must not use a reparse-point target or ancestor."
+        }
+    }
+    if ($RequireExisting) {
+        if (-not (Test-Path -LiteralPath $normalized -PathType Container)) {
+            throw "$Source must point to an existing ordinary directory."
+        }
+    }
+    return $normalized
+}
+
+function Resolve-ConsoleDataRoot {
+    $explicit = [Environment]::GetEnvironmentVariable(
+        "AI_GAME_DATA_DIR", [EnvironmentVariableTarget]::Process
+    )
+    if ($null -eq $explicit) {
+        return ConvertTo-NormalizedDataDirectory `
+            -Value $DefaultDataRoot `
+            -Source "Default console data directory"
+    }
+    return ConvertTo-NormalizedDataDirectory `
+        -Value $explicit `
+        -Source "AI_GAME_DATA_DIR" `
+        -RequireExisting
+}
+
+function Test-SameDataDirectory {
+    param(
+        [Parameter(Mandatory = $true)][string]$Left,
+        [Parameter(Mandatory = $true)][string]$Right
+    )
+    return $Left.Equals($Right, [System.StringComparison]::OrdinalIgnoreCase)
 }
 
 function Import-ExecutorRuntimeConfiguration {
@@ -126,7 +211,8 @@ if ($Port -lt 1024 -or $Port -gt 65535) {
 }
 
 function Ensure-RuntimeDirectories {
-    foreach ($path in @($DataRoot, $RunRoot, $LogRoot, $EnvRoot)) {
+    param([string]$ConsoleDataRoot = $DefaultDataRoot)
+    foreach ($path in @($ConsoleDataRoot, $RunRoot, $LogRoot, $EnvRoot)) {
         New-Item -ItemType Directory -Force -Path $path | Out-Null
     }
 }
@@ -309,7 +395,7 @@ function Read-ConsoleState {
         }
     }
     $schemaVersion = [int]$state.schema_version
-    if ($schemaVersion -notin @(1, 2, 3)) {
+    if ($schemaVersion -notin @(1, 2, 3, 4)) {
         throw "Unsupported console state version: $($state.schema_version)"
     }
     if ($schemaVersion -ge 2 -and (
@@ -318,8 +404,25 @@ function Read-ConsoleState {
     )) {
         throw "The console state has an invalid graceful shutdown token: $StateFile"
     }
-    if ($schemaVersion -eq 3 -and [string]$state.runtime_mode -notin @("legacy", "draining", "kernel_active")) {
+    if ($schemaVersion -ge 3 -and [string]$state.runtime_mode -notin @("legacy", "draining", "kernel_active")) {
         throw "The console state has an invalid runtime mode: $StateFile"
+    }
+    if ($schemaVersion -eq 4) {
+        if ([string]::IsNullOrWhiteSpace([string]$state.data_dir)) {
+            throw "The console state is missing 'data_dir': $StateFile"
+        }
+        try {
+            $state.data_dir = ConvertTo-NormalizedDataDirectory `
+                -Value ([string]$state.data_dir) `
+                -Source "Console state data_dir"
+        } catch {
+            throw "The console state has an invalid data_dir: $StateFile"
+        }
+    } else {
+        $legacyDataRoot = ConvertTo-NormalizedDataDirectory `
+            -Value $DefaultDataRoot `
+            -Source "Legacy console data directory"
+        $state | Add-Member -NotePropertyName data_dir -NotePropertyValue $legacyDataRoot
     }
     if (-not ([string]$state.project_root).Equals($ProjectRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "The console state belongs to another project root. No process was changed."
@@ -337,10 +440,11 @@ function Write-ConsoleState {
         [Parameter(Mandatory = $true)][string]$StartedHost,
         [Parameter(Mandatory = $true)][int]$StartedPort,
         [Parameter(Mandatory = $true)][string]$ShutdownToken,
-        [Parameter(Mandatory = $true)][string]$StartedRuntimeMode
+        [Parameter(Mandatory = $true)][string]$StartedRuntimeMode,
+        [Parameter(Mandatory = $true)][string]$StartedDataDir
     )
     $state = [ordered]@{
-        schema_version = 3
+        schema_version = 4
         project_root = $ProjectRoot
         host = $StartedHost
         port = $StartedPort
@@ -350,6 +454,7 @@ function Write-ConsoleState {
         listener_created_at = Get-ProcessCreationStamp $Listener
         shutdown_token = $ShutdownToken
         runtime_mode = $StartedRuntimeMode
+        data_dir = $StartedDataDir
         written_at = [DateTimeOffset]::UtcNow.ToString("o")
     }
     $temporaryStateFile = "$StateFile.tmp"
@@ -398,6 +503,7 @@ function Get-OwnedConsoleInstance {
             Listener = $listener
             ShutdownToken = if ([int]$state.schema_version -ge 2) { [string]$state.shutdown_token } else { $null }
             RuntimeMode = if ([int]$state.schema_version -ge 3) { [string]$state.runtime_mode } else { "unknown" }
+            DataDir = [string]$state.data_dir
             Legacy = [int]$state.schema_version -eq 1
         }
     }
@@ -437,6 +543,9 @@ function Get-OwnedConsoleInstance {
         Listener = $listener
         ShutdownToken = $null
         RuntimeMode = "unknown"
+        DataDir = ConvertTo-NormalizedDataDirectory `
+            -Value $DefaultDataRoot `
+            -Source "Legacy console data directory"
         Legacy = $true
     }
 }
@@ -470,52 +579,70 @@ function Stop-VerifiedProcess {
     throw "$Description PID $($Snapshot.ProcessId) did not stop."
 }
 
-function Start-Console {
-    Ensure-RuntimeDirectories
+function Start-ManagedConsoleChild {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [Parameter(Mandatory = $true)][string]$ShutdownToken,
+        [Parameter(Mandatory = $true)][string]$StartedRuntimeMode,
+        [Parameter(Mandatory = $true)][string]$StartedDataDir
+    )
 
-    $running = Get-OwnedConsoleInstance
-    if ($null -ne $running) {
-        Write-Host "Console is already running at $($running.Url)."
-        if (-not $NoBrowser) { Start-Process $running.Url }
-        return
-    }
-
-    $portOwner = Get-PortOwner $Port
-    if ($null -ne $portOwner) {
-        throw "Port $Port is already in use by PID $($portOwner.OwningProcess). No process was stopped."
-    }
-
-    if (-not (Test-Path -LiteralPath $PythonExe)) { Install-Backend }
-    if (Test-FrontendBuildRequired) { Build-Frontend }
-    Archive-ConsoleLogs
-
-    $env:AI_GAME_PROJECT_ROOT = $ProjectRoot
-    $env:AI_GAME_DATA_DIR = $DataRoot
-    $shutdownToken = [Guid]::NewGuid().ToString("N")
+    $previousDataRoot = [Environment]::GetEnvironmentVariable(
+        "AI_GAME_DATA_DIR", [EnvironmentVariableTarget]::Process
+    )
     $previousShutdownToken = [Environment]::GetEnvironmentVariable(
         "AI_GAME_CONSOLE_SHUTDOWN_TOKEN", [EnvironmentVariableTarget]::Process
     )
     $previousRuntimeMode = [Environment]::GetEnvironmentVariable(
         "AI_GAME_RUNTIME_MODE", [EnvironmentVariableTarget]::Process
     )
-    $arguments = @(
-        "-m", "ai_game_console.main",
-        "--host", $HostName,
-        "--port", $Port.ToString()
-    )
-
-    Write-Host "Starting the local console..."
-    Set-Item -Path "Env:AI_GAME_CONSOLE_SHUTDOWN_TOKEN" -Value $shutdownToken
-    Set-Item -Path "Env:AI_GAME_RUNTIME_MODE" -Value $RuntimeMode
+    Set-Item -Path "Env:AI_GAME_DATA_DIR" -Value $StartedDataDir
+    Set-Item -Path "Env:AI_GAME_CONSOLE_SHUTDOWN_TOKEN" -Value $ShutdownToken
+    Set-Item -Path "Env:AI_GAME_RUNTIME_MODE" -Value $StartedRuntimeMode
     try {
-        $process = Start-Process -FilePath $PythonExe `
-            -ArgumentList $arguments `
+        # Start-Process does not reliably carry process-scoped environment
+        # changes into a hidden child on every supported PowerShell host.  Keep
+        # the execution capability in memory only and pass it explicitly when
+        # the launcher already provided one; it is never written to runtime
+        # state, config, or logs.
+        $childEnvironment = @{
+            "AI_GAME_DATA_DIR" = $StartedDataDir
+            "AI_GAME_CONSOLE_SHUTDOWN_TOKEN" = $ShutdownToken
+            "AI_GAME_RUNTIME_MODE" = $StartedRuntimeMode
+        }
+        $harnessToken = [Environment]::GetEnvironmentVariable(
+            "AI_GAME_HARNESS_TOKEN", [EnvironmentVariableTarget]::Process
+        )
+        if (-not [string]::IsNullOrWhiteSpace($harnessToken)) {
+            $childEnvironment["AI_GAME_HARNESS_TOKEN"] = $harnessToken
+        }
+        # The child is deliberately launched with an explicit environment so
+        # capability state cannot leak from an unrelated parent.  Preserve
+        # the already validated, non-secret executor facts as well: without
+        # them the production Android UI composition is inert even though its
+        # local role-model configuration remains available from config files.
+        foreach ($name in $AllowedExecutorEnvironmentNames) {
+            $value = [Environment]::GetEnvironmentVariable(
+                $name, [EnvironmentVariableTarget]::Process
+            )
+            if (-not [string]::IsNullOrWhiteSpace($value)) {
+                $childEnvironment[$name] = $value
+            }
+        }
+        return Start-Process -FilePath $PythonExe `
+            -ArgumentList $Arguments `
             -WorkingDirectory $BackendRoot `
             -RedirectStandardOutput $StdoutLog `
             -RedirectStandardError $StderrLog `
+            -Environment $childEnvironment `
             -WindowStyle Hidden `
             -PassThru
     } finally {
+        if ($null -eq $previousDataRoot) {
+            Remove-Item -Path "Env:AI_GAME_DATA_DIR" -ErrorAction SilentlyContinue
+        } else {
+            Set-Item -Path "Env:AI_GAME_DATA_DIR" -Value $previousDataRoot
+        }
         if ($null -eq $previousShutdownToken) {
             Remove-Item -Path "Env:AI_GAME_CONSOLE_SHUTDOWN_TOKEN" -ErrorAction SilentlyContinue
         } else {
@@ -527,10 +654,53 @@ function Start-Console {
             Set-Item -Path "Env:AI_GAME_RUNTIME_MODE" -Value $previousRuntimeMode
         }
     }
+}
+
+function Start-Console {
+    $requestedDataRoot = Resolve-ConsoleDataRoot
+    $running = Get-OwnedConsoleInstance
+    if ($null -ne $running) {
+        if (-not (Test-SameDataDirectory $requestedDataRoot $running.DataDir)) {
+            throw "Console is already running with a different data directory. No process was changed."
+        }
+        Write-Host "Console is already running at $($running.Url)."
+        if (-not $NoBrowser) { Start-Process $running.Url }
+        return
+    }
+
+    Ensure-RuntimeDirectories -ConsoleDataRoot $requestedDataRoot
+
+    $portOwner = Get-PortOwner $Port
+    if ($null -ne $portOwner) {
+        throw "Port $Port is already in use by PID $($portOwner.OwningProcess). No process was stopped."
+    }
+
+    if (-not (Test-Path -LiteralPath $PythonExe)) { Install-Backend }
+    if (Test-FrontendBuildRequired) { Build-Frontend }
+    Archive-ConsoleLogs
+
+    $env:AI_GAME_PROJECT_ROOT = $ProjectRoot
+    $shutdownToken = [Guid]::NewGuid().ToString("N")
+    $arguments = @(
+        "-m", "ai_game_console.main",
+        "--host", $HostName,
+        "--port", $Port.ToString()
+    )
+
+    Write-Host "Starting the local console..."
+    $process = Start-ManagedConsoleChild `
+        -Arguments $arguments `
+        -ShutdownToken $shutdownToken `
+        -StartedRuntimeMode $RuntimeMode `
+        -StartedDataDir $requestedDataRoot
     Set-Content -LiteralPath $PidFile -Value $process.Id -Encoding ascii
 
     $ready = $false
-    for ($attempt = 0; $attempt -lt 40; $attempt++) {
+    # Kernel-active startup can legitimately rebuild durable owners and warm
+    # the local role model before FastAPI publishes /health.  Give that normal
+    # recovery path up to two minutes; identity and port checks below still
+    # prevent an unrelated or replaced process from being accepted.
+    for ($attempt = 0; $attempt -lt 480; $attempt++) {
         if ($process.HasExited) { break }
         try {
             $health = Invoke-RestMethod -Uri $HealthUrl -TimeoutSec 1
@@ -585,7 +755,7 @@ function Start-Console {
         throw "The console responded, but its launcher/listener process tree could not be verified."
     }
 
-    Write-ConsoleState $launcher $listener $HostName $Port $shutdownToken $RuntimeMode
+    Write-ConsoleState $launcher $listener $HostName $Port $shutdownToken $RuntimeMode $requestedDataRoot
     Write-Host "Console is ready at $ConsoleUrl (listener PID $($listener.ProcessId), mode $RuntimeMode)."
     if (-not $NoBrowser) { Start-Process $ConsoleUrl }
 }
@@ -706,7 +876,7 @@ function Show-Status {
     $executorEnabled = if ($env:AI_GAME_GUI_EXECUTOR_ENABLED -eq '1') { '1' } else { '0' }
     $adbPath = if ($env:AI_GAME_ADB_PATH) { $env:AI_GAME_ADB_PATH } else { 'not configured' }
     $adbSerial = if ($env:AI_GAME_ADB_SERIAL) { $env:AI_GAME_ADB_SERIAL } else { 'not configured' }
-    Write-Host "Executor runtime config: enabled=$executorEnabled; adb=$adbPath; serial=$adbSerial"
+    Write-Host "Executor runtime config: enabled=$executorEnabled; adb=$adbPath; emulator=$adbSerial"
 
     $instance = Get-OwnedConsoleInstance
     if ($null -eq $instance) {
@@ -723,6 +893,7 @@ function Show-Status {
         }
         Write-Host "Version: $($health.version)"
         Write-Host "Recorded runtime mode: $($instance.RuntimeMode)"
+        Write-Host "Recorded data directory: $($instance.DataDir)"
     } catch {
         Write-Host "Console process exists, but readiness could not be confirmed."
         Write-Host "Address: $($instance.Url)"
@@ -730,11 +901,18 @@ function Show-Status {
 }
 
 function Test-Console {
+    & (Join-Path $PSScriptRoot "test-console-data-dir.ps1")
+    if (-not $?) { throw "Console data-directory contract tests failed." }
     if (-not (Test-Path -LiteralPath $PythonExe)) { Install-Backend }
     if (-not (Test-Path -LiteralPath (Join-Path $FrontendRoot "node_modules"))) { Install-Frontend }
 
-    & $PythonExe -m pytest (Join-Path $ProjectRoot "apps\console\tests\backend")
-    if ($LASTEXITCODE -ne 0) { throw "Backend tests failed." }
+    Push-Location $BackendRoot
+    try {
+        & $PythonExe -m pytest "..\tests\backend"
+        if ($LASTEXITCODE -ne 0) { throw "Backend tests failed." }
+    } finally {
+        Pop-Location
+    }
     & npm --prefix $FrontendRoot test
     if ($LASTEXITCODE -ne 0) { throw "Frontend tests failed." }
     Build-Frontend

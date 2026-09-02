@@ -122,9 +122,11 @@ def admin_client(admin_settings: Settings) -> Iterator[TestClient]:
         yield test_client
 
 
-def test_list_leases_lazy_and_empty(admin_client: TestClient, admin_settings: Settings) -> None:
-    """首次请求前不创建数据库文件（懒初始化）；空列表返回 count=0"""
-    assert not _runtime_db(admin_settings).exists()
+def test_list_leases_empty_with_v2_runtime_store(
+    admin_client: TestClient, admin_settings: Settings
+) -> None:
+    """V2 默认组合创建持久化骨架；空 Lease 列表仍返回 count=0。"""
+    assert _runtime_db(admin_settings).exists()
 
     response = admin_client.get(BASE)
     assert response.status_code == 200
@@ -133,7 +135,7 @@ def test_list_leases_lazy_and_empty(admin_client: TestClient, admin_settings: Se
     assert payload["leases"] == []
     assert "now" in payload
 
-    # 首次请求后才初始化数据库
+    # 列表读取不会移除或替换同一份持久化骨架。
     assert _runtime_db(admin_settings).exists()
 
 

@@ -16,7 +16,7 @@ from .application_runtime import (
     Outcome,
     RuntimeClosed,
 )
-from .application_runtime.store import _SQLiteApplicationStore
+from .application_runtime.store import _SQLiteApplicationStore, request_digest
 from .config import Settings
 
 
@@ -82,6 +82,21 @@ class LocalManagedApplicationRuntimeGateway:
 
     def list(self, limit: int = 100) -> list[Any]:
         return self._archive.list(limit)
+
+    def fence_pause_before_start(self, instance_id: str, request_id: str) -> Any:
+        """Persist a real Pause before ApplicationRuntime recovery can queue it."""
+
+        state = self.inspect(instance_id)
+        if state.status in {"paused", "stopped", "completed", "failed"}:
+            return state
+        digest = request_digest(
+            "command",
+            {"instance_id": instance_id, "tag": "Pause", "content": None},
+        )
+        self._archive.accept_command(
+            instance_id, "Pause", None, request_id, digest
+        )
+        return self.inspect(instance_id)
 
     def shutdown(self) -> None:
         with self._lock:

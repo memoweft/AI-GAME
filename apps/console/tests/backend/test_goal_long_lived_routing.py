@@ -228,6 +228,60 @@ def test_u8_finite_and_long_lived_routes_freeze_plan_before_executor_start(
     assert kernel.start_calls == 0
 
 
+def test_long_lived_mobile_binding_persists_stable_identity_for_rotated_transport(
+    tmp_path: Path,
+) -> None:
+    transport_id = "adb:192.168.31.232:46387"
+    canonical_id = "adb:adb-eb646d2b-vJhY31._adb-tls-connect._tcp"
+
+    class LongLivedRuntime:
+        def __init__(self) -> None:
+            self.prepared_target_id = None
+
+        def prepare(self, **options):
+            self.prepared_target_id = options["target_id"]
+            return self.inspect("long-lived-1")
+
+        def activate(self, instance_id):
+            return self.inspect(instance_id)
+
+        def inspect(self, instance_id):
+            return {
+                "instance_id": instance_id,
+                "status": "running",
+                "events": (),
+                "detail": "active",
+                "error_code": None,
+            }
+
+    runtime = LongLivedRuntime()
+    observed_targets: list[str] = []
+    store = SQLiteGoalStore(tmp_path / "goals.db")
+    service = GoalService(
+        store,
+        mobile_runtime=None,
+        mobile_archive=None,
+        kernel_runtime=FakeKernel(store),
+        kernel_binding_kind="runtime_kernel",
+        configured_serial="192.168.31.232:46387",
+        specify_goal=lambda _: _specification("long_lived_application_goal"),
+        long_lived_mobile_runtime=runtime,
+        long_lived_mobile_archive=runtime,
+        discover_mobile_application=lambda target_id: (
+            observed_targets.append(target_id) or "com.android.settings"
+        ),
+        target_id_resolver=lambda target_id: (
+            canonical_id if target_id == transport_id else target_id
+        ),
+    )
+
+    created = service.create(GOAL, "rotated-transport")
+
+    assert created.target_id == canonical_id
+    assert runtime.prepared_target_id == canonical_id
+    assert observed_targets == [canonical_id]
+
+
 def test_u8_unknown_classification_has_no_executor_side_effect(tmp_path: Path) -> None:
     service, store, kernel, application = _service(
         tmp_path, classification="unsupported_future_route"

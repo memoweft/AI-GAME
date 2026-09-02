@@ -34,8 +34,11 @@ def test_rate_soil_internal_navigation_does_not_pollute_launch_memory() -> None:
     )
 
 
-def test_soul_keeps_learning_in_its_owned_application() -> None:
-    assert resolve_mobile_skill_scope("打开 Soul 继续聊天", None) is None
+def test_any_application_can_use_the_generic_experience_scope() -> None:
+    scope = resolve_mobile_skill_scope("打开 Soul 继续聊天", None)
+
+    assert scope is not None
+    assert scope.startswith("generic/exact-goal/v1/")
 
 
 def test_generic_scope_is_stable_but_does_not_contain_the_goal() -> None:

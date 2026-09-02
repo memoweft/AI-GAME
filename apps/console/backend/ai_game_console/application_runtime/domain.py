@@ -378,7 +378,7 @@ class MemoryGate(Protocol):
 class PersistenceProjection(Protocol):
     """Project process-local values into a safe durable/public representation.
 
-    A Soul adapter can keep screenshots, titles, transcripts, and drafts in an
+    An application adapter can keep screenshots, titles, transcripts, and drafts in an
     in-process vault while persisting only hashes and opaque references.  A
     projection may redact representation, but must not change control facts
     such as intent name, receipt acceptance, outcome status, or risk flags.

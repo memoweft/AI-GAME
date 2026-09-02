@@ -1,5 +1,9 @@
 from .domain import (
     ActionTransition,
+    AndroidExperienceCandidate,
+    AndroidExperienceProjection,
+    AndroidPlannerHint,
+    AuthenticatedAndroidScope,
     ExperienceCandidate,
     ExperienceEpisode,
     ExperiencePacket,
@@ -8,12 +12,19 @@ from .domain import (
     RetrievedExperience,
     SceneState,
     ScopeKey,
+    TrustedVerificationAttestation,
+    TrustedVerificationQuery,
+    authenticated_android_scope,
 )
-from .service import ExperienceService
+from .service import ExperienceService, TrustedVerificationAttestationPort
 from .store import SQLiteExperienceStore
 
 __all__ = [
     "ActionTransition",
+    "AndroidExperienceCandidate",
+    "AndroidExperienceProjection",
+    "AndroidPlannerHint",
+    "AuthenticatedAndroidScope",
     "ExperienceCandidate",
     "ExperienceEpisode",
     "ExperiencePacket",
@@ -24,4 +35,8 @@ __all__ = [
     "SQLiteExperienceStore",
     "SceneState",
     "ScopeKey",
+    "TrustedVerificationAttestation",
+    "TrustedVerificationAttestationPort",
+    "TrustedVerificationQuery",
+    "authenticated_android_scope",
 ]

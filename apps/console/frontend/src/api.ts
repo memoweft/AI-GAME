@@ -35,7 +35,6 @@ import type {
   ApplicationInstance,
   ApplicationInstanceListResponse,
   CreateApplicationInstanceRequest,
-  SoulSchedulerStatus,
   GatewayControlCommand,
   GatewayControlResponse,
   GatewayDeviceListResponse,
@@ -47,6 +46,14 @@ import type {
   GoalRun,
   GoalRunListResponse,
   GoalControlAction,
+  AgentSession,
+  AgentSessionEventPage,
+  AgentSessionListResponse,
+  SessionControlAction,
+  SessionDirectiveKind,
+  NeedUserFact,
+  NeedUserFactListResponse,
+  AnswerNeedUserFactRequest,
 } from './types';
 
 /** §16: the Console identifies itself as one stable Gateway client. */
@@ -78,6 +85,7 @@ function writeHeaders(clientId: boolean): Record<string, string> {
 const configuredBase = import.meta.env.VITE_API_BASE?.trim();
 export const API_BASE = (configuredBase || '/api/v1').replace(/\/$/, '');
 export const GOAL_API_BASE = API_BASE.replace(/\/v1$/, '/v2');
+export const SESSION_API_BASE = API_BASE.replace(/\/v1$/, '/v3');
 
 export class ApiError extends Error {
   readonly status: number;
@@ -140,6 +148,41 @@ async function requestAtBase<T>(base: string, path: string, init?: RequestInit):
 }
 
 export const api = {
+  getSessions: (limit = 100) =>
+    requestAtBase<AgentSessionListResponse>(SESSION_API_BASE, `/sessions?limit=${limit}`),
+  getSession: (sessionId: string) =>
+    requestAtBase<AgentSession>(SESSION_API_BASE, `/sessions/${encodeURIComponent(sessionId)}`),
+  createSession: (instruction: string, clientRequestId: string) =>
+    requestAtBase<AgentSession>(SESSION_API_BASE, '/sessions', {
+      method: 'POST',
+      body: JSON.stringify({ instruction, client_request_id: clientRequestId }),
+    }),
+  sendSessionMessage: (sessionId: string, content: string, directiveKind: SessionDirectiveKind = 'add') =>
+    requestAtBase<AgentSession>(SESSION_API_BASE, `/sessions/${encodeURIComponent(sessionId)}/messages`, {
+      method: 'POST',
+      body: JSON.stringify({ content, directive_kind: directiveKind, client_request_id: newIdempotencyKey() }),
+    }),
+  controlSession: (sessionId: string, action: SessionControlAction) =>
+    requestAtBase<AgentSession>(SESSION_API_BASE, `/sessions/${encodeURIComponent(sessionId)}/controls`, {
+      method: 'POST',
+      body: JSON.stringify({ action, client_request_id: newIdempotencyKey() }),
+    }),
+  getSessionEvents: (sessionId: string, after = 0, limit = 50) =>
+    requestAtBase<AgentSessionEventPage>(
+      SESSION_API_BASE,
+      `/sessions/${encodeURIComponent(sessionId)}/events?after=${after}&limit=${limit}`,
+    ),
+  getSessionFactNeeds: (sessionId: string) =>
+    requestAtBase<NeedUserFactListResponse>(
+      SESSION_API_BASE,
+      `/sessions/${encodeURIComponent(sessionId)}/fact-needs`,
+    ),
+  answerFactNeed: (needId: string, body: AnswerNeedUserFactRequest) =>
+    requestAtBase<NeedUserFact>(
+      SESSION_API_BASE,
+      `/fact-needs/${encodeURIComponent(needId)}/answers`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
   getGoals: (limit = 100) =>
     requestAtBase<GoalRunListResponse>(GOAL_API_BASE, `/goals?limit=${limit}`),
   getGoal: (goalId: string) =>
@@ -259,8 +302,6 @@ export const api = {
     }),
   getApplicationInstances: (limit = 100) =>
     request<ApplicationInstanceListResponse>(`/application-instances?limit=${limit}`),
-  getSoulSchedulerStatus: () =>
-    request<SoulSchedulerStatus>('/application-profiles/soul-reply-v1/scheduler'),
   createApplicationInstance: (body: CreateApplicationInstanceRequest) =>
     request<ApplicationInstance>('/application-instances', {
       method: 'POST',

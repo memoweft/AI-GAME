@@ -2,9 +2,26 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from ..agent_runtime.domain import (
+    GoalCoverageDraft,
+    GoalCoverageKind,
+    GoalCriterionDraft,
+    GoalEdgeDraft,
+    GoalEdgeKind,
+    GoalGraphRevisionDraft,
+    GoalNode,
+    GoalNodeDraft,
+    GoalNodeStatus,
+    GoalSchedulingClass,
+    UserDirective,
+    WakeConditionDraft,
+    WakeConditionKind,
+)
+from ..agent_runtime.planner import SessionPlan, _scheduling_class_from_fragment
 from ..goal_families import (
     STZB_DAILY_GOAL_FAMILY,
     is_stzb_discovery_only_goal,
@@ -26,6 +43,401 @@ from .stzb_daily import (
 )
 
 
+class StructuredSessionPlanner:
+    """Qwen role that produces the R2 complete GoalGraph snapshot.
+
+    The role is deliberately isolated from ``StructuredGoalModel``: GoalRun
+    specification remains a per-goal concern, while this class only performs
+    Session intent decomposition.  It has no access to a device or executor.
+    """
+
+    SCHEMA_VERSION = "r2.session-plan.v1"
+
+    def __init__(self, role_model: OpenAICompatibleToolRoleModel) -> None:
+        self._role_model = role_model
+
+    def plan(
+        self,
+        *,
+        session_id: str,
+        directives: tuple[UserDirective, ...] | list[UserDirective],
+        authority_revision: int,
+        graph_revision: int,
+        existing_nodes: tuple[GoalNode, ...] | list[GoalNode] = (),
+        applicable_user_facts: tuple[dict[str, Any], ...] | list[dict[str, Any]] = (),
+    ) -> SessionPlan:
+        if not directives:
+            raise ValueError("SessionPlanner requires directives")
+        directive_index = {item.id: item for item in directives}
+        decoded = self._role_model.call_tool(
+            system=(
+                "你是 AgentSession 的 GoalGraph 规划器。必须调用 record_session_plan。"
+                "输出完整快照而不是部分 delta；保留每条原始指令，不能删改用户意图。"
+                "每个并列或独立结果要求必须变成 goal_draft，或明确 SESSION_POLICY coverage。"
+                "source_fragment 必须是对应 directive 的逐字连续片段。"
+                "每个目标至少一条 required 成功条件；不要选择账号、owner、profile 或执行设备。"
+                "只有原文明确表达‘空闲/没有别的事情时玩游戏’的目标才标 IDLE_ONLY，"
+                "其余一律标 NORMAL；保留既有目标的 scheduling_class。"
+                "IDLE_ONLY 本身是调度策略：不要仅因为‘空闲/没有别的事情’就给它添加 "
+                "BLOCKS 或 UNBLOCKS；只有原文另有明确的完成先后关系时才添加依赖边。"
+                "operation 仅记录 ADD、RETAIN、REVISE、REPRIORITIZE 的审计意图。"
+                "每个目标必须声明 activation_mode：能立即推进的目标是 IMMEDIATE；只有原始"
+                "指令明确要求某个外部事件发生后才执行时才是 EVENT。EVENT 必须给出精确的"
+                "event_type；通知触发使用 NotificationPostedEvent。已知应用包名时填写"
+                "event_application_package，不知道则填 null，禁止猜测。IMMEDIATE 的所有"
+                "event_* 字段必须为 null。"
+                "applicable_user_facts 是服务端筛选后的只读事实；只能引用其中已有 revision_id，"
+                "不能新增、覆盖、确认或猜测用户事实，也不能输出事实写入命令。"
+            ),
+            prompt=json.dumps(
+                {
+                    "schema_version": self.SCHEMA_VERSION,
+                    "base_graph_revision": graph_revision,
+                    "authority_revision": authority_revision,
+                    "directives": [
+                        {
+                            "id": item.id,
+                            "revision": item.revision,
+                            "kind": item.directive_kind.value,
+                            "content": item.content,
+                        }
+                        for item in directives
+                    ],
+                    "existing_goals": [
+                        {
+                            "id": item.id, "title": item.title,
+                            "source_directive_id": item.source_directive_id,
+                            "original_fragment": item.original_fragment,
+                            "status": item.status.value,
+                            "priority": item.explicit_priority,
+                            "scheduling_class": item.scheduling_class.value,
+                        }
+                        for item in existing_nodes
+                    ],
+                    "applicable_user_facts": list(applicable_user_facts),
+                },
+                ensure_ascii=False,
+            ),
+            observations=(),
+            tool_name="record_session_plan",
+            description="Freeze a complete, coverage-preserving GoalGraph plan",
+            parameters=_session_plan_schema(),
+            max_tokens=3_072,
+            reasoning_effort="low",
+            reasoning_budget=0,
+        )
+        return _session_plan_from_decoded(
+            decoded,
+            directive_index=directive_index,
+            authority_revision=authority_revision,
+            source_directive_id=directives[-1].id,
+            existing_nodes={item.id: item for item in existing_nodes},
+            base_graph_revision=graph_revision,
+            session_id=session_id,
+        )
+
+
+def _session_plan_schema() -> dict[str, Any]:
+    """Forced tool schema for the minimum complete R2 snapshot contract."""
+
+    text = {"type": "string", "minLength": 1}
+    # Existing R1 nodes are UUIDs and may begin with a digit. The model must
+    # be able to RETAIN or REVISE those durable identities verbatim.
+    ref = {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"}
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "schema_version": {"type": "string", "enum": [StructuredSessionPlanner.SCHEMA_VERSION]},
+            "session_interpretation": text,
+            "revision_reason": text,
+            "goal_drafts": {
+                "type": "array", "minItems": 1, "maxItems": 64,
+                "items": {
+                    "type": "object", "additionalProperties": False,
+                    "properties": {
+                        "goal_ref": ref, "title": text, "execution_goal": text,
+                        "source_directive_id": text, "source_fragment": text,
+                        "operation": {"type": "string", "enum": ["ADD", "RETAIN", "REVISE", "REPRIORITIZE"]},
+                        "goal_family": {"type": ["string", "null"]},
+                        "application_hint": {"type": ["string", "null"]},
+                        "account_hint": {"type": ["string", "null"]},
+                        "priority": {"type": ["integer", "null"], "minimum": -1000, "maximum": 1000},
+                        "scheduling_class": {"type": ["string", "null"], "enum": ["NORMAL", "IDLE_ONLY", None]},
+                        "activation_mode": {"type": "string", "enum": ["IMMEDIATE", "EVENT"]},
+                        "event_type": {
+                            "type": ["string", "null"],
+                            "enum": [
+                                "NotificationPostedEvent",
+                                "ForegroundApplicationChangedEvent",
+                                "BodyEvent",
+                                None,
+                            ],
+                        },
+                        "event_application_package": {"type": ["string", "null"]},
+                        "event_person_hint": {"type": ["string", "null"]},
+                        "event_conversation_hint": {"type": ["string", "null"]},
+                    },
+                    "required": [
+                        "goal_ref", "title", "execution_goal", "source_directive_id",
+                        "source_fragment", "operation", "activation_mode", "event_type",
+                        "event_application_package", "event_person_hint",
+                        "event_conversation_hint",
+                    ],
+                },
+            },
+            "success_criteria": {
+                "type": "array", "minItems": 1, "maxItems": 256,
+                "items": {
+                    "type": "object", "additionalProperties": False,
+                    "properties": {
+                        "goal_ref": ref, "description": text,
+                        "evidence_requirement": text, "required": {"type": "boolean"},
+                    },
+                    "required": ["goal_ref", "description", "evidence_requirement", "required"],
+                },
+            },
+            "coverage_map": {
+                "type": "array", "minItems": 1, "maxItems": 256,
+                "items": {
+                    "type": "object", "additionalProperties": False,
+                    "properties": {
+                        "source_directive_id": text, "source_fragment": text,
+                        "target_kind": {"type": "string", "enum": ["GOAL", "SESSION_POLICY"]},
+                        "target_ref": text, "session_policy": {"type": ["string", "null"]},
+                    },
+                    "required": ["source_directive_id", "source_fragment", "target_kind", "target_ref", "session_policy"],
+                },
+            },
+            "goal_edges": {
+                "type": "array", "maxItems": 256,
+                "items": {
+                    "type": "object", "additionalProperties": False,
+                    "properties": {
+                        "from_goal_ref": ref, "to_goal_ref": ref,
+                        "kind": {"type": "string", "enum": ["BLOCKS", "UNBLOCKS", "CONTRIBUTES_TO", "REPLACES", "SPLITS_FROM", "SHARES_CONTEXT_WITH"]},
+                        "evidence_ref": {"type": ["string", "null"]},
+                    },
+                    "required": ["from_goal_ref", "to_goal_ref", "kind", "evidence_ref"],
+                },
+            },
+        },
+        "required": ["schema_version", "session_interpretation", "revision_reason", "goal_drafts", "success_criteria", "coverage_map", "goal_edges"],
+    }
+
+
+def _session_plan_from_decoded(
+    decoded: dict[str, Any], *, directive_index: dict[str, UserDirective],
+    authority_revision: int, source_directive_id: str,
+    existing_nodes: dict[str, GoalNode],
+    base_graph_revision: int = 0,
+    session_id: str | None = None,
+) -> SessionPlan:
+    if decoded.get("schema_version") != StructuredSessionPlanner.SCHEMA_VERSION:
+        raise ValueError("invalid session planner schema version")
+    raw_goals = decoded.get("goal_drafts")
+    raw_criteria = decoded.get("success_criteria")
+    raw_coverage = decoded.get("coverage_map")
+    raw_edges = decoded.get("goal_edges")
+    if not all(isinstance(item, list) for item in (raw_goals, raw_criteria, raw_coverage, raw_edges)):
+        raise ValueError("invalid session planner collections")
+    nodes: list[GoalNodeDraft] = []
+    goal_texts: dict[str, str] = {}
+    operations: list[dict[str, str]] = []
+    goal_id_by_ref: dict[str, str] = {}
+    for item in raw_goals:
+        if not isinstance(item, dict):
+            raise ValueError("invalid session planner goal draft")
+        goal_ref = _planner_ref(item.get("goal_ref"), "goal_ref")
+        directive = _planner_directive(item.get("source_directive_id"), directive_index)
+        fragment = _planner_fragment(item.get("source_fragment"), directive)
+        title = _planner_text(item.get("title"), "goal title")
+        execution_goal = _planner_text(item.get("execution_goal"), "execution goal")
+        operation = item.get("operation")
+        if operation not in {"ADD", "RETAIN", "REVISE", "REPRIORITIZE"}:
+            raise ValueError("invalid session planner operation")
+        durable_goal_id = (
+            str(uuid.uuid5(uuid.NAMESPACE_URL, f"ai-game:session:{session_id}:goal:{goal_ref}"))
+            if operation == "ADD" and session_id is not None
+            else goal_ref
+        )
+        if goal_ref in goal_id_by_ref:
+            raise ValueError("duplicate session planner goal_ref")
+        goal_id_by_ref[goal_ref] = durable_goal_id
+        priority = item.get("priority")
+        if priority is not None and (isinstance(priority, bool) or not isinstance(priority, int)):
+            raise ValueError("invalid session planner priority")
+        existing_goal = existing_nodes.get(goal_ref)
+        node_operation = {
+            "ADD": "CREATE", "RETAIN": "KEEP", "REVISE": "UPDATE", "REPRIORITIZE": "UPDATE",
+        }[operation]
+        if node_operation != "CREATE" and existing_goal is None:
+            raise ValueError("planner operation references an unknown existing goal")
+        raw_scheduling_class = item.get("scheduling_class")
+        if raw_scheduling_class is None:
+            scheduling_class = (
+                existing_goal.scheduling_class
+                if existing_goal is not None
+                else _scheduling_class_from_fragment(fragment)
+            )
+        else:
+            try:
+                scheduling_class = GoalSchedulingClass(raw_scheduling_class)
+            except ValueError as error:
+                raise ValueError("invalid session planner scheduling_class") from error
+        activation_mode = item.get("activation_mode")
+        event_fields = {
+            "event_type": _optional_text(item.get("event_type")),
+            "application_package": _optional_text(
+                item.get("event_application_package")
+            ),
+            "person_hint": _optional_text(item.get("event_person_hint")),
+            "conversation_hint": _optional_text(
+                item.get("event_conversation_hint")
+            ),
+        }
+        initial_wake = None
+        if activation_mode == "EVENT":
+            if node_operation != "CREATE":
+                raise ValueError("only new goals may declare an initial event wait")
+            event_type = event_fields["event_type"]
+            if event_type not in {
+                "NotificationPostedEvent",
+                "ForegroundApplicationChangedEvent",
+                "BodyEvent",
+            }:
+                raise ValueError("event-activated goal requires a supported event_type")
+            initial_wake = WakeConditionDraft(
+                kind=WakeConditionKind.EVENT,
+                matcher={
+                    key: value
+                    for key, value in event_fields.items()
+                    if value is not None
+                },
+            )
+        elif activation_mode == "IMMEDIATE":
+            if any(value is not None for value in event_fields.values()):
+                raise ValueError("immediate goal cannot declare event matcher fields")
+        else:
+            raise ValueError("invalid session planner activation_mode")
+        nodes.append(GoalNodeDraft(
+            id=durable_goal_id, title=title, source_directive_id=directive.id,
+            original_fragment=fragment, status=GoalNodeStatus.PLANNED,
+            goal_family=_optional_text(item.get("goal_family")),
+            application_hint=_optional_text(item.get("application_hint")),
+            account_hint=_optional_text(item.get("account_hint")), explicit_priority=priority,
+            scheduling_class=scheduling_class,
+            existing_goal_id=existing_goal.id if existing_goal is not None else None,
+            operation=node_operation, execution_goal=execution_goal,
+            initial_wake=initial_wake,
+        ))
+        goal_texts[durable_goal_id] = execution_goal
+        operations.append({"operation": operation, "goal_ref": durable_goal_id})
+    goal_refs = set(goal_id_by_ref)
+    criteria: list[GoalCriterionDraft] = []
+    required_by_goal: set[str] = set()
+    for item in raw_criteria:
+        if not isinstance(item, dict):
+            raise ValueError("invalid session planner criterion")
+        goal_ref = _planner_ref(item.get("goal_ref"), "criterion goal_ref")
+        if goal_ref not in goal_refs:
+            raise ValueError("criterion references an unknown goal")
+        required = item.get("required")
+        if not isinstance(required, bool):
+            raise ValueError("criterion required must be boolean")
+        if required:
+            required_by_goal.add(goal_id_by_ref[goal_ref])
+        criteria.append(GoalCriterionDraft(
+            goal_id=goal_id_by_ref[goal_ref], description=_planner_text(item.get("description"), "criterion description"),
+            evidence_requirement=_planner_text(item.get("evidence_requirement"), "criterion evidence"),
+            required=required,
+        ))
+    if required_by_goal != set(goal_texts):
+        raise ValueError("every planned goal requires a required success criterion")
+    coverage: list[GoalCoverageDraft] = []
+    for item in raw_coverage:
+        if not isinstance(item, dict):
+            raise ValueError("invalid session planner coverage")
+        directive = _planner_directive(item.get("source_directive_id"), directive_index)
+        kind = item.get("target_kind")
+        target_ref = _planner_text(item.get("target_ref"), "coverage target_ref")
+        if kind == "GOAL":
+            if target_ref not in goal_refs:
+                raise ValueError("coverage references an unknown goal")
+            coverage.append(GoalCoverageDraft(
+                source_directive_id=directive.id,
+                original_fragment=_planner_fragment(item.get("source_fragment"), directive),
+                coverage_kind=GoalCoverageKind.GOAL,
+                target_goal_id=goal_id_by_ref[target_ref],
+            ))
+        elif kind == "SESSION_POLICY":
+            policy = _planner_text(item.get("session_policy"), "session policy")
+            coverage.append(GoalCoverageDraft(
+                source_directive_id=directive.id,
+                original_fragment=_planner_fragment(item.get("source_fragment"), directive),
+                coverage_kind=GoalCoverageKind.SESSION_POLICY, session_policy=policy,
+            ))
+        else:
+            raise ValueError("invalid coverage kind")
+    edges: list[GoalEdgeDraft] = []
+    for item in raw_edges:
+        if not isinstance(item, dict):
+            raise ValueError("invalid session planner edge")
+        from_ref = _planner_ref(item.get("from_goal_ref"), "edge from_goal_ref")
+        to_ref = _planner_ref(item.get("to_goal_ref"), "edge to_goal_ref")
+        if from_ref not in goal_refs or to_ref not in goal_refs:
+            raise ValueError("edge references an unknown goal")
+        try:
+            edge_kind = GoalEdgeKind(item.get("kind"))
+        except ValueError as error:
+            raise ValueError("invalid session planner edge kind") from error
+        edges.append(GoalEdgeDraft(
+            goal_id_by_ref[from_ref], goal_id_by_ref[to_ref], edge_kind,
+            _optional_text(item.get("evidence_ref")),
+        ))
+    return SessionPlan(
+        revision=GoalGraphRevisionDraft(
+            authority_revision=authority_revision, source_directive_id=source_directive_id,
+            reason=_planner_text(decoded.get("revision_reason"), "revision reason"),
+            base_graph_revision=base_graph_revision,
+        ),
+        nodes=tuple(nodes), edges=tuple(edges), criteria=tuple(criteria), coverage=tuple(coverage),
+        goal_text_by_id=goal_texts, operations=tuple(operations),
+        session_interpretation=_planner_text(decoded.get("session_interpretation"), "session interpretation"),
+    )
+
+
+def _planner_text(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"invalid {label}")
+    return value.strip()
+
+
+def _optional_text(value: Any) -> str | None:
+    return _planner_text(value, "optional planner text") if isinstance(value, str) and value.strip() else None
+
+
+def _planner_ref(value: Any, label: str) -> str:
+    result = _planner_text(value, label)
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", result):
+        raise ValueError(f"invalid {label}")
+    return result
+
+
+def _planner_directive(value: Any, directives: dict[str, UserDirective]) -> UserDirective:
+    directive = directives.get(_planner_text(value, "source directive id"))
+    if directive is None:
+        raise ValueError("planner references an unknown directive")
+    return directive
+
+
+def _planner_fragment(value: Any, directive: UserDirective) -> str:
+    fragment = _planner_text(value, "source fragment")
+    if fragment not in directive.content:
+        raise ValueError("planner source fragment is not verbatim directive text")
+    return fragment
+
+
 class StructuredGoalModel:
     """Qwen goal-level roles over the same provider-neutral forced-tool transport."""
 
@@ -34,7 +446,7 @@ class StructuredGoalModel:
 
     def specify(self, original_goal: str) -> GoalSpecificationDraft:
         if normalize_goal_family(original_goal) == STZB_DAILY_GOAL_FAMILY:
-            # U5 owns a stricter contract than a generic free-form extraction:
+            # This known goal family needs stricter handling than generic extraction:
             # discover the complete current-day checklist, prove each visible
             # outcome, then independently reread that same frozen checklist.
             # Freezing this known family deterministically prevents a malformed
@@ -185,7 +597,6 @@ class StructuredGoalModel:
 
     def answer_language(self, original_goal: str) -> str:
         decoded = self._role_model.call_tool(
-            # [constraint-source: PRODUCT_SPEC; ref: U8 OUT OF SCOPE and D10]
             system=(
                 "你是本地语言结果能力。必须调用 record_language_result。"
                 "只完成用户要求的纯语言任务；不得声称访问了设备、账号、实时网络或外部世界。"
@@ -218,25 +629,28 @@ class StructuredGoalModel:
         """Assess login/interaction readiness from the persisted pre-action frame.
 
         The package identity comes from Android device state; this visual role
-        only decides whether the current frame shows an account-scoped,
-        interaction-ready application surface.  It cannot select an account,
-        owner, or physical action.
+        only decides whether the current frame shows an interaction-ready
+        application surface and, when the application has an account concept,
+        an authenticated session.  It cannot select an account, owner, or
+        physical action.
         """
 
         decoded = self._role_model.call_tool(
-            # [constraint-source: USER_DECISION; ref: D22 U8 readiness before action]
             system=(
                 "你是移动应用只读 readiness 验证层。必须调用 "
                 "record_application_readiness，禁止输出坐标、点击、文本输入或任何设备动作。"
-                "只根据这一张当前截图判断：目标应用是否已进入可交互业务界面，以及是否"
-                "显示登录后的账号会话状态，并核对画面是否与原始目标点名或描述的应用一致。"
+                "只根据这一张当前截图判断：目标应用是否已进入可交互业务界面，并核对画面"
+                "是否与原始目标点名或描述的应用一致。必须明确该目标应用是否存在账号登录"
+                "概念：社交、通信、购物等账号型应用 authentication_required=true；只有"
+                "Android 系统设置等本身没有账号会话概念的系统界面才可判 false。要求登录"
+                "时还必须判断画面是否显示登录后的账号会话状态。"
                 "登录页、注册页、验证码页、权限阻塞、断线遮罩、空白/黑屏、应用不匹配或"
                 "无法读清时都不能判 ready。不得猜测具体账号身份。"
             ),
             prompt=(
                 f"原始长期目标：{original_goal}\n"
                 f"Android 当前前台应用：{expected_application_id}\n"
-                "给出当前画面的 readiness、登录后会话判断和简短可复核证据。"
+                "给出当前画面的 readiness、是否要求登录、登录后会话判断和简短可复核证据。"
             ),
             observations=(observation,),
             tool_name="record_application_readiness",
@@ -246,6 +660,7 @@ class StructuredGoalModel:
                 "additionalProperties": False,
                 "properties": {
                     "ready": {"type": "boolean"},
+                    "authentication_required": {"type": "boolean"},
                     "authenticated": {"type": "boolean"},
                     "application_matches_goal": {"type": "boolean"},
                     "blocking_state": {
@@ -264,6 +679,7 @@ class StructuredGoalModel:
                 },
                 "required": [
                     "ready",
+                    "authentication_required",
                     "authenticated",
                     "application_matches_goal",
                     "blocking_state",
@@ -275,12 +691,14 @@ class StructuredGoalModel:
             reasoning_budget=0,
         )
         ready = decoded.get("ready")
+        authentication_required = decoded.get("authentication_required")
         authenticated = decoded.get("authenticated")
         application_matches_goal = decoded.get("application_matches_goal")
         blocking_state = decoded.get("blocking_state")
         evidence = decoded.get("evidence")
         if (
             not isinstance(ready, bool)
+            or not isinstance(authentication_required, bool)
             or not isinstance(authenticated, bool)
             or not isinstance(application_matches_goal, bool)
             or blocking_state
@@ -297,14 +715,16 @@ class StructuredGoalModel:
             or not evidence.strip()
         ):
             raise ValueError("invalid application readiness response")
+        authentication_satisfied = authenticated or not authentication_required
         if ready and (
-            not authenticated
+            not authentication_satisfied
             or not application_matches_goal
             or blocking_state != "none"
         ):
             raise ValueError("application readiness response is contradictory")
         return {
             "ready": ready,
+            "authentication_required": authentication_required,
             "authenticated": authenticated,
             "application_matches_goal": application_matches_goal,
             "blocking_state": blocking_state,

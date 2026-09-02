@@ -14,12 +14,18 @@ class ActionExecutionResult:
     error: ExecutionError | None  # 错误详情
     started_at: str
     finished_at: str
+    # These opaque references are set only by the R4 DeviceBody bridge.  They
+    # deliberately carry no receipt verdict or text payload.
+    body_command_id: str | None = None
+    body_receipt_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.accepted and self.error is not None:
             raise ValueError("accepted execution cannot have error")
         if not self.accepted and self.error is None:
             raise ValueError("rejected execution must have error")
+        if (self.body_command_id is None) != (self.body_receipt_id is None):
+            raise ValueError("body command and receipt references must be paired")
         _utc_timestamp(self.started_at, "result.started_at")
         _utc_timestamp(self.finished_at, "result.finished_at")
 
@@ -91,6 +97,38 @@ class ActionExecutorPort(Protocol):
         timeout_ms: int = 5000,
     ) -> ActionExecutionResult:
         """执行主页键"""
+        ...
+
+    def execute_open_app(
+        self,
+        device_id: str,
+        package: str,
+        component: str | None = None,
+        timeout_ms: int = 5000,
+    ) -> ActionExecutionResult:
+        """Launch an application; transport success is not foreground verification."""
+        ...
+
+    def execute_recents(
+        self, device_id: str, timeout_ms: int = 5000
+    ) -> ActionExecutionResult:
+        """Open Android recents/app switcher."""
+        ...
+
+    def execute_input_text_unicode(
+        self,
+        device_id: str,
+        text: str,
+        target_hint: str | None = None,
+        timeout_ms: int = 5000,
+    ) -> ActionExecutionResult:
+        """Send Unicode text; a separate read-back observation verifies it."""
+        ...
+
+    def execute_capture_snapshot(
+        self, device_id: str, timeout_ms: int = 5000
+    ) -> ActionExecutionResult:
+        """Request a DeviceBody snapshot capture, not a success verdict."""
         ...
 
 

@@ -1,5 +1,6 @@
 from .domain import (
     ArtifactRef,
+    BodySnapshotCorrelation,
     ChannelAvailability,
     ConnectionState,
     ConsistencyStatus,
@@ -17,6 +18,7 @@ from .domain import (
 
 __all__ = [
     "ArtifactRef",
+    "BodySnapshotCorrelation",
     "ChannelAvailability",
     "ConnectionState",
     "ConsistencyStatus",

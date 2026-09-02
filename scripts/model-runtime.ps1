@@ -11,11 +11,11 @@ param(
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $resolvedRoot = (Resolve-Path -LiteralPath $projectRoot).Path
-if ($resolvedRoot -ne 'F:\AI-GAME') {
+if ($resolvedRoot -ne 'D:\AIProjects\AIGame\Repository') {
     throw "Unexpected project root: $resolvedRoot"
 }
 
-$wslScriptRoot = '/mnt/f/AI-GAME/scripts/wsl'
+$wslScriptRoot = '/mnt/d/AIProjects/AIGame/Repository/scripts/wsl'
 $scriptName = switch ($Action) {
     'bootstrap' { 'bootstrap-gui-model.sh' }
     'start' { 'start-gui-model.sh' }

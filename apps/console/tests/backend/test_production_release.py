@@ -41,14 +41,7 @@ def _release_project(root: Path) -> Path:
         "停止控制台.cmd": "@echo off\n",
         "README.md": "# AI-GAME\n",
     }
-    for document in (
-        "01_PRODUCT_SPEC.md",
-        "04_AUTONOMY_AND_LEARNING.md",
-        "06_IMPLEMENTATION_ROADMAP.md",
-        "07_ACCEPTANCE_AND_EVIDENCE.md",
-        "09_DECISIONS_AND_OPEN_QUESTIONS.md",
-        "work-orders/U9_PRODUCTION_HARDENING.md",
-    ):
+    for document in ("VISION.md", "PROJECT_MAP.md"):
         files[f"docs/product/{document}"] = f"# {document}\n"
     for relative, content in files.items():
         path = project / relative

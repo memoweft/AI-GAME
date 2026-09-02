@@ -165,6 +165,34 @@ class AdbGuiExecutor:
             detail="ADB 已接受该单原子输入；目标界面结果尚未验证。",
         )
 
+    def probe_unicode_text_transport(self) -> str:
+        """Return a non-sensitive capability code for the Unicode transport.
+
+        Ordinary ``adb shell input text`` is deliberately not treated as a
+        Unicode transport.  MuMu's dedicated CLI is a separate, optional
+        transport; a successful probe says nothing about UI text read-back.
+        """
+
+        probe = self.probe()
+        if not probe.ready:
+            return "temporarily_unavailable"
+        mumu_cli = self._mumu_cli_path()
+        if mumu_cli is None:
+            return "unsupported"
+        try:
+            info_result = self._run((str(mumu_cli), "info", "--vmindex", "all"))
+        except subprocess.TimeoutExpired:
+            return "temporarily_unavailable"
+        except (OSError, subprocess.SubprocessError):
+            return "temporarily_unavailable"
+        if info_result.returncode != 0:
+            return "temporarily_unavailable"
+        try:
+            _resolve_mumu_vm(info_result.stdout or "", self.serial or "")
+        except RuntimeError:
+            return "unsupported"
+        return "ready"
+
     def _execute_unicode_text(self, text: str) -> ActionTransportResult:
         mumu_cli = self._mumu_cli_path()
         if mumu_cli is None:
@@ -254,7 +282,24 @@ class AdbGuiExecutor:
         # Schema validation and the service boundary establish the action shape.
         # Keep the construction here explicit so the adapter can never execute an
         # arbitrary shell fragment supplied by a caller.
-        prefix = (str(self.adb_path.resolve()), "-s", self.serial or "", "shell", "input")
+        adb_prefix = (str(self.adb_path.resolve()), "-s", self.serial or "", "shell")
+        prefix = (*adb_prefix, "input")
+        if action.action == "open_app":
+            package = _validated_android_package(action.package)
+            component = _validated_android_component(package, action.component)
+            if component is not None:
+                return (*adb_prefix, "am", "start", "-n", component)
+            return (
+                *adb_prefix,
+                "monkey",
+                "-p",
+                package,
+                "-c",
+                "android.intent.category.LAUNCHER",
+                "1",
+            )
+        if action.action == "recents":
+            return (*prefix, "keyevent", "KEYCODE_APP_SWITCH")
         if action.action == "tap":
             if (
                 isinstance(action.x, bool)
@@ -431,3 +476,35 @@ def _validated_duration(value: int | None) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 10_000:
         raise ValueError("invalid gesture duration")
     return value
+
+
+def _validated_android_package(value: str | None) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 255
+        or value.startswith("-")
+        or any(character.isspace() or ord(character) < 33 for character in value)
+        or any(character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_." for character in value)
+    ):
+        raise ValueError("invalid Android package")
+    return value
+
+
+def _validated_android_component(package: str, value: str | None) -> str | None:
+    if value is None:
+        return None
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 512
+        or value.startswith("-")
+        or any(character.isspace() or ord(character) < 33 for character in value)
+        or any(character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.$/" for character in value)
+    ):
+        raise ValueError("invalid Android component")
+    component = value if "/" in value else f"{package}/{value}"
+    component_package, _, component_class = component.partition("/")
+    if component_package != package or not component_class:
+        raise ValueError("component must belong to requested Android package")
+    return component
