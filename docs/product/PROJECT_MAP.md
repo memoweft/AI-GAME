@@ -52,6 +52,6 @@ DSH session、turn 和 tool call 只记录来源；bearer token 只认证请求�
 
 - WeftMate 尚未管理本服务生命周期；
 - 通用 runner 的完整真实模拟器候选需要在宿主生命周期之后重新形成；
+- 从一句话澄清、任务单确认到长期执行和第二轮经验复用的全链路尚未形成产品证据；
 - 全局任务中心和 verified frame 不能仅凭已有组件或 HTTP 测试宣称可用；
 - 当前测试/代码基础不等于 owner dogfood、安装包或发布 `PASS`。
-

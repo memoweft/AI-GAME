@@ -1,6 +1,6 @@
 # AI-GAME 仓库规则
 
-本仓库当前处于“项目修复阶段”。本文件只保存长期有效边界，不保存阶段流水、任务编号、代理角色、Work Order（工单）或测试计数。
+本仓库的项目修复基线已经建立，当前没有自动推进的实施阶段。本文件只保存长期有效边界，不保存阶段流水、任务编号、代理角色、Work Order（工单）或测试计数。
 
 ## 先读
 
@@ -9,7 +9,8 @@
 1. `docs/product/VISION.md`；
 2. `docs/product/PROJECT_MAP.md`；
 3. `docs/product/EXECUTION_CONTRACT.md`；
-4. 相关代码、测试和 `git status --short --branch`。
+4. `docs/product/ACCEPTANCE.md`；
+5. 相关代码、测试和 `git status --short --branch`。
 
 用户当前指令优先。旧 U/R/Phase、Stage 4C、归档文档和历史聊天只能用于调查，不能自动恢复施工。
 

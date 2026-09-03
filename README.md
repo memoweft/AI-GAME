@@ -5,13 +5,14 @@ AI-GAME 是 WeftMate / DeepSeek Harness（DSH，执行智能体运行时）的�
 - [产品愿景](docs/product/VISION.md)
 - [当前代码地图](docs/product/PROJECT_MAP.md)
 - [V2 执行契约](docs/product/EXECUTION_CONTRACT.md)
+- [通用 Android 长任务验收标准](docs/product/ACCEPTANCE.md)
 
 ## 当前状态
 
 - 正式方向只使用 Android 模拟器和通用 `android_ui_agent/1`。
 - 稳定 owner pair（所有者二元组）、canonical Task（权威任务）、模拟器 Profile、常驻调度、观察/动作/验证、恢复和 scoped experience（有范围经验）已形成工程基础。
 - 旧真机、Android Companion、无线 ADB、ADB reverse、固定 Settings-only runner（仅设置页执行器）和旧阶段治理已退出活动路线。
-- 当前不属于产品所有者 dogfood（亲自试用）候选。WeftMate 还没有管理 AI-GAME 生命周期，因此用户界面不发布依赖本服务的全局入口。
+- 项目修复基线已经建立，但当前仍不属于产品所有者 dogfood（亲自试用）候选。首个代表性验收场景已经冻结；WeftMate 还没有管理 AI-GAME 生命周期，因此用户界面不发布依赖本服务的全局入口。
 
 ## 开发诊断
 
