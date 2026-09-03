@@ -1,8 +1,8 @@
 # AI-GAME 愿景
 
-> 项目修复基线已经建立，当前没有自动推进的实施阶段。愿景是长期产品方向；历史任务流水、旧阶段名和单次验证结论不再写入本文，也不得据此自动继续施工。
+> 当前处于干净、可控的产品基线，没有自动推进的实施阶段。本文只描述长期产品方向。
 
-> 跨仓产品关系见 `D:\AIProjects\WeftMate\Repository\docs\AI-GAME-AUTONOMOUS-MOBILE-TASKS.md`。旧“专用真机、一次窄调用”描述已经退出当前路线。
+> 跨仓产品关系见 `D:\AIProjects\WeftMate\Repository\docs\AI-GAME-AUTONOMOUS-MOBILE-TASKS.md`。
 
 > 通用能力的首个代表性 black-box acceptance（黑盒验收）见 `docs/product/ACCEPTANCE.md`。Soul 在该文档中只是第三方 Android 测试环境，不是产品方向或专用实现。
 
@@ -67,16 +67,16 @@ AI-GAME 可以为手机任务维护局部计划、时间窗、对象/会话子�
 
 设备状态、截图、动作记录、恢复点、运行证据和手机任务经验默认留在本机。AI-GAME 不把外部模型响应当作设备结果，也不绕过本地观察和验证。WeftMate、Harness 与 MemoWeft 各自的数据职责由它们的仓库定义，AI-GAME 不复制其用户会话或个人世界。
 
-后续开发、验证和 dogfood（亲自试用）只使用 Android 模拟器。旧真机、Companion 真机安装、无线 ADB、ADB reverse 和 Stage 4C epoch 只作历史证据，不再恢复施工。
+后续开发、验证和 dogfood（亲自试用）只使用 Android 模拟器。
 
-## 不再作为项目方向的内容
+## 产品排除项
 
 - AI-GAME 自己的普通用户聊天入口、人格或独立产品工作台；
 - 与 Harness 重复的通用用户会话、手机领域之外的跨工具规划和最终回复能力；
 - 与 MemoWeft 重复的个人长期记忆；
 - 让用户直接处理 AI-GAME 内部 Goal（目标）、Profile（能力配置）或运行模式；这些能力应由 WeftMate 以产品语言管理；
-- Soul、游戏学习、Gateway 或 Legacy MobileTask 的独立产品入口；其中可复用的长期任务、事件、经验和恢复能力可以进入通用手机任务内核；
-- U、R、Phase 等阶段路线、Work Order（工单）、Stage Brief（阶段简报）、固定验收报告、代理任务卡和项目治理控制面；
-- 为满足旧文档而继续实现、测试或保留一个功能。
+- 为某个 App 建立专用顶层产品、固定成功脚本或第二套控制面；
+- 阶段流水、Work Order（工单）、固定验收报告、代理任务卡和项目治理控制面；
+- 从已删除文档、历史记录或旧实现反推当前需求。
 
 项目是否继续做一件事，只看它是否让“用户在 WeftMate 中与 Harness 对话，并可靠使用手机能力”更真实、更简单或更可靠。

@@ -30,7 +30,7 @@ DSH 拥有对话、session、turn、tool call、权限、审批和持久工具�
 | `GET/POST` | `/device-profiles...` | owner-scoped 模拟器 Profile 管理 |
 | `GET` | `/tasks/{task_id}/experience` | 安全经验投影 |
 
-新 submit 只接受用户目标、DSH 来源身份、选定的模拟器 Profile 和 host 已完成的 authorization mode（授权模式）。受信 host 冻结唯一正式 runner：`android_ui_agent/1`。未知 runner 或旧 `emulator_settings_v1` 不进入新任务。
+新 submit 只接受用户目标、DSH 来源身份、选定的模拟器 Profile 和 host 已完成的 authorization mode（授权模式）。受信 host 冻结唯一正式 runner：`android_ui_agent/1`；其他 runner 不进入新任务。
 
 ## 认证
 
@@ -60,5 +60,4 @@ capability 只用于认证，owner IDs 来自受信 WeftMate host context（宿�
 
 ## V1 边界
 
-`/api/execution/v1` 只为既有记录的读取、诊断和迁移保留。它的历史 `phone_execution`、Companion policy 或 Settings-only 语义不得用于创建新正式任务，也不得成为 WeftMate 的 fallback（后备路径）。
-
+`/api/execution/v1` 只为既有记录的读取、诊断和迁移保留。它不能创建或控制新正式任务，也不得成为 WeftMate 的 fallback（后备路径）。
