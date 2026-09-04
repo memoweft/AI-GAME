@@ -25,7 +25,9 @@ MANAGED_MANIFEST_NAME = "managed-runtime-manifest.json"
 MANAGED_MANIFEST_SCHEMA_VERSION = 1
 MANAGED_RUNTIME_NAME = "ai-game-managed-runtime"
 _FORBIDDEN_PARTS = {"tests", "test", "runtime", "logs", "__pycache__"}
-_ABSOLUTE_MACHINE_PATH = re.compile(rb"(?i)(?:[a-z]:[\\/]|file:///+[a-z]:/)")
+# A drive letter must not be the final character of an URL scheme (for example
+# the ``s:/`` fragment in ``https://pypi.org``).
+_ABSOLUTE_MACHINE_PATH = re.compile(rb"(?i)(?:(?<![a-z0-9+.-])[a-z]:[\\/]|file:///+[a-z]:/)")
 _MANIFEST_KEYS = {
     "schema_version", "artifact_kind", "source", "managed_protocol_version",
     "execution_api_version", "platform", "architecture", "entry",
