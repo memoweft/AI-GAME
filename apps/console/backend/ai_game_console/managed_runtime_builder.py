@@ -10,6 +10,7 @@ import os
 import shutil
 import subprocess
 import sys
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -63,6 +64,7 @@ def build_managed_runtime(project_root: Path, output_dir: Path) -> ManagedRuntim
     if completed.returncode != 0 or not destination.is_dir():
         raise ManagedRuntimeBuildError("PyInstaller did not produce the managed runtime")
     try:
+        _scrub_machine_build_metadata(destination)
         manifest = _write_manifest(destination, root)
         verified = verify_managed_runtime(destination, source_root=root)
         if not verified["verified"]:
@@ -156,16 +158,30 @@ def _validate_manifest(manifest: Any) -> None:
 def _assert_no_forbidden_content(
     root: Path, manifest: dict[str, Any], *, source_root: Path | None,
 ) -> None:
-    source_root_bytes = (
-        str(Path(source_root).resolve()).encode("utf-8") if source_root is not None else b""
-    )
+    source_root_bytes: tuple[bytes, ...] = ()
+    if source_root is not None:
+        normalized = Path(source_root).resolve().as_posix()
+        source_root_bytes = tuple({
+            str(Path(source_root).resolve()).encode("utf-8"), normalized.encode("utf-8"),
+            f"file:///{normalized}".encode("utf-8"),
+            urllib.parse.quote(normalized, safe="/:").encode("utf-8"),
+        })
     for item in manifest["files"]:
         path = item["path"]
         parts = set(Path(path).parts)
         if parts & _FORBIDDEN_PARTS or path.endswith((".sqlite", ".db", ".log", ".pyc")):
             raise ManagedRuntimeBuildError("managed runtime contains forbidden runtime or test content")
-        if source_root_bytes and source_root_bytes in (root / path).read_bytes():
+        contents = (root / path).read_bytes()
+        if any(marker in contents for marker in source_root_bytes):
             raise ManagedRuntimeBuildError("managed runtime contains a machine absolute source path")
+
+
+def _scrub_machine_build_metadata(root: Path) -> None:
+    """Remove pip/uv editable-install traces before the closure is declared."""
+
+    for path in root.rglob("*"):
+        if path.is_file() and path.name in {"direct_url.json", "uv_build.json", "uv_cache.json"}:
+            path.unlink()
 
 
 def _iter_files(root: Path) -> Iterable[Path]:

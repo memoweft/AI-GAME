@@ -21,6 +21,7 @@ from ai_game_console.managed_runtime import (
 from ai_game_console.managed_runtime_builder import (
     MANAGED_MANIFEST_NAME,
     ManagedRuntimeBuildError,
+    _scrub_machine_build_metadata,
     _write_manifest,
     verify_managed_runtime,
 )
@@ -194,3 +195,15 @@ def test_managed_manifest_closure_detects_tampering_and_excludes_machine_paths(t
     (runtime / "ai-game-managed-runtime.exe").write_bytes(b"tampered")
     with pytest.raises(ManagedRuntimeBuildError, match="hash"):
         verify_managed_runtime(runtime, source_root=source)
+
+
+def test_managed_builder_removes_editable_install_machine_metadata(tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime-dist"
+    metadata = runtime / "_internal" / "demo.dist-info"
+    metadata.mkdir(parents=True)
+    marker = metadata / "direct_url.json"
+    marker.write_text('{"url":"file:///D:/machine/source"}', encoding="utf-8")
+    (metadata / "METADATA").write_text("Name: demo\n", encoding="utf-8")
+    _scrub_machine_build_metadata(runtime)
+    assert not marker.exists()
+    assert (metadata / "METADATA").is_file()
