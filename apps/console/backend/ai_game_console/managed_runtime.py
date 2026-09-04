@@ -60,6 +60,9 @@ class ManagedDataRootLock:
         import msvcrt
 
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # Recheck after creation so a caller cannot swap a missing ancestor for
+        # a junction between startup-frame validation and opening the lock.
+        _reject_reparse_ancestors(self.path.parent)
         handle = self.path.open("a+b")
         try:
             handle.seek(0)
