@@ -3,17 +3,20 @@ from __future__ import annotations
 import io
 import json
 import socket
+import subprocess
 from pathlib import Path
 import threading
 import time
 
 import pytest
 
+import ai_game_console.managed_runtime as managed_runtime
 from ai_game_console.config import Settings
 from ai_game_console.execution_contract import ExecutionContractError, V2ExecutionContractService
 from ai_game_console.managed_runtime import (
     MAX_STARTUP_FRAME_BYTES,
     ManagedDataRootLock,
+    ManagedPathGuard,
     ManagedProtocolError,
     read_startup_frame,
     run_managed,
@@ -23,6 +26,7 @@ from ai_game_console.managed_runtime_builder import (
     ManagedRuntimeBuildError,
     _scrub_machine_build_metadata,
     _write_manifest,
+    _file_entry,
     verify_managed_runtime,
 )
 
@@ -207,3 +211,86 @@ def test_managed_builder_removes_editable_install_machine_metadata(tmp_path: Pat
     _scrub_machine_build_metadata(runtime)
     assert not marker.exists()
     assert (metadata / "METADATA").is_file()
+
+
+def test_managed_guard_rejects_preexisting_logs_junction(tmp_path: Path) -> None:
+    root = tmp_path / "writable"
+    guard = ManagedPathGuard(writable_root=root, data_dir=root / "data", immutable_roots=())
+    guard.prepare()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    logs = root / "data" / "logs"
+    completed = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(logs), str(outside)],
+        capture_output=True, text=True, check=False,
+    )
+    if completed.returncode != 0:
+        pytest.skip("junction creation is unavailable on this Windows test host")
+    with pytest.raises(ManagedProtocolError, match="reparse"):
+        guard.file("logs/runtime-mode.jsonl")
+    logs.rmdir()
+
+
+def test_managed_guard_rejects_lock_and_sqlite_symlink_escape(tmp_path: Path) -> None:
+    root = tmp_path / "writable"
+    guard = ManagedPathGuard(writable_root=root, data_dir=root / "data", immutable_roots=())
+    guard.prepare()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    target = outside / "escape.db"
+    target.write_bytes(b"x")
+    lock = root / "data" / ".ai-game-managed.lock"
+    database = root / "data" / "console.db"
+    for candidate in (lock, database):
+        try:
+            candidate.symlink_to(target)
+        except OSError:
+            pytest.skip("symlink creation is unavailable on this Windows test host")
+    with pytest.raises(ManagedProtocolError, match="reparse"):
+        guard.file(".ai-game-managed.lock")
+    with pytest.raises(ManagedProtocolError, match="reparse"):
+        guard.file("console.db")
+
+
+def test_managed_guard_rejects_writable_root_inside_an_install_root(tmp_path: Path, monkeypatch) -> None:
+    install = tmp_path / "install"
+    install.mkdir()
+    monkeypatch.setattr(managed_runtime, "immutable_roots_for_runtime", lambda: (install,))
+    with pytest.raises(ManagedProtocolError, match="immutable"):
+        read_startup_frame(io.BytesIO(_frame(install / "writable")))
+
+
+def test_manifest_semantic_mutations_are_rejected(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    (source / "apps/console/backend").mkdir(parents=True)
+    (source / "apps/console/backend/pyproject.toml").write_text(
+        '[project]\nversion = "0.1.0"\n', encoding="utf-8"
+    )
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    executable = runtime / "ai-game-managed-runtime.exe"
+    executable.write_bytes(b"fixture")
+    _write_manifest(runtime, source)
+    manifest_path = runtime / MANAGED_MANIFEST_NAME
+
+    def mutate(change) -> None:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        change(payload)
+        manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+        with pytest.raises(ManagedRuntimeBuildError):
+            verify_managed_runtime(runtime)
+        _write_manifest(runtime, source)
+
+    mutate(lambda payload: payload.__setitem__("entry", "missing-entry.exe"))
+    mutate(lambda payload: payload.pop("source"))
+    mutate(lambda payload: payload.__setitem__("third_party_notices", "missing.json"))
+    mutate(lambda payload: payload["files"].append(dict(payload["files"][0])))
+
+    extra = runtime / "machine-path.txt"
+    extra.write_bytes(b"file:///D:/build-machine/private")
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["files"].append(_file_entry(runtime, extra))
+    payload["files"].sort(key=lambda item: item["path"])
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ManagedRuntimeBuildError, match="absolute path"):
+        verify_managed_runtime(runtime)

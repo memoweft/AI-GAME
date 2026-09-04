@@ -4,7 +4,7 @@ import os
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Mapping
+from typing import Any, Literal, Mapping
 
 
 RuntimeMode = Literal["legacy", "draining", "kernel_active"]
@@ -49,6 +49,10 @@ class Settings:
     # plane before an Android executor has been verified; the V2 adapter then
     # reports ``needs_setup`` instead of making an unsafe readiness claim.
     managed_runtime: bool = False
+    # Deliberately opaque to the ordinary development configuration.  The
+    # managed bootstrap installs a path guard that every current writable
+    # composition root consults before opening a database, log, or artifact.
+    managed_path_guard: Any | None = field(default=None, repr=False, compare=False)
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Settings":

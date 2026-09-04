@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import email
 import hashlib
 import importlib.metadata
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -22,6 +24,12 @@ MANAGED_MANIFEST_NAME = "managed-runtime-manifest.json"
 MANAGED_MANIFEST_SCHEMA_VERSION = 1
 MANAGED_RUNTIME_NAME = "ai-game-managed-runtime"
 _FORBIDDEN_PARTS = {"tests", "test", "runtime", "logs", "__pycache__"}
+_ABSOLUTE_MACHINE_PATH = re.compile(rb"(?i)(?:[a-z]:[\\/]|file:///+[a-z]:/)")
+_MANIFEST_KEYS = {
+    "schema_version", "artifact_kind", "source", "managed_protocol_version",
+    "execution_api_version", "platform", "architecture", "entry",
+    "third_party_notices", "files",
+}
 
 
 class ManagedRuntimeBuildError(RuntimeError):
@@ -100,6 +108,12 @@ def verify_managed_runtime(runtime_root: Path, *, source_root: Path | None = Non
         path = root / relative
         if path.stat().st_size != entry["size"] or _sha256(path) != entry["sha256"]:
             raise ManagedRuntimeBuildError("managed runtime file hash does not match manifest")
+    entry = root / manifest["entry"]
+    notices = root / manifest["third_party_notices"]
+    if not entry.is_file() or manifest["entry"] not in declared:
+        raise ManagedRuntimeBuildError("managed runtime entry is not in the closure")
+    if not notices.is_file() or manifest["third_party_notices"] not in declared:
+        raise ManagedRuntimeBuildError("managed runtime notices are not in the closure")
     _assert_no_forbidden_content(root, manifest, source_root=source_root)
     return {"verified": True, "file_count": len(declared), "entry": manifest["entry"]}
 
@@ -108,7 +122,6 @@ def _write_manifest(runtime_root: Path, source_root: Path) -> Path:
     entry = f"{MANAGED_RUNTIME_NAME}.exe"
     if not (runtime_root / entry).is_file():
         raise ManagedRuntimeBuildError("managed runtime executable is missing")
-    files = [_file_entry(runtime_root, path) for path in _iter_files(runtime_root)]
     source = _project_metadata(source_root)
     manifest = {
         "schema_version": MANAGED_MANIFEST_SCHEMA_VERSION,
@@ -120,19 +133,31 @@ def _write_manifest(runtime_root: Path, source_root: Path) -> Path:
         "architecture": "x64",
         "entry": entry,
         "third_party_notices": "THIRD_PARTY_NOTICES.json",
-        "files": files,
+        "files": [],
     }
     notices = runtime_root / "THIRD_PARTY_NOTICES.json"
-    notices.write_text(json.dumps(_third_party_notices(), sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    notices.write_text(
+        json.dumps(_third_party_notices(runtime_root), sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
     # Notices are generated before the closure is declared.
-    manifest["files"] = [_file_entry(runtime_root, path) for path in _iter_files(runtime_root)]
+    manifest["files"] = sorted(
+        (
+            _file_entry(runtime_root, path)
+            for path in _iter_files(runtime_root)
+            if path.name != MANAGED_MANIFEST_NAME
+        ),
+        key=lambda item: item["path"],
+    )
     destination = runtime_root / MANAGED_MANIFEST_NAME
     destination.write_text(json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8")
     return destination
 
 
 def _validate_manifest(manifest: Any) -> None:
-    if not isinstance(manifest, dict) or manifest.get("schema_version") != MANAGED_MANIFEST_SCHEMA_VERSION:
+    if not isinstance(manifest, dict) or set(manifest) != _MANIFEST_KEYS:
+        raise ManagedRuntimeBuildError("managed runtime manifest schema is unsupported")
+    if manifest.get("schema_version") != MANAGED_MANIFEST_SCHEMA_VERSION:
         raise ManagedRuntimeBuildError("managed runtime manifest schema is unsupported")
     required = {
         "artifact_kind": "windows_x64_self_contained_managed_runtime",
@@ -141,10 +166,21 @@ def _validate_manifest(manifest: Any) -> None:
     }
     if any(manifest.get(key) != value for key, value in required.items()):
         raise ManagedRuntimeBuildError("managed runtime manifest identity is invalid")
+    source = manifest.get("source")
     entry = manifest.get("entry")
+    notices = manifest.get("third_party_notices")
     files = manifest.get("files")
-    if not isinstance(entry, str) or not _safe_relative(entry) or not isinstance(files, list) or not files:
+    if (
+        not isinstance(source, dict) or set(source) != {"name", "version", "revision"}
+        or not all(isinstance(source.get(key), str) and source[key] for key in source)
+        or not re.fullmatch(r"[0-9a-f]{40}|unavailable", source["revision"])
+        or entry != f"{MANAGED_RUNTIME_NAME}.exe" or not _safe_relative(entry)
+        or not isinstance(notices, str) or not _safe_relative(notices)
+        or not isinstance(files, list) or not files
+    ):
         raise ManagedRuntimeBuildError("managed runtime manifest is incomplete")
+    seen: set[str] = set()
+    previous = ""
     for item in files:
         if not isinstance(item, dict) or not _safe_relative(item.get("path")):
             raise ManagedRuntimeBuildError("managed runtime manifest contains an unsafe path")
@@ -153,6 +189,10 @@ def _validate_manifest(manifest: Any) -> None:
             raise ManagedRuntimeBuildError("managed runtime manifest contains an invalid hash")
         if not isinstance(item.get("size"), int) or item["size"] < 0:
             raise ManagedRuntimeBuildError("managed runtime manifest contains an invalid size")
+        if item["path"] in seen or item["path"] <= previous:
+            raise ManagedRuntimeBuildError("managed runtime manifest paths are not canonical")
+        seen.add(item["path"])
+        previous = item["path"]
 
 
 def _assert_no_forbidden_content(
@@ -172,6 +212,12 @@ def _assert_no_forbidden_content(
         if parts & _FORBIDDEN_PARTS or path.endswith((".sqlite", ".db", ".log", ".pyc")):
             raise ManagedRuntimeBuildError("managed runtime contains forbidden runtime or test content")
         contents = (root / path).read_bytes()
+        # Inspect deterministic source/metadata resources. Native Microsoft
+        # DLLs legitimately contain drive-like diagnostic strings that are not
+        # build-machine provenance and cannot be treated as paths.
+        text_like = Path(path).suffix.lower() in {".json", ".txt", ".html", ".md", ".cfg", ".ini"}
+        if text_like and _ABSOLUTE_MACHINE_PATH.search(contents):
+            raise ManagedRuntimeBuildError(f"managed runtime contains a machine absolute path: {path}")
         if any(marker in contents for marker in source_root_bytes):
             raise ManagedRuntimeBuildError("managed runtime contains a machine absolute source path")
 
@@ -180,7 +226,10 @@ def _scrub_machine_build_metadata(root: Path) -> None:
     """Remove pip/uv editable-install traces before the closure is declared."""
 
     for path in root.rglob("*"):
-        if path.is_file() and path.name in {"direct_url.json", "uv_build.json", "uv_cache.json"}:
+        if path.is_file() and (
+            path.name in {"direct_url.json", "uv_build.json", "uv_cache.json"}
+            or path.suffix == ".map"
+        ):
             path.unlink()
 
 
@@ -203,7 +252,11 @@ def _sha256(path: Path) -> str:
 
 
 def _safe_relative(path: object) -> bool:
-    return isinstance(path, str) and bool(path) and not Path(path).is_absolute() and ".." not in Path(path).parts and "\\" not in path
+    return (
+        isinstance(path, str) and bool(path) and path == path.strip()
+        and not Path(path).is_absolute() and ".." not in Path(path).parts
+        and "\\" not in path and path != "." and not path.startswith("./")
+    )
 
 
 def _project_metadata(root: Path) -> dict[str, str]:
@@ -219,12 +272,35 @@ def _git(root: Path, *args: str) -> str | None:
     return completed.stdout.strip() if completed.returncode == 0 else None
 
 
-def _third_party_notices() -> list[dict[str, str]]:
-    notices: list[dict[str, str]] = []
-    for distribution in sorted(importlib.metadata.distributions(), key=lambda item: item.metadata["Name"].lower() if item.metadata["Name"] else ""):
-        name = distribution.metadata["Name"]
-        if name:
-            notices.append({"name": name, "version": distribution.version, "license": distribution.metadata.get("License", "UNKNOWN")})
+def _third_party_notices(runtime_root: Path) -> list[dict[str, Any]]:
+    """Describe only distributions whose metadata actually made the closure."""
+
+    notices: list[dict[str, Any]] = []
+    for metadata_path in sorted(runtime_root.rglob("*.dist-info/METADATA")):
+        fields = email.message_from_bytes(metadata_path.read_bytes())
+        name = fields.get("Name")
+        version = fields.get("Version")
+        if not name or not version or name.lower() == "ai-game-console-backend":
+            continue
+        directory = metadata_path.parent
+        license_files = [
+            {
+                "path": path.relative_to(runtime_root).as_posix(),
+                "sha256": _sha256(path),
+            }
+            for path in sorted(directory.rglob("LICENSE*"))
+            if path.is_file()
+        ]
+        license_expression = fields.get("License-Expression") or fields.get("License") or None
+        notices.append({
+            "name": name,
+            "version": version,
+            "license_expression": license_expression,
+            "license_files": license_files,
+            "metadata_path": metadata_path.relative_to(runtime_root).as_posix(),
+            "source": "frozen-runtime-dist-info",
+            "legal_review": "required" if license_expression is None else "metadata-only",
+        })
     return notices
 
 

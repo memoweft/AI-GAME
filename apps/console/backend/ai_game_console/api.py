@@ -788,6 +788,18 @@ def create_app(
     long_task_scheduler: Any = _AUTO_LONG_TASK_SCHEDULER,
 ) -> FastAPI:
     resolved_settings = settings or Settings.from_env()
+
+    def managed_file(relative: str) -> Path:
+        guard = resolved_settings.managed_path_guard
+        return guard.file(relative) if guard is not None else resolved_settings.data_dir / relative
+
+    def managed_directory(relative: str) -> Path:
+        guard = resolved_settings.managed_path_guard
+        return guard.directory(relative) if guard is not None else resolved_settings.data_dir / relative
+
+    def managed_composition_root(relative: str) -> Path:
+        guard = resolved_settings.managed_path_guard
+        return guard.directory(relative) if guard is not None else resolved_settings.data_dir
     def canonical_runtime_device_id(device_id: str) -> str:
         return device_id
 
@@ -814,15 +826,15 @@ def create_app(
         kernel_binding_kind is not None and not resolved_settings.managed_runtime
     )
     append_mode_journal(
-        resolved_settings.data_dir / "logs" / "runtime-mode.jsonl",
+        managed_file("logs/runtime-mode.jsonl"),
         mode=resolved_settings.runtime_mode,
         event="composition_requested",
         details={"kernel_binding_kind": kernel_binding_kind},
     )
     resolved_runtime_admin = runtime_admin or LeaseAdminService(
-        resolved_settings.data_dir / "runtime" / "runtime.db"
+        managed_file("runtime/runtime.db")
     )
-    resolved_repository = repository or SQLiteRepository(resolved_settings.database_path)
+    resolved_repository = repository or SQLiteRepository(managed_file("console.db"))
     resolved_cloud_configuration = cloud_configuration or CloudChatConfiguration(
         resolved_repository,
         resolved_settings,
@@ -854,13 +866,10 @@ def create_app(
         resolved_application_archive = resolved_application_runtime
     device_execution_lease = DeviceExecutionLease()
     mobile_evidence = LocalMobileEvidenceStore(
-        resolved_settings.data_dir
-        / "sessions"
-        / "mobile-tasks"
-        / "evidence"
+        managed_directory("sessions/mobile-tasks/evidence")
     )
     experience_service = ExperienceService(
-        SQLiteExperienceStore(resolved_settings.data_dir / "experience.db"),
+        SQLiteExperienceStore(managed_file("experience.db")),
         observation_payload=lambda evidence_id: mobile_evidence.load(evidence_id).png_bytes,
     )
     structured_goal_model: StructuredGoalModel | None = None
@@ -868,7 +877,7 @@ def create_app(
     attention_scheduler = AttentionScheduler()
     role_model: Any | None = None
     daily_checklist_store = SQLiteDailyChecklistStore(
-        resolved_settings.data_dir / "stzb-daily.db"
+        managed_file("stzb-daily.db")
     )
     mobile_role_endpoint = (
         resolved_settings.mobile_role_endpoint or resolved_settings.local_chat_endpoint
@@ -942,7 +951,7 @@ def create_app(
             and runtime_mode_guard.is_legacy_runtime_available()
         ):
             resolved_mobile_tasks = MobileTaskRuntime(
-                resolved_settings.data_dir / "mobile-tasks.db",
+                managed_file("mobile-tasks.db"),
                 driver=MobileTaskAndroidDriver(
                     repository=resolved_repository,
                     executor=resolved_executor,
@@ -1032,11 +1041,9 @@ def create_app(
     resolved_game_learner = game_learner
     if resolved_game_learner is None:
         resolved_game_learner = GameLearner(
-            store=SQLiteLearningStore(resolved_settings.data_dir / "learning.db"),
+            store=SQLiteLearningStore(managed_file("learning.db")),
             artifacts=LocalArtifactStore(
-                resolved_settings.data_dir
-                / "sessions"
-                / "game-learning"
+                managed_directory("sessions/game-learning")
             ),
             environment_factory=learning_environment,
             profiles=[stzb_game_profile()],
@@ -1047,15 +1054,15 @@ def create_app(
     resolved_mobile_task_archive = (
         mobile_task_archive
         or resolved_mobile_tasks
-        or MobileTaskArchive(resolved_settings.data_dir / "mobile-tasks.db")
+        or MobileTaskArchive(managed_file("mobile-tasks.db"))
     )
     # AgentSession and DeviceBody share one durable ledger.  Construct this
     # before RuntimeKernel so its dispatch bridge can resolve a Kernel Task to
     # the already-established GoalRun -> AgentSession relationship.
-    agent_runtime_database = resolved_settings.data_dir / "agent-runtime.db"
+    agent_runtime_database = managed_file("agent-runtime.db")
     agent_runtime_store = SQLiteAgentRuntimeStore(agent_runtime_database)
     harness_execution_store = SQLiteExecutionContractStore(
-        resolved_settings.data_dir / "harness-executions.db"
+        managed_file("harness-executions.db")
     )
     user_fact_store = SQLiteUserFactStore(agent_runtime_database)
     user_fact_service = UserFactService(user_fact_store)
@@ -1116,7 +1123,7 @@ def create_app(
             raise RuntimeError(
                 "Kernel-active startup requires the configured Android role model and ADB executor."
             )
-        runtime_dir = resolved_settings.data_dir / "runtime"
+        runtime_dir = managed_directory("runtime")
         kernel_artifacts = FilesystemArtifactStore(runtime_dir / "artifacts")
         kernel_observation_provider = AndroidObservationProvider(
             adb_path=resolved_settings.adb_path,
@@ -1221,7 +1228,7 @@ def create_app(
             device_id_resolver=canonical_runtime_device_id,
         )
         activity_slice_store = ActivitySliceStore(
-            resolved_settings.data_dir / "activity-slices.db"
+            managed_file("activity-slices.db")
         )
         activity_slice_runner = NormalActivitySliceRunner(
             activity_slice_store,
@@ -1277,7 +1284,7 @@ def create_app(
             str(blocker.get("message") or probe.detail or "默认 Android 目标当前不可用。"),
         )
 
-    goal_store = SQLiteGoalStore(resolved_settings.data_dir / "goals.db")
+    goal_store = SQLiteGoalStore(managed_file("goals.db"))
 
     def promote_verified_goal_experience(
         task_id: str, goal_id: str, completion_revision: int
@@ -1442,7 +1449,7 @@ def create_app(
         artifact_store=kernel_artifacts,
     )
     production_emulator = compose_production_emulator_runtime(
-        data_dir=resolved_settings.data_dir,
+        data_dir=managed_composition_root("emulator-runtime"),
         adb_discovery=resolved_adb_discovery,
         agent_runtime_store=agent_runtime_store,
         clock=_utc_now,
@@ -1568,7 +1575,7 @@ def create_app(
             resolved_agent_session_service.recover_stopping()
             agent_runtime_event_pump.start()
             append_mode_journal(
-                resolved_settings.data_dir / "logs" / "runtime-mode.jsonl",
+                managed_file("logs/runtime-mode.jsonl"),
                 mode=resolved_settings.runtime_mode,
                 event="runtime_started",
                 details={
@@ -1625,7 +1632,7 @@ def create_app(
             if cleanup_error is not None and not active_error:
                 raise cleanup_error
             append_mode_journal(
-                resolved_settings.data_dir / "logs" / "runtime-mode.jsonl",
+                managed_file("logs/runtime-mode.jsonl"),
                 mode=resolved_settings.runtime_mode,
                 event="runtime_stopped",
                 details={"kernel_binding_kind": kernel_binding_kind},
