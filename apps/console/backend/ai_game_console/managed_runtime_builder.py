@@ -69,6 +69,9 @@ def build_managed_runtime(project_root: Path, output_dir: Path) -> ManagedRuntim
         "--name", MANAGED_RUNTIME_NAME, "--distpath", str(Path(output_dir).resolve()),
         "--workpath", str(work), "--specpath", str(spec), "--paths", str(backend),
         "--add-data", f"{frontend}{os.pathsep}frontend", "--collect-all", "ai_game_console",
+        "--exclude-module", "pytest", "--exclude-module", "_pytest",
+        "--exclude-module", "pluggy", "--exclude-module", "iniconfig",
+        "--exclude-module", "pygments",
         str(entry_script),
     )
     completed = subprocess.run(command, cwd=root, capture_output=True, text=True, check=False)
@@ -381,6 +384,7 @@ def _validate_notices(root: Path, manifest: dict[str, Any], *, source_root: Path
         raise ManagedRuntimeBuildError("managed runtime notices schema is unsupported")
     names: set[str] = set()
     required = {"fastapi", "uvicorn"}
+    frozen = _frozen_modules(root / manifest["entry"])
     for item in notices:
         if not isinstance(item, dict):
             raise ManagedRuntimeBuildError("managed runtime notices schema is unsupported")
@@ -391,6 +395,10 @@ def _validate_notices(root: Path, manifest: dict[str, Any], *, source_root: Path
         modules = evidence.get("frozen_top_level_modules")
         if not isinstance(modules, list) or any(not isinstance(module, str) or not module for module in modules):
             raise ManagedRuntimeBuildError("managed runtime notice evidence is invalid")
+        if any(module not in frozen for module in modules):
+            raise ManagedRuntimeBuildError("managed runtime notice evidence does not match frozen archive")
+        if not isinstance(item.get("license_metadata"), dict) and not isinstance(item.get("legal_review"), str):
+            raise ManagedRuntimeBuildError("managed runtime notice license provenance is unavailable")
         names.add(key)
     if notices and not required <= names:
         raise ManagedRuntimeBuildError("managed runtime notices omit direct dependencies")

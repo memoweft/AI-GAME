@@ -11,6 +11,7 @@ import time
 import pytest
 
 import ai_game_console.managed_runtime as managed_runtime
+import ai_game_console.managed_runtime_builder as managed_runtime_builder
 from ai_game_console.config import Settings
 from ai_game_console.execution_contract import ExecutionContractError, V2ExecutionContractService
 from ai_game_console.managed_runtime import (
@@ -281,7 +282,7 @@ def test_managed_guard_rejects_nested_runtime_and_local_application_junctions(tm
         candidate.rmdir()
 
 
-def test_notice_validator_rejects_direct_dependency_and_evidence_mutations(tmp_path: Path) -> None:
+def test_notice_validator_rejects_direct_dependency_and_evidence_mutations(tmp_path: Path, monkeypatch) -> None:
     runtime = tmp_path / "runtime"
     runtime.mkdir()
     notices_path = runtime / "THIRD_PARTY_NOTICES.json"
@@ -291,6 +292,7 @@ def test_notice_validator_rejects_direct_dependency_and_evidence_mutations(tmp_p
     ]
     notices_path.write_text(json.dumps(notices), encoding="utf-8")
     manifest = {"third_party_notices": notices_path.name, "files": [_file_entry(runtime, notices_path)]}
+    monkeypatch.setattr(managed_runtime_builder, "_frozen_modules", lambda _: {"fastapi", "uvicorn"})
     for mutate in (
         lambda value: value.pop(0),
         lambda value: value.pop(1),
@@ -298,6 +300,8 @@ def test_notice_validator_rejects_direct_dependency_and_evidence_mutations(tmp_p
         lambda value: value[0].pop("version"),
         lambda value: value[0].pop("evidence"),
         lambda value: value[0].pop("source"),
+        lambda value: value[0].update({"license_metadata": None, "legal_review": None}),
+        lambda value: value[0]["evidence"].update({"frozen_top_level_modules": ["definitely_missing"]}),
     ):
         candidate = json.loads(json.dumps(notices))
         mutate(candidate)
