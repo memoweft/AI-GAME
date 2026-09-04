@@ -27,6 +27,7 @@ from ai_game_console.managed_runtime_builder import (
     _scrub_machine_build_metadata,
     _write_manifest,
     _file_entry,
+    _validate_notices,
     verify_managed_runtime,
 )
 
@@ -252,6 +253,58 @@ def test_managed_guard_rejects_lock_and_sqlite_junction_escape(tmp_path: Path) -
         guard.file("console.db")
     lock.rmdir()
     database.rmdir()
+
+
+def test_managed_guard_rejects_nested_runtime_and_local_application_junctions(tmp_path: Path) -> None:
+    root = tmp_path / "writable"
+    guard = ManagedPathGuard(writable_root=root, data_dir=root / "data", immutable_roots=())
+    guard.prepare()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    targets = (
+        ("emulator-runtime/runtime", "directory"),
+        ("emulator-runtime/runtime/artifacts", "directory"),
+        ("emulator-runtime/emulator-profiles.db", "file"),
+        ("local-managed-application-runtime.db", "file"),
+    )
+    for relative, kind in targets:
+        candidate = root / "data" / relative
+        candidate.parent.mkdir(parents=True, exist_ok=True)
+        completed = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(candidate), str(outside)],
+            capture_output=True, text=True, check=False,
+        )
+        if completed.returncode != 0:
+            pytest.skip("junction creation is unavailable on this Windows test host")
+        with pytest.raises(ManagedProtocolError, match="reparse"):
+            getattr(guard, kind)(relative)
+        candidate.rmdir()
+
+
+def test_notice_validator_rejects_direct_dependency_and_evidence_mutations(tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    notices_path = runtime / "THIRD_PARTY_NOTICES.json"
+    notices = [
+        {"name": name, "version": "1", "source": {"registry": "https://pypi.org/simple"}, "legal_review": "metadata-only", "evidence": {"frozen_top_level_modules": [name], "locked_runtime_dependency": True}}
+        for name in ("fastapi", "uvicorn")
+    ]
+    notices_path.write_text(json.dumps(notices), encoding="utf-8")
+    manifest = {"third_party_notices": notices_path.name, "files": [_file_entry(runtime, notices_path)]}
+    for mutate in (
+        lambda value: value.pop(0),
+        lambda value: value.pop(1),
+        lambda value: value.append(dict(value[0])),
+        lambda value: value[0].pop("version"),
+        lambda value: value[0].pop("evidence"),
+        lambda value: value[0].pop("source"),
+    ):
+        candidate = json.loads(json.dumps(notices))
+        mutate(candidate)
+        notices_path.write_text(json.dumps(candidate), encoding="utf-8")
+        manifest["files"] = [_file_entry(runtime, notices_path)]
+        with pytest.raises(ManagedRuntimeBuildError):
+            _validate_notices(runtime, manifest, source_root=None)
 
 
 def test_managed_guard_rejects_writable_root_inside_an_install_root(tmp_path: Path, monkeypatch) -> None:
