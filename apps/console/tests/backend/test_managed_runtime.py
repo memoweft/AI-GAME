@@ -291,7 +291,7 @@ def test_notice_validator_rejects_direct_dependency_and_evidence_mutations(tmp_p
         for name in ("fastapi", "uvicorn")
     ]
     notices_path.write_text(json.dumps(notices), encoding="utf-8")
-    manifest = {"third_party_notices": notices_path.name, "files": [_file_entry(runtime, notices_path)]}
+    manifest = {"entry": "fixture.exe", "third_party_notices": notices_path.name, "files": [_file_entry(runtime, notices_path)]}
     monkeypatch.setattr(managed_runtime_builder, "_frozen_modules", lambda _: {"fastapi", "uvicorn"})
     for mutate in (
         lambda value: value.pop(0),

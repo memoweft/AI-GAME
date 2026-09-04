@@ -384,6 +384,8 @@ def _validate_notices(root: Path, manifest: dict[str, Any], *, source_root: Path
         raise ManagedRuntimeBuildError("managed runtime notices schema is unsupported")
     names: set[str] = set()
     required = {"fastapi", "uvicorn"}
+    if not notices:
+        return
     frozen = _frozen_modules(root / manifest["entry"])
     for item in notices:
         if not isinstance(item, dict):
