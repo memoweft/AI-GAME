@@ -33,6 +33,31 @@ _MANIFEST_KEYS = {
     "execution_api_version", "platform", "architecture", "entry",
     "third_party_notices", "files",
 }
+_NOTICE_KEYS = {
+    "name", "version", "license_expression", "license_metadata", "source",
+    "legal_review", "evidence",
+}
+_NOTICE_EVIDENCE_KEYS = {"frozen_top_level_modules", "locked_runtime_dependency"}
+_LICENSE_METADATA_KEYS = {"license", "license_expression"}
+# Consumer verification cannot rely on the build environment's installed
+# distribution metadata. Keep the import ownership for the locked managed
+# runtime closure explicit and fail closed when that closure changes.
+_MANAGED_DISTRIBUTION_TOP_LEVEL_MODULES = {
+    "annotated-doc": ("annotated_doc",),
+    "annotated-types": ("annotated_types",),
+    "anyio": ("anyio",),
+    "click": ("click",),
+    "colorama": ("colorama",),
+    "fastapi": ("fastapi",),
+    "h11": ("h11",),
+    "idna": ("idna",),
+    "pydantic": ("pydantic",),
+    "pydantic-core": ("pydantic_core",),
+    "starlette": ("starlette",),
+    "typing-extensions": ("typing_extensions",),
+    "typing-inspection": ("typing_inspection",),
+    "uvicorn": ("uvicorn",),
+}
 
 
 class ManagedRuntimeBuildError(RuntimeError):
@@ -266,6 +291,14 @@ def _safe_relative(path: object) -> bool:
     )
 
 
+def _distribution_key(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).casefold()
+
+
+def _nonblank_string(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
 def _project_metadata(root: Path) -> dict[str, str]:
     pyproject = root / "apps" / "console" / "backend" / "pyproject.toml"
     text = pyproject.read_text(encoding="utf-8")
@@ -290,24 +323,27 @@ def _third_party_notices(runtime_root: Path, source_root: Path) -> list[dict[str
     """
 
     locked = _locked_runtime_packages(source_root)
-    # Unit-level manifest fixtures deliberately use a tiny non-PyInstaller
-    # byte file and no lock; production builds never take this compatibility
-    # branch because both inputs are mandatory there.
     if not locked:
-        return []
+        raise ManagedRuntimeBuildError("runtime dependency lock is empty")
     frozen = _frozen_modules(runtime_root / f"{MANAGED_RUNTIME_NAME}.exe")
-    package_map = importlib.metadata.packages_distributions()
-    installed = {item.metadata["Name"].casefold(): item for item in importlib.metadata.distributions() if item.metadata.get("Name")}
+    installed = {
+        _distribution_key(item.metadata["Name"]): item
+        for item in importlib.metadata.distributions()
+        if item.metadata.get("Name")
+    }
     notices: list[dict[str, Any]] = []
     for package in locked:
         name = package["name"]
-        key = name.casefold()
+        key = _distribution_key(name)
+        top_levels = _MANAGED_DISTRIBUTION_TOP_LEVEL_MODULES.get(key)
+        if top_levels is None:
+            raise ManagedRuntimeBuildError("runtime dependency import ownership is unavailable")
+        if any(
+            not any(item == module or item.startswith(module + ".") for item in frozen)
+            for module in top_levels
+        ):
+            raise ManagedRuntimeBuildError("runtime dependency is absent from the frozen archive")
         distribution = installed.get(key)
-        top_levels = sorted(
-            module for module, owners in package_map.items()
-            if any(str(owner).casefold() == key for owner in owners)
-            and any(item == module or item.startswith(module + ".") for item in frozen)
-        )
         fields = distribution.metadata if distribution is not None else None
         license_expression = (
             fields.get("License-Expression") or fields.get("License")
@@ -324,7 +360,7 @@ def _third_party_notices(runtime_root: Path, source_root: Path) -> list[dict[str
             "source": source,
             "legal_review": "metadata-only" if license_expression else "required",
             "evidence": {
-                "frozen_top_level_modules": top_levels,
+                "frozen_top_level_modules": list(top_levels),
                 "locked_runtime_dependency": True,
             },
         })
@@ -382,28 +418,51 @@ def _validate_notices(root: Path, manifest: dict[str, Any], *, source_root: Path
         raise ManagedRuntimeBuildError("managed runtime notices are invalid") from error
     if not isinstance(notices, list):
         raise ManagedRuntimeBuildError("managed runtime notices schema is unsupported")
-    names: set[str] = set()
-    required = {"fastapi", "uvicorn"}
     if not notices:
-        return
+        raise ManagedRuntimeBuildError("managed runtime notices contain no distributions")
+    names: set[str] = set()
     frozen = _frozen_modules(root / manifest["entry"])
     for item in notices:
-        if not isinstance(item, dict):
+        if not isinstance(item, dict) or set(item) != _NOTICE_KEYS:
             raise ManagedRuntimeBuildError("managed runtime notices schema is unsupported")
         name, version, source, evidence = item.get("name"), item.get("version"), item.get("source"), item.get("evidence")
-        key = name.casefold() if isinstance(name, str) else ""
-        if not key or key in names or not isinstance(version, str) or not version or not isinstance(source, dict) or not source or not isinstance(evidence, dict):
+        key = _distribution_key(name) if _nonblank_string(name) else ""
+        if (
+            not key or key in names or key not in _MANAGED_DISTRIBUTION_TOP_LEVEL_MODULES
+            or not _nonblank_string(version) or not isinstance(source, dict) or not source
+            or any(not _nonblank_string(field) or not _nonblank_string(value) for field, value in source.items())
+            or not isinstance(evidence, dict) or set(evidence) != _NOTICE_EVIDENCE_KEYS
+            or evidence.get("locked_runtime_dependency") is not True
+        ):
             raise ManagedRuntimeBuildError("managed runtime notices schema is unsupported")
         modules = evidence.get("frozen_top_level_modules")
-        if not isinstance(modules, list) or any(not isinstance(module, str) or not module for module in modules):
+        if not isinstance(modules, list) or any(not _nonblank_string(module) for module in modules):
             raise ManagedRuntimeBuildError("managed runtime notice evidence is invalid")
-        if any(module not in frozen for module in modules):
+        if tuple(modules) != _MANAGED_DISTRIBUTION_TOP_LEVEL_MODULES[key]:
+            raise ManagedRuntimeBuildError("managed runtime notice module attribution is invalid")
+        if any(
+            not any(item == module or item.startswith(module + ".") for item in frozen)
+            for module in modules
+        ):
             raise ManagedRuntimeBuildError("managed runtime notice evidence does not match frozen archive")
-        if not isinstance(item.get("license_metadata"), dict) and not isinstance(item.get("legal_review"), str):
+        license_expression = item.get("license_expression")
+        license_metadata = item.get("license_metadata")
+        legal_review = item.get("legal_review")
+        if license_expression is not None and not _nonblank_string(license_expression):
+            raise ManagedRuntimeBuildError("managed runtime notice license provenance is invalid")
+        if (
+            not isinstance(license_metadata, dict)
+            or any(key not in _LICENSE_METADATA_KEYS for key in license_metadata)
+            or any(value is not None and not _nonblank_string(value) for value in license_metadata.values())
+            or legal_review is not None and not _nonblank_string(legal_review)
+        ):
+            raise ManagedRuntimeBuildError("managed runtime notice license provenance is invalid")
+        has_license_metadata = any(_nonblank_string(value) for value in license_metadata.values())
+        if not has_license_metadata and not _nonblank_string(legal_review):
             raise ManagedRuntimeBuildError("managed runtime notice license provenance is unavailable")
         names.add(key)
-    if notices and not required <= names:
-        raise ManagedRuntimeBuildError("managed runtime notices omit direct dependencies")
+    if names != set(_MANAGED_DISTRIBUTION_TOP_LEVEL_MODULES):
+        raise ManagedRuntimeBuildError("managed runtime notices do not match the dependency closure")
 
 
 def main(argv: Sequence[str] | None = None) -> int:

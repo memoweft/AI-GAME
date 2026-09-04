@@ -28,9 +28,26 @@ from ai_game_console.managed_runtime_builder import (
     _scrub_machine_build_metadata,
     _write_manifest,
     _file_entry,
-    _validate_notices,
     verify_managed_runtime,
 )
+
+
+_MANAGED_NOTICE_MODULES = {
+    "annotated-doc": "annotated_doc",
+    "annotated-types": "annotated_types",
+    "anyio": "anyio",
+    "click": "click",
+    "colorama": "colorama",
+    "fastapi": "fastapi",
+    "h11": "h11",
+    "idna": "idna",
+    "pydantic": "pydantic",
+    "pydantic-core": "pydantic_core",
+    "starlette": "starlette",
+    "typing-extensions": "typing_extensions",
+    "typing-inspection": "typing_inspection",
+    "uvicorn": "uvicorn",
+}
 
 
 def _frame(root: Path, **overrides: object) -> bytes:
@@ -121,6 +138,66 @@ def _free_loopback_port() -> int:
     return port
 
 
+def _notice_records() -> list[dict[str, object]]:
+    return [
+        {
+            "name": name,
+            "version": "1.0",
+            "license_expression": "MIT",
+            "license_metadata": {"license": None, "license_expression": "MIT"},
+            "source": {"registry": "https://pypi.org/simple"},
+            "legal_review": "metadata-only",
+            "evidence": {
+                "frozen_top_level_modules": [module],
+                "locked_runtime_dependency": True,
+            },
+        }
+        for name, module in _MANAGED_NOTICE_MODULES.items()
+    ]
+
+
+def _notice_record(notices: list[dict[str, object]], name: str) -> dict[str, object]:
+    return next(item for item in notices if item["name"] == name)
+
+
+def _write_notice_fixture(runtime: Path, notices: list[dict[str, object]]) -> None:
+    runtime.mkdir()
+    executable = runtime / "ai-game-managed-runtime.exe"
+    executable.write_bytes(b"fixture executable")
+    notices_path = runtime / "THIRD_PARTY_NOTICES.json"
+    notices_path.write_text(json.dumps(notices, sort_keys=True), encoding="utf-8")
+    manifest = {
+        "schema_version": 1,
+        "artifact_kind": "windows_x64_self_contained_managed_runtime",
+        "source": {"name": "fixture", "version": "1", "revision": "unavailable"},
+        "managed_protocol_version": 1,
+        "execution_api_version": "2.0",
+        "platform": "windows",
+        "architecture": "x64",
+        "entry": executable.name,
+        "third_party_notices": notices_path.name,
+        "files": sorted(
+            [_file_entry(runtime, executable), _file_entry(runtime, notices_path)],
+            key=lambda item: item["path"],
+        ),
+    }
+    (runtime / MANAGED_MANIFEST_NAME).write_text(
+        json.dumps(manifest, sort_keys=True), encoding="utf-8"
+    )
+
+
+def _rewrite_notices_and_manifest(runtime: Path, notices: list[dict[str, object]]) -> None:
+    notices_path = runtime / "THIRD_PARTY_NOTICES.json"
+    notices_path.write_text(json.dumps(notices, sort_keys=True), encoding="utf-8")
+    manifest_path = runtime / MANAGED_MANIFEST_NAME
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["files"] = [
+        _file_entry(runtime, notices_path) if item["path"] == notices_path.name else item
+        for item in manifest["files"]
+    ]
+    manifest_path.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+
+
 def test_managed_ready_waits_for_listen_and_eof_stops_idempotently(tmp_path: Path) -> None:
     port = _free_loopback_port()
     secret = "private-managed-token-" + "x" * 32
@@ -185,7 +262,7 @@ def test_unready_v2_health_is_honest_and_new_execution_has_no_side_effect() -> N
     assert service.runner_admission("task", principal_id="p", controller_id="c") is None
 
 
-def test_managed_manifest_closure_detects_tampering_and_excludes_machine_paths(tmp_path: Path) -> None:
+def test_managed_manifest_closure_detects_tampering_and_excludes_machine_paths(tmp_path: Path, monkeypatch) -> None:
     source = tmp_path / "source"
     (source / "apps/console/backend").mkdir(parents=True)
     (source / "apps/console/backend/pyproject.toml").write_text(
@@ -194,6 +271,8 @@ def test_managed_manifest_closure_detects_tampering_and_excludes_machine_paths(t
     runtime = tmp_path / "runtime-dist"
     runtime.mkdir()
     (runtime / "ai-game-managed-runtime.exe").write_bytes(b"fixture executable")
+    monkeypatch.setattr(managed_runtime_builder, "_third_party_notices", lambda *_: _notice_records())
+    monkeypatch.setattr(managed_runtime_builder, "_frozen_modules", lambda _: set(_MANAGED_NOTICE_MODULES.values()))
     _write_manifest(runtime, source)
     assert (runtime / MANAGED_MANIFEST_NAME).is_file()
     assert verify_managed_runtime(runtime, source_root=source)["verified"] is True
@@ -282,33 +361,75 @@ def test_managed_guard_rejects_nested_runtime_and_local_application_junctions(tm
         candidate.rmdir()
 
 
-def test_notice_validator_rejects_direct_dependency_and_evidence_mutations(tmp_path: Path, monkeypatch) -> None:
+def test_notice_consumer_verifier_accepts_complete_distribution_closure(tmp_path: Path, monkeypatch) -> None:
     runtime = tmp_path / "runtime"
-    runtime.mkdir()
-    notices_path = runtime / "THIRD_PARTY_NOTICES.json"
-    notices = [
-        {"name": name, "version": "1", "source": {"registry": "https://pypi.org/simple"}, "legal_review": "metadata-only", "evidence": {"frozen_top_level_modules": [name], "locked_runtime_dependency": True}}
-        for name in ("fastapi", "uvicorn")
-    ]
-    notices_path.write_text(json.dumps(notices), encoding="utf-8")
-    manifest = {"entry": "fixture.exe", "third_party_notices": notices_path.name, "files": [_file_entry(runtime, notices_path)]}
-    monkeypatch.setattr(managed_runtime_builder, "_frozen_modules", lambda _: {"fastapi", "uvicorn"})
-    for mutate in (
-        lambda value: value.pop(0),
-        lambda value: value.pop(1),
-        lambda value: value.append(dict(value[0])),
-        lambda value: value[0].pop("version"),
-        lambda value: value[0].pop("evidence"),
-        lambda value: value[0].pop("source"),
-        lambda value: value[0].update({"license_metadata": None, "legal_review": None}),
-        lambda value: value[0]["evidence"].update({"frozen_top_level_modules": ["definitely_missing"]}),
-    ):
-        candidate = json.loads(json.dumps(notices))
-        mutate(candidate)
-        notices_path.write_text(json.dumps(candidate), encoding="utf-8")
-        manifest["files"] = [_file_entry(runtime, notices_path)]
-        with pytest.raises(ManagedRuntimeBuildError):
-            _validate_notices(runtime, manifest, source_root=None)
+    _write_notice_fixture(runtime, _notice_records())
+    monkeypatch.setattr(
+        managed_runtime_builder, "_frozen_modules", lambda _: set(_MANAGED_NOTICE_MODULES.values())
+    )
+    assert verify_managed_runtime(runtime)["verified"] is True
+
+
+def test_notice_consumer_verifier_rejects_closure_consistent_mutations(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        managed_runtime_builder, "_frozen_modules", lambda _: set(_MANAGED_NOTICE_MODULES.values())
+    )
+
+    def remove_distribution(name: str):
+        return lambda notices: notices.__setitem__(
+            slice(None), [item for item in notices if item["name"] != name]
+        )
+
+    mutations = (
+        ("empty-distributions", lambda notices: notices.clear()),
+        ("missing-fastapi", remove_distribution("fastapi")),
+        ("missing-uvicorn", remove_distribution("uvicorn")),
+        ("duplicate", lambda notices: notices.append(json.loads(json.dumps(notices[0])))),
+        ("missing-version", lambda notices: _notice_record(notices, "fastapi").pop("version")),
+        ("missing-evidence", lambda notices: _notice_record(notices, "fastapi").pop("evidence")),
+        ("missing-source", lambda notices: _notice_record(notices, "fastapi").pop("source")),
+        (
+            "missing-license-fields",
+            lambda notices: [
+                _notice_record(notices, "fastapi").pop(field)
+                for field in ("license_expression", "license_metadata", "legal_review")
+            ],
+        ),
+        (
+            "empty-license-provenance",
+            lambda notices: _notice_record(notices, "fastapi").update(
+                {"license_expression": None, "license_metadata": {}, "legal_review": ""}
+            ),
+        ),
+        (
+            "whitespace-license-provenance",
+            lambda notices: _notice_record(notices, "fastapi").update(
+                {"license_expression": None, "license_metadata": {}, "legal_review": "   \t"}
+            ),
+        ),
+        (
+            "missing-frozen-module",
+            lambda notices: _notice_record(notices, "fastapi")["evidence"].update(
+                {"frozen_top_level_modules": ["definitely_missing"]}
+            ),
+        ),
+        (
+            "misattributed-frozen-module",
+            lambda notices: _notice_record(notices, "fastapi")["evidence"].update(
+                {"frozen_top_level_modules": ["uvicorn"]}
+            ),
+        ),
+    )
+    for case, mutate in mutations:
+        runtime = tmp_path / case
+        notices = _notice_records()
+        _write_notice_fixture(runtime, notices)
+        assert verify_managed_runtime(runtime)["verified"] is True
+        mutate(notices)
+        _rewrite_notices_and_manifest(runtime, notices)
+        with pytest.raises(ManagedRuntimeBuildError) as raised:
+            verify_managed_runtime(runtime)
+        assert "hash" not in str(raised.value).casefold()
 
 
 def test_managed_guard_rejects_writable_root_inside_an_install_root(tmp_path: Path, monkeypatch) -> None:
@@ -319,7 +440,7 @@ def test_managed_guard_rejects_writable_root_inside_an_install_root(tmp_path: Pa
         read_startup_frame(io.BytesIO(_frame(install / "writable")))
 
 
-def test_manifest_semantic_mutations_are_rejected(tmp_path: Path) -> None:
+def test_manifest_semantic_mutations_are_rejected(tmp_path: Path, monkeypatch) -> None:
     source = tmp_path / "source"
     (source / "apps/console/backend").mkdir(parents=True)
     (source / "apps/console/backend/pyproject.toml").write_text(
@@ -329,6 +450,8 @@ def test_manifest_semantic_mutations_are_rejected(tmp_path: Path) -> None:
     runtime.mkdir()
     executable = runtime / "ai-game-managed-runtime.exe"
     executable.write_bytes(b"fixture")
+    monkeypatch.setattr(managed_runtime_builder, "_third_party_notices", lambda *_: _notice_records())
+    monkeypatch.setattr(managed_runtime_builder, "_frozen_modules", lambda _: set(_MANAGED_NOTICE_MODULES.values()))
     _write_manifest(runtime, source)
     manifest_path = runtime / MANAGED_MANIFEST_NAME
 
