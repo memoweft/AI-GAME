@@ -44,6 +44,11 @@ class Settings:
     runtime_mode: RuntimeMode = "kernel_active"
     # Optional reversible Kernel probe used by compatibility diagnostics.
     kernel_canary_enabled: bool = False
+    # Managed distribution instances are started by WeftMate through the
+    # stdin-only contract.  They intentionally bring up the durable control
+    # plane before an Android executor has been verified; the V2 adapter then
+    # reports ``needs_setup`` instead of making an unsafe readiness claim.
+    managed_runtime: bool = False
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Settings":

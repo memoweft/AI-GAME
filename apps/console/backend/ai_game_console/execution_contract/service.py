@@ -919,16 +919,20 @@ class V2ExecutionContractService:
         device_profiles: V2DeviceProfilePort | None = None,
         experiences: V2ExperiencePort | None = None,
         frames: V2FramePort | None = None,
+        runner_ready: bool = True,
+        runner_setup_reasons: tuple[str, ...] = (),
     ) -> None:
         self.store = store
         self.tasks = tasks
         self.device_profiles = device_profiles
         self.experiences = experiences
         self.frames = frames
+        self.runner_ready = runner_ready
+        self.runner_setup_reasons = tuple(runner_setup_reasons)
 
     def health(self) -> dict[str, Any]:
         return {
-            "status": "ready",
+            "status": "ready" if self.runner_ready else "needs_setup",
             "version": self.version,
             "capabilities": {
                 "tasks": True, "revisions": True, "controls": True,
@@ -936,10 +940,22 @@ class V2ExecutionContractService:
                 "experience": self.experiences is not None,
                 "emulator_discovery": self.device_profiles is not None,
                 "verified_frames": self.frames is not None,
+                "android_ui_agent": {
+                    "state": "ready" if self.runner_ready else "needs_setup",
+                    "available": self.runner_ready,
+                    "version": "1",
+                },
             },
+            "setup_reasons": list(self.runner_setup_reasons),
         }
 
     def create_task(self, request: dict[str, Any], *, auth_context: dict[str, Any]) -> dict[str, Any]:
+        if not self.runner_ready:
+            raise ExecutionContractError(
+                "CAPABILITY_UNAVAILABLE",
+                "The requested phone capability is unavailable.",
+                409,
+            )
         self._validate_runner_request(request)
         origin = request["origin"]
         identity_key = ExecutionContractService.identity_key(origin)
@@ -1275,6 +1291,8 @@ class V2ExecutionContractService:
         self, task_id: str, *, principal_id: str, controller_id: str,
     ) -> dict[str, Any] | None:
         """Expose no-side-effect admission facts for the resident scheduler."""
+        if not self.runner_ready:
+            return None
         fact = self.store.v2_runner_admission(
             task_id=task_id, principal_id=principal_id, controller_id=controller_id,
         )

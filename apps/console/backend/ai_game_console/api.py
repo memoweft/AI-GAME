@@ -807,9 +807,14 @@ def create_app(
         if resolved_settings.kernel_canary_enabled
         else None
     )
-    kernel_runtime_enabled = kernel_binding_kind is not None
+    # A managed instance must be able to expose health and persisted state on
+    # a clean machine.  Kernel composition remains deliberately disabled until
+    # a later host-owned executor readiness phase has verified its dependencies.
+    kernel_runtime_enabled = (
+        kernel_binding_kind is not None and not resolved_settings.managed_runtime
+    )
     append_mode_journal(
-        resolved_settings.project_root / "runtime" / "logs" / "runtime-mode.jsonl",
+        resolved_settings.data_dir / "logs" / "runtime-mode.jsonl",
         mode=resolved_settings.runtime_mode,
         event="composition_requested",
         details={"kernel_binding_kind": kernel_binding_kind},
@@ -849,8 +854,7 @@ def create_app(
         resolved_application_archive = resolved_application_runtime
     device_execution_lease = DeviceExecutionLease()
     mobile_evidence = LocalMobileEvidenceStore(
-        resolved_settings.project_root
-        / "runtime"
+        resolved_settings.data_dir
         / "sessions"
         / "mobile-tasks"
         / "evidence"
@@ -1030,8 +1034,7 @@ def create_app(
         resolved_game_learner = GameLearner(
             store=SQLiteLearningStore(resolved_settings.data_dir / "learning.db"),
             artifacts=LocalArtifactStore(
-                resolved_settings.project_root
-                / "runtime"
+                resolved_settings.data_dir
                 / "sessions"
                 / "game-learning"
             ),
@@ -1465,6 +1468,12 @@ def create_app(
             device_profiles=resolved_execution_v2_device_profiles,
             experiences=ExperiencePortAdapter(experience_service),
             frames=resolved_execution_v2_frames,
+            runner_ready=not resolved_settings.managed_runtime and production_emulator.general_ui is not None,
+            runner_setup_reasons=(
+                ("managed_executor_verification_required",)
+                if resolved_settings.managed_runtime
+                else ()
+            ),
         )
     )
     resolved_long_task_scheduler = long_task_scheduler
@@ -1559,10 +1568,7 @@ def create_app(
             resolved_agent_session_service.recover_stopping()
             agent_runtime_event_pump.start()
             append_mode_journal(
-                resolved_settings.project_root
-                / "runtime"
-                / "logs"
-                / "runtime-mode.jsonl",
+                resolved_settings.data_dir / "logs" / "runtime-mode.jsonl",
                 mode=resolved_settings.runtime_mode,
                 event="runtime_started",
                 details={
@@ -1619,10 +1625,7 @@ def create_app(
             if cleanup_error is not None and not active_error:
                 raise cleanup_error
             append_mode_journal(
-                resolved_settings.project_root
-                / "runtime"
-                / "logs"
-                / "runtime-mode.jsonl",
+                resolved_settings.data_dir / "logs" / "runtime-mode.jsonl",
                 mode=resolved_settings.runtime_mode,
                 event="runtime_stopped",
                 details={"kernel_binding_kind": kernel_binding_kind},
