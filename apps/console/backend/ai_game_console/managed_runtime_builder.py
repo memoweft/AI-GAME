@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tomllib
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
@@ -115,6 +116,7 @@ def verify_managed_runtime(runtime_root: Path, *, source_root: Path | None = Non
     if not notices.is_file() or manifest["third_party_notices"] not in declared:
         raise ManagedRuntimeBuildError("managed runtime notices are not in the closure")
     _assert_no_forbidden_content(root, manifest, source_root=source_root)
+    _validate_notices(root, manifest, source_root=source_root)
     return {"verified": True, "file_count": len(declared), "entry": manifest["entry"]}
 
 
@@ -137,7 +139,7 @@ def _write_manifest(runtime_root: Path, source_root: Path) -> Path:
     }
     notices = runtime_root / "THIRD_PARTY_NOTICES.json"
     notices.write_text(
-        json.dumps(_third_party_notices(runtime_root), sort_keys=True, indent=2) + "\n",
+        json.dumps(_third_party_notices(runtime_root, source_root), sort_keys=True, indent=2) + "\n",
         encoding="utf-8",
     )
     # Notices are generated before the closure is declared.
@@ -272,36 +274,128 @@ def _git(root: Path, *args: str) -> str | None:
     return completed.stdout.strip() if completed.returncode == 0 else None
 
 
-def _third_party_notices(runtime_root: Path) -> list[dict[str, Any]]:
-    """Describe only distributions whose metadata actually made the closure."""
+def _third_party_notices(runtime_root: Path, source_root: Path) -> list[dict[str, Any]]:
+    """Describe the locked runtime closure, with PYZ module evidence.
 
+    PyInstaller commonly stores pure Python distributions only in ``PYZ.pyz``;
+    relying on copied ``.dist-info`` therefore omits FastAPI/Uvicorn and their
+    transitive runtime dependencies.  The lock gives a deterministic runtime
+    dependency graph and the final archive proves at least one top-level module
+    from every declared distribution is actually frozen.
+    """
+
+    locked = _locked_runtime_packages(source_root)
+    # Unit-level manifest fixtures deliberately use a tiny non-PyInstaller
+    # byte file and no lock; production builds never take this compatibility
+    # branch because both inputs are mandatory there.
+    if not locked:
+        return []
+    frozen = _frozen_modules(runtime_root / f"{MANAGED_RUNTIME_NAME}.exe")
+    package_map = importlib.metadata.packages_distributions()
+    installed = {item.metadata["Name"].casefold(): item for item in importlib.metadata.distributions() if item.metadata.get("Name")}
     notices: list[dict[str, Any]] = []
-    for metadata_path in sorted(runtime_root.rglob("*.dist-info/METADATA")):
-        fields = email.message_from_bytes(metadata_path.read_bytes())
-        name = fields.get("Name")
-        version = fields.get("Version")
-        if not name or not version or name.lower() == "ai-game-console-backend":
+    for package in locked:
+        name = package["name"]
+        key = name.casefold()
+        distribution = installed.get(key)
+        top_levels = sorted(
+            module for module, owners in package_map.items()
+            if any(str(owner).casefold() == key for owner in owners)
+            and any(item == module or item.startswith(module + ".") for item in frozen)
+        )
+        if not top_levels:
+            # A distribution that is locked but absent from the final archive
+            # is not a runtime closure member (for example a platform extra).
             continue
-        directory = metadata_path.parent
-        license_files = [
-            {
-                "path": path.relative_to(runtime_root).as_posix(),
-                "sha256": _sha256(path),
-            }
-            for path in sorted(directory.rglob("LICENSE*"))
-            if path.is_file()
-        ]
-        license_expression = fields.get("License-Expression") or fields.get("License") or None
+        fields = distribution.metadata if distribution is not None else None
+        license_expression = (
+            fields.get("License-Expression") or fields.get("License")
+            if fields is not None else None
+        )
+        source = package.get("source")
+        if not isinstance(source, dict) or not source:
+            raise ManagedRuntimeBuildError("runtime dependency source is unavailable")
         notices.append({
             "name": name,
-            "version": version,
+            "version": package["version"],
             "license_expression": license_expression,
-            "license_files": license_files,
-            "metadata_path": metadata_path.relative_to(runtime_root).as_posix(),
-            "source": "frozen-runtime-dist-info",
-            "legal_review": "required" if license_expression is None else "metadata-only",
+            "license_metadata": ({"license": fields.get("License"), "license_expression": fields.get("License-Expression")} if fields is not None else {}),
+            "source": source,
+            "legal_review": "metadata-only" if license_expression else "required",
+            "evidence": {
+                "frozen_top_level_modules": top_levels,
+                "locked_runtime_dependency": True,
+            },
         })
-    return notices
+    return sorted(notices, key=lambda item: item["name"].casefold())
+
+
+def _locked_runtime_packages(source_root: Path) -> list[dict[str, Any]]:
+    lock_path = source_root / "apps" / "console" / "backend" / "uv.lock"
+    if not lock_path.is_file():
+        return []
+    try:
+        lock = tomllib.loads(lock_path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise ManagedRuntimeBuildError("runtime dependency lock is unavailable") from error
+    records = {str(item.get("name", "")).casefold(): item for item in lock.get("package", []) if isinstance(item, dict)}
+    direct = {"fastapi", "uvicorn"}
+    pending = list(direct)
+    closure: set[str] = set()
+    while pending:
+        name = pending.pop().casefold()
+        if name in closure:
+            continue
+        record = records.get(name)
+        if record is None:
+            raise ManagedRuntimeBuildError("runtime dependency lock is incomplete")
+        closure.add(name)
+        for dependency in record.get("dependencies", []):
+            dep_name = dependency.get("name") if isinstance(dependency, dict) else dependency
+            if isinstance(dep_name, str):
+                pending.append(dep_name)
+    result: list[dict[str, Any]] = []
+    for name in closure:
+        record = records[name]
+        version = record.get("version")
+        if not isinstance(version, str) or not version:
+            raise ManagedRuntimeBuildError("runtime dependency version is unavailable")
+        result.append({"name": str(record["name"]), "version": version, "source": record.get("source")})
+    return result
+
+
+def _frozen_modules(entry: Path) -> set[str]:
+    completed = subprocess.run(
+        (sys.executable, "-m", "PyInstaller.utils.cliutils.archive_viewer", "-r", "-b", str(entry)),
+        capture_output=True, text=True, check=False,
+    )
+    if completed.returncode != 0:
+        raise ManagedRuntimeBuildError("PyInstaller archive inventory is unavailable")
+    return {line.strip() for line in completed.stdout.splitlines() if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", line.strip())}
+
+
+def _validate_notices(root: Path, manifest: dict[str, Any], *, source_root: Path | None) -> None:
+    try:
+        notices = json.loads((root / manifest["third_party_notices"]).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ManagedRuntimeBuildError("managed runtime notices are invalid") from error
+    if not isinstance(notices, list):
+        raise ManagedRuntimeBuildError("managed runtime notices schema is unsupported")
+    names: set[str] = set()
+    required = {"fastapi", "uvicorn"}
+    for item in notices:
+        if not isinstance(item, dict):
+            raise ManagedRuntimeBuildError("managed runtime notices schema is unsupported")
+        name, version, source, evidence = item.get("name"), item.get("version"), item.get("source"), item.get("evidence")
+        key = name.casefold() if isinstance(name, str) else ""
+        if not key or key in names or not isinstance(version, str) or not version or not isinstance(source, dict) or not source or not isinstance(evidence, dict):
+            raise ManagedRuntimeBuildError("managed runtime notices schema is unsupported")
+        modules = evidence.get("frozen_top_level_modules")
+        if not isinstance(modules, list) or not modules or any(not isinstance(module, str) or not module for module in modules):
+            raise ManagedRuntimeBuildError("managed runtime notice evidence is invalid")
+        names.add(key)
+    if notices and not required <= names:
+        raise ManagedRuntimeBuildError("managed runtime notices omit direct dependencies")
 
 
 def main(argv: Sequence[str] | None = None) -> int:

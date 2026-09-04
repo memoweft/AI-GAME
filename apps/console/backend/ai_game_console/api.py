@@ -1457,6 +1457,7 @@ def create_app(
         role_model=(role_model if isinstance(role_model, OpenAICompatibleToolRoleModel) else None),
         mobile_evidence=mobile_evidence,
         experience_service=experience_service,
+        managed_path_guard=resolved_settings.managed_path_guard,
     )
     resolved_execution_v2_device_profiles = (
         execution_v2_device_profiles or production_emulator.profile_port

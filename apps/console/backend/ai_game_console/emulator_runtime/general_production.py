@@ -14,6 +14,7 @@ import logging
 import re
 import unicodedata
 import xml.etree.ElementTree as ElementTree
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
@@ -1776,6 +1777,7 @@ def compose_production_android_ui_runner(
     evidence: Any,
     experience_service: ExperienceService | None = None,
     runtime_metadata: Any | None = None,
+    managed_file: Callable[[str], Path] | None = None,
 ) -> ProductionAndroidUiComposition:
     """Build the general runner without touching a model, profile, or device."""
 
@@ -1785,12 +1787,13 @@ def compose_production_android_ui_runner(
         artifacts=artifacts,
         canonical=canonical,
     )
+    runtime_file = managed_file or (lambda relative: data_dir / relative)
     step_store = SQLiteAndroidUiStepStore(
-        data_dir / "runtime" / "android-ui-steps.db",
+        runtime_file("runtime/android-ui-steps.db"),
         grounding=grounding,
     )
     grounding.step_store = step_store
-    command_store = SQLiteGenericCommandStore(data_dir / "runtime" / "android-ui-command-claims.db")
+    command_store = SQLiteGenericCommandStore(runtime_file("runtime/android-ui-command-claims.db"))
     command_store.initialize()
     causality = _CausalityLedger()
     observations = ProductionAndroidObservationProvider(

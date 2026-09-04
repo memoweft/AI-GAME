@@ -228,7 +228,12 @@ def compose_local_managed_application_runtime(
 ) -> LocalManagedApplicationComposition:
     """Build the normal-launcher local profile without contacting anything."""
 
-    database = settings.data_dir / APPLICATION_DATABASE_FILENAME
+    guard = settings.managed_path_guard
+    database = (
+        guard.file(APPLICATION_DATABASE_FILENAME)
+        if settings.managed_runtime and guard is not None
+        else settings.data_dir / APPLICATION_DATABASE_FILENAME
+    )
     return LocalManagedApplicationComposition(
         LocalManagedApplicationRuntimeGateway(database)
     )

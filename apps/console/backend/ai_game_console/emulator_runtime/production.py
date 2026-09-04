@@ -856,13 +856,28 @@ def compose_production_emulator_runtime(
     role_model: Any | None = None,
     mobile_evidence: Any | None = None,
     experience_service: Any | None = None,
+    managed_path_guard: Any | None = None,
+    managed_path_prefix: str = "emulator-runtime",
 ) -> ProductionEmulatorComposition:
     """Construct production ports without discovering or touching a device."""
 
     resolve_adb_path = getattr(adb_discovery, "resolve_adb_path", None)
     if not callable(resolve_adb_path):
         resolve_adb_path = lambda: None
-    store = EmulatorProfileStore(data_dir / "emulator-profiles.db")
+    # ``data_dir`` remains the developer-compatible composition root.  A
+    # managed caller must additionally provide the startup-owned guard so that
+    # every nested database/directory is checked immediately before use.
+    def managed_directory(relative: str) -> Path:
+        if managed_path_guard is None:
+            return data_dir / relative
+        return managed_path_guard.directory(f"{managed_path_prefix}/{relative}")
+
+    def managed_file(relative: str) -> Path:
+        if managed_path_guard is None:
+            return data_dir / relative
+        return managed_path_guard.file(f"{managed_path_prefix}/{relative}")
+
+    store = EmulatorProfileStore(managed_file("emulator-profiles.db"))
     profiles = EmulatorProfileService(
         store=store,
         probe=AdbEmulatorProbe(adb_path=resolve_adb_path),
@@ -875,8 +890,8 @@ def compose_production_emulator_runtime(
         discover=(discover_emulators if callable(discover_emulators) else adb_discovery.discover),
         clock=clock,
     )
-    runtime_dir = data_dir / "runtime"
-    artifacts = FilesystemArtifactStore(runtime_dir / "artifacts")
+    runtime_dir = managed_directory("runtime")
+    artifacts = FilesystemArtifactStore(managed_directory("runtime/artifacts"))
     transport = ProfileTransportResolver(store)
     observation = ProfileBoundObservationProvider(
         adb_path=resolve_adb_path,
@@ -895,7 +910,7 @@ def compose_production_emulator_runtime(
         )
 
     kernel = RuntimeKernel(
-        SQLiteRuntimeStore(runtime_dir / "runtime.db"),
+        SQLiteRuntimeStore(managed_file("runtime/runtime.db")),
         observation_provider=observation,
         artifact_store=artifacts,
         action_executor=GuiExecutorActionAdapter(
@@ -914,6 +929,7 @@ def compose_production_emulator_runtime(
             evidence=mobile_evidence,
             experience_service=experience_service,
             runtime_metadata=runtime_metadata,
+            managed_file=managed_file if managed_path_guard is not None else None,
         )
         if role_model is not None and mobile_evidence is not None
         else None
