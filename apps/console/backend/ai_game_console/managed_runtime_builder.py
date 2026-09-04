@@ -305,10 +305,6 @@ def _third_party_notices(runtime_root: Path, source_root: Path) -> list[dict[str
             if any(str(owner).casefold() == key for owner in owners)
             and any(item == module or item.startswith(module + ".") for item in frozen)
         )
-        if not top_levels:
-            # A distribution that is locked but absent from the final archive
-            # is not a runtime closure member (for example a platform extra).
-            continue
         fields = distribution.metadata if distribution is not None else None
         license_expression = (
             fields.get("License-Expression") or fields.get("License")
@@ -393,7 +389,7 @@ def _validate_notices(root: Path, manifest: dict[str, Any], *, source_root: Path
         if not key or key in names or not isinstance(version, str) or not version or not isinstance(source, dict) or not source or not isinstance(evidence, dict):
             raise ManagedRuntimeBuildError("managed runtime notices schema is unsupported")
         modules = evidence.get("frozen_top_level_modules")
-        if not isinstance(modules, list) or not modules or any(not isinstance(module, str) or not module for module in modules):
+        if not isinstance(modules, list) or any(not isinstance(module, str) or not module for module in modules):
             raise ManagedRuntimeBuildError("managed runtime notice evidence is invalid")
         names.add(key)
     if notices and not required <= names:
