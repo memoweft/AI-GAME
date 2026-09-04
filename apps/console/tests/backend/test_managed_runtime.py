@@ -231,25 +231,27 @@ def test_managed_guard_rejects_preexisting_logs_junction(tmp_path: Path) -> None
     logs.rmdir()
 
 
-def test_managed_guard_rejects_lock_and_sqlite_symlink_escape(tmp_path: Path) -> None:
+def test_managed_guard_rejects_lock_and_sqlite_junction_escape(tmp_path: Path) -> None:
     root = tmp_path / "writable"
     guard = ManagedPathGuard(writable_root=root, data_dir=root / "data", immutable_roots=())
     guard.prepare()
     outside = tmp_path / "outside"
     outside.mkdir()
-    target = outside / "escape.db"
-    target.write_bytes(b"x")
     lock = root / "data" / ".ai-game-managed.lock"
     database = root / "data" / "console.db"
     for candidate in (lock, database):
-        try:
-            candidate.symlink_to(target)
-        except OSError:
-            pytest.skip("symlink creation is unavailable on this Windows test host")
+        completed = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(candidate), str(outside)],
+            capture_output=True, text=True, check=False,
+        )
+        if completed.returncode != 0:
+            pytest.skip("junction creation is unavailable on this Windows test host")
     with pytest.raises(ManagedProtocolError, match="reparse"):
         guard.file(".ai-game-managed.lock")
     with pytest.raises(ManagedProtocolError, match="reparse"):
         guard.file("console.db")
+    lock.rmdir()
+    database.rmdir()
 
 
 def test_managed_guard_rejects_writable_root_inside_an_install_root(tmp_path: Path, monkeypatch) -> None:

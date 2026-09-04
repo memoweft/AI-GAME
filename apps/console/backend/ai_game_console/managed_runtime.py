@@ -74,6 +74,18 @@ class ManagedPathGuard:
         path = self._relative(relative)
         self._create_directory(path.parent, parent_limit=self.data_dir)
         self._assert_confined(path.parent, require_exists=True)
+        # A preexisting final name can itself be a file symlink or a junction
+        # named like a database/lock.  Inspect its link object before opening;
+        # otherwise an ``open`` error would safely fail but lose the reason,
+        # and (for a file link) risk following the target first.
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            raise ManagedProtocolError("managed writable path is unavailable") from error
+        else:
+            _reject_reparse_ancestors(path)
         try:
             with path.open("xb"):
                 pass
