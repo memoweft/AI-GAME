@@ -5,6 +5,7 @@ import json
 import socket
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 import threading
 import time
 
@@ -13,6 +14,8 @@ import pytest
 import ai_game_console.managed_runtime as managed_runtime
 import ai_game_console.managed_runtime_builder as managed_runtime_builder
 from ai_game_console.config import Settings
+from ai_game_console.api import create_app
+from ai_game_console.discovery import AdbDiscoveryResult
 from ai_game_console.execution_contract import ExecutionContractError, V2ExecutionContractService
 from ai_game_console.managed_runtime import (
     MAX_STARTUP_FRAME_BYTES,
@@ -79,6 +82,7 @@ def test_managed_startup_requires_a_finite_exact_schema_and_hides_secrets(tmp_pa
     token = "secret-capability-" + "x" * 32
     frame = read_startup_frame(io.BytesIO(_frame(tmp_path, capability=token)))
     assert frame.data_dir == (tmp_path / "data").resolve()
+    assert frame.execution is None
     assert token not in repr(frame)
     payload = json.loads(_frame(tmp_path).decode("utf-8"))
     payload["extra"] = True
@@ -86,6 +90,107 @@ def test_managed_startup_requires_a_finite_exact_schema_and_hides_secrets(tmp_pa
         read_startup_frame(io.BytesIO((json.dumps(payload) + "\n").encode()))
     with pytest.raises(ManagedProtocolError):
         read_startup_frame(io.BytesIO(b"x" * (MAX_STARTUP_FRAME_BYTES + 1)))
+
+
+@pytest.mark.parametrize("execution", ["absent", None, {"enabled": False}])
+def test_managed_execution_disabled_or_null_preserves_needs_setup_settings(
+    tmp_path: Path, execution: object,
+) -> None:
+    encoded = _frame(tmp_path) if execution == "absent" else _frame(
+        tmp_path, execution=execution
+    )
+    frame = read_startup_frame(io.BytesIO(encoded))
+    settings = managed_runtime.build_managed_settings(frame)
+
+    assert settings.managed_runtime is True
+    assert settings.gui_executor_enabled is False
+    assert settings.adb_path is None
+    assert settings.adb_serial is None
+    assert settings.mobile_role_endpoint is None
+    assert settings.mobile_role_model is None
+    assert settings.mobile_role_api_key is None
+
+    app = create_app(
+        settings=settings,
+        adb_discovery=SimpleNamespace(
+            discover=lambda: AdbDiscoveryResult("not_configured", None, "fixture", (), ())
+        ),
+        long_task_scheduler=SimpleNamespace(poll_once=lambda: 0),
+    )
+    health = app.state.execution_contract_v2.health()
+    assert health["status"] == "needs_setup"
+    assert health["capabilities"]["android_ui_agent"]["available"] is False
+    assert health["setup_reasons"] == ["managed_executor_verification_required"]
+
+
+def test_managed_execution_enabled_maps_only_memory_settings_and_makes_v2_ready(
+    tmp_path: Path,
+) -> None:
+    adb = tmp_path / "adb.exe"
+    adb.write_bytes(b"fixture")
+    api_key = "model-secret-that-must-remain-in-memory"
+    frame = read_startup_frame(io.BytesIO(_frame(tmp_path, execution={
+        "enabled": True,
+        "adb_path": str(adb),
+        "adb_serial": "127.0.0.1:16384",
+        "model": {
+            "endpoint": "http://127.0.0.1:18080/v1",
+            "name": "qwen3.8-27b",
+            "api_key": api_key,
+        },
+    })))
+    settings = managed_runtime.build_managed_settings(frame)
+
+    assert settings.gui_executor_enabled is True
+    assert settings.adb_path == str(adb.resolve())
+    assert settings.adb_serial == "127.0.0.1:16384"
+    assert settings.mobile_role_endpoint == "http://127.0.0.1:18080/v1"
+    assert settings.mobile_role_model == "qwen3.8-27b"
+    assert settings.mobile_role_api_key == api_key
+    assert api_key not in repr(frame)
+    assert api_key not in repr(settings)
+
+    app = create_app(
+        settings=settings,
+        adb_discovery=SimpleNamespace(
+            discover=lambda: AdbDiscoveryResult("ready", str(adb), "fixture", (), ())
+        ),
+        long_task_scheduler=SimpleNamespace(poll_once=lambda: 0),
+    )
+    health = app.state.execution_contract_v2.health()
+    assert health["status"] == "ready"
+    assert health["capabilities"]["android_ui_agent"] == {
+        "state": "ready", "available": True, "version": "1",
+    }
+    assert health["setup_reasons"] == []
+
+
+@pytest.mark.parametrize("mutation", [
+    {"enabled": False, "model": {}},
+    {"enabled": True, "adb_path": "missing-adb.exe", "model": {
+        "endpoint": "http://127.0.0.1:18080/v1", "name": "qwen",
+    }},
+    {"enabled": True, "adb_path": "{adb}", "adb_serial": "127.0.0.1:70000", "model": {
+        "endpoint": "http://127.0.0.1:18080/v1", "name": "qwen",
+    }},
+    {"enabled": True, "adb_path": "{adb}", "model": {
+        "endpoint": "http://example.com:18080/v1", "name": "qwen",
+    }},
+    {"enabled": True, "adb_path": "{adb}", "model": {
+        "endpoint": "http://127.0.0.1:18080/v1", "name": "",
+    }},
+])
+def test_managed_execution_invalid_shapes_fail_closed(
+    tmp_path: Path, mutation: dict[str, object],
+) -> None:
+    adb = tmp_path / "adb.exe"
+    adb.write_bytes(b"fixture")
+    serialized = json.loads(json.dumps(mutation))
+    if serialized.get("adb_path") == "{adb}":
+        serialized["adb_path"] = str(adb)
+
+    with pytest.raises(ManagedProtocolError):
+        read_startup_frame(io.BytesIO(_frame(tmp_path, execution=serialized)))
 
 
 def test_managed_startup_rejects_data_dir_outside_root_and_reparse_ancestors(tmp_path: Path) -> None:

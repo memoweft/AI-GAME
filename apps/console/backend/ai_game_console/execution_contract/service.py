@@ -921,6 +921,7 @@ class V2ExecutionContractService:
         frames: V2FramePort | None = None,
         runner_ready: bool = True,
         runner_setup_reasons: tuple[str, ...] = (),
+        direct_device_ready: bool = False,
     ) -> None:
         self.store = store
         self.tasks = tasks
@@ -929,6 +930,7 @@ class V2ExecutionContractService:
         self.frames = frames
         self.runner_ready = runner_ready
         self.runner_setup_reasons = tuple(runner_setup_reasons)
+        self.direct_device_ready = direct_device_ready
 
     def health(self) -> dict[str, Any]:
         return {
@@ -940,6 +942,12 @@ class V2ExecutionContractService:
                 "experience": self.experiences is not None,
                 "emulator_discovery": self.device_profiles is not None,
                 "verified_frames": self.frames is not None,
+                "direct_device": {
+                    "state": "ready" if self.direct_device_ready else "needs_setup",
+                    "available": self.direct_device_ready,
+                    "requires_model": False,
+                    "version": "1",
+                },
                 "android_ui_agent": {
                     "state": "ready" if self.runner_ready else "needs_setup",
                     "available": self.runner_ready,

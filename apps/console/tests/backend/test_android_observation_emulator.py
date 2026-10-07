@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import subprocess
 
+import pytest
+
 from ai_game_console.runtime_adapters.android.observation import AndroidObservationProvider
 
 
@@ -12,7 +14,8 @@ PNG = (
 )
 
 
-def test_emulator_observation_resolves_canonical_identity_and_is_fresh_without_local_adb() -> None:
+@pytest.mark.parametrize("include_screenshot", [True, False])
+def test_emulator_observation_resolves_canonical_identity_and_is_fresh_without_local_adb(include_screenshot: bool) -> None:
     timestamps = iter((
         "2026-08-30T00:00:00+00:00", "2026-08-30T00:00:01+00:00",
         "2026-08-30T00:00:02+00:00", "2026-08-30T00:00:03+00:00",
@@ -44,11 +47,12 @@ def test_emulator_observation_resolves_canonical_identity_and_is_fresh_without_l
         clock=lambda: next(timestamps),
         transport_device_id_resolver=lambda device_id: "adb:emulator-5554" if device_id == "emulator:profile-a" else device_id,
     )
-    observation = provider.capture("emulator:profile-a")
+    observation = provider.capture("emulator:profile-a", include_screenshot=include_screenshot)
 
     assert observation.device_id == "emulator:profile-a"
     assert observation.capture_started_at < observation.capture_completed_at
     assert observation.device_state.foreground_app == "com.android.settings"
-    assert observation.screenshot.width == 1080
+    assert observation.screenshot.width == (1080 if include_screenshot else None)
+    assert any(command[-3:] == ("exec-out", "screencap", "-p") for command in commands) is include_screenshot
     assert observation.ui_tree.content is not None
     assert all("emulator-5554" in command for command in commands)

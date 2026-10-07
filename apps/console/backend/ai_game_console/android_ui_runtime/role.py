@@ -23,6 +23,7 @@ class PlanningContext:
     criteria: CriteriaRevision
     observation: ObservationEnvelope
     experience_hints: tuple[Mapping[str, Any], ...] = ()
+    recent_actions: tuple[Mapping[str, Any], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,7 +89,7 @@ class BoundedToolRoleAdapter:
         reply = self._call(
             context.observation,
             system="You are a bounded Android UI planner. Preserve every frozen criterion.",
-            prompt={"goal": context.goal, "criteria": [c.description for c in context.criteria.criteria], "ui_summary": context.observation.ui_summary, "hints": list(context.experience_hints)},
+            prompt={"goal": context.goal, "criteria": [c.description for c in context.criteria.criteria], "ui_summary": context.observation.ui_summary, "hints": list(context.experience_hints), "recent_actions": list(context.recent_actions)},
             tool_name="record_android_plan",
             parameters={"type": "object", "additionalProperties": False, "properties": {"plan": {"type": "string", "maxLength": 1000}}, "required": ["plan"]},
         )
@@ -102,11 +103,25 @@ class BoundedToolRoleAdapter:
                 "A terminal candidate is never success. selected_hint_id may name only an "
                 "exact supplied hint_id; when hints is empty it must be null."
             ),
-            prompt={"goal": context.goal, "criteria": [c.description for c in context.criteria.criteria], "plan": plan.get("plan", ""), "ui_summary": context.observation.ui_summary, "hints": list(context.experience_hints)},
+            prompt={"goal": context.goal, "criteria": [c.description for c in context.criteria.criteria], "plan": plan.get("plan", ""), "ui_summary": context.observation.ui_summary, "hints": list(context.experience_hints), "recent_actions": list(context.recent_actions)},
             tool_name="android_ui_step",
             parameters={
                 "type": "object", "additionalProperties": False,
-                "properties": {"kind": {"type": "string", "enum": ["action", "terminal_candidate", "replan"]}, "action": {"type": ["string", "null"], "enum": ["tap", "long_press", "swipe", "input_text", "back", "home", "recents", "open_app", "wait", None]}, "arguments": {"type": "object"}, "reason": {"type": "string", "maxLength": 600}, "selected_hint_id": {"type": ["string", "null"], "maxLength": 256}},
+                "properties": {"kind": {"type": "string", "enum": ["action", "terminal_candidate", "replan"]}, "action": {"type": ["string", "null"], "enum": ["tap", "long_press", "swipe", "input_text", "back", "home", "recents", "open_app", "wait", None]}, "arguments": {
+                    "type": "object", "additionalProperties": False,
+                    "description": "tap/long_press: x,y or only node_id. swipe: x,y,end_x,end_y. All coordinates are normalized fractions from 0 to 1, never pixels. input_text: text. open_app: package. wait: seconds. back/home/recents and non-action decisions: empty object.",
+                    "properties": {
+                        "x": {"type": "number", "minimum": 0, "maximum": 1, "description": "Start horizontal position as fraction of screenshot width."},
+                        "y": {"type": "number", "minimum": 0, "maximum": 1, "description": "Start vertical position as fraction of screenshot height."},
+                        "end_x": {"type": "number", "minimum": 0, "maximum": 1, "description": "Swipe end horizontal fraction."},
+                        "end_y": {"type": "number", "minimum": 0, "maximum": 1, "description": "Swipe end vertical fraction."},
+                        "node_id": {"type": "string", "description": "Exact clickable node identifier from this observation; use alone for tap/long_press."},
+                        "text": {"type": "string", "minLength": 1, "maxLength": 1000},
+                        "package": {"type": "string", "description": "Exact Android application package name."},
+                        "duration_ms": {"type": "integer", "minimum": 1, "maximum": 10000},
+                        "seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 10},
+                    },
+                }, "reason": {"type": "string", "maxLength": 600}, "selected_hint_id": {"type": ["string", "null"], "maxLength": 256}},
                 "required": ["kind", "action", "arguments", "reason", "selected_hint_id"],
             },
         )

@@ -60,6 +60,7 @@ from .device_body.domain import ConnectionState, DeviceBodyBinding
 from .device_body.kernel_bridge import KernelDeviceBodyBridge
 from .device_body.store import SQLiteDeviceBodyStore
 from .device_lease import DeviceExecutionLease
+from .device_runs import DeviceRunService, DeviceRunStore, create_device_runs_router
 from .execution import GuiExecutor
 from .experience_runtime import ExperienceService, SQLiteExperienceStore
 from .gui_owl_client import OpenAICompatibleGuiOwlClient
@@ -819,11 +820,19 @@ def create_app(
         if resolved_settings.kernel_canary_enabled
         else None
     )
-    # A managed instance must be able to expose health and persisted state on
-    # a clean machine.  Kernel composition remains deliberately disabled until
-    # a later host-owned executor readiness phase has verified its dependencies.
-    kernel_runtime_enabled = (
-        kernel_binding_kind is not None and not resolved_settings.managed_runtime
+    # A managed instance without a host-supplied execution binding exposes only
+    # health and persisted state.  A complete stdin-only binding may enable the
+    # same Kernel composition used by the local launcher.
+    managed_executor_configured = bool(
+        resolved_settings.managed_runtime
+        and resolved_settings.gui_executor_enabled
+        and resolved_settings.adb_path
+        and resolved_settings.mobile_role_endpoint
+        and resolved_settings.mobile_role_model
+    )
+    kernel_runtime_enabled = bool(
+        kernel_binding_kind is not None
+        and (not resolved_settings.managed_runtime or managed_executor_configured)
     )
     append_mode_journal(
         managed_file("logs/runtime-mode.jsonl"),
@@ -1458,6 +1467,22 @@ def create_app(
         mobile_evidence=mobile_evidence,
         experience_service=experience_service,
         managed_path_guard=resolved_settings.managed_path_guard,
+        device_lease=device_execution_lease,
+    )
+    resolve_direct_adb_path = getattr(resolved_adb_discovery, "resolve_adb_path", None)
+    if not callable(resolve_direct_adb_path):
+        resolve_direct_adb_path = lambda: resolved_settings.adb_path
+    direct_device_runs = DeviceRunService(
+        store=DeviceRunStore(managed_file("device-runs.db")),
+        profiles=production_emulator.profiles,
+        device_lease=device_execution_lease,
+        executor_for_serial=lambda serial: AdbGuiExecutor(
+            enabled=resolved_settings.gui_executor_enabled,
+            adb_path=resolve_direct_adb_path(), serial=serial,
+        ),
+        observation_for_serial=lambda serial: AndroidObservationProvider(
+            adb_path=resolve_direct_adb_path(),
+        ),
     )
     resolved_execution_v2_device_profiles = (
         execution_v2_device_profiles or production_emulator.profile_port
@@ -1476,10 +1501,17 @@ def create_app(
             device_profiles=resolved_execution_v2_device_profiles,
             experiences=ExperiencePortAdapter(experience_service),
             frames=resolved_execution_v2_frames,
-            runner_ready=not resolved_settings.managed_runtime and production_emulator.general_ui is not None,
+            direct_device_ready=bool(
+                resolved_settings.gui_executor_enabled
+                and resolve_direct_adb_path() is not None
+            ),
+            runner_ready=(
+                production_emulator.general_ui is not None
+                and (not resolved_settings.managed_runtime or managed_executor_configured)
+            ),
             runner_setup_reasons=(
                 ("managed_executor_verification_required",)
-                if resolved_settings.managed_runtime
+                if resolved_settings.managed_runtime and not managed_executor_configured
                 else ()
             ),
         )
@@ -1614,6 +1646,7 @@ def create_app(
                 shutdown_callbacks.append(kernel_coordinator.shutdown)
             # Week 6: 停止 Lease 后台清理并关闭 runtime.db（未初始化时为空操作）
             shutdown_callbacks.append(resolved_runtime_admin.shutdown)
+            shutdown_callbacks.append(direct_device_runs.close)
             shutdown_callbacks.append(production_emulator.close)
             # Phase 6 Week 3: 显式启用 Gateway 时关闭 gateway.db 与 Runtime 存储
             if resolved_gateway is not None:
@@ -1653,6 +1686,7 @@ def create_app(
     app.state.cloud_configuration = resolved_cloud_configuration
     app.state.game_learner = resolved_game_learner
     app.state.device_execution_lease = device_execution_lease
+    app.state.direct_device_runs = direct_device_runs
     app.state.mobile_task_runtime = resolved_mobile_tasks
     app.state.mobile_task_archive = resolved_mobile_task_archive
     app.state.goal_service = resolved_goal_service
@@ -2517,6 +2551,7 @@ def create_app(
             token=resolved_settings.harness_api_token,
         )
     )
+    app.include_router(create_device_runs_router(direct_device_runs, token=resolved_settings.harness_api_token))
     app.include_router(create_goal_router(resolved_goal_service))
     app.include_router(create_agent_session_router(resolved_agent_session_service))
     app.include_router(create_user_fact_router(fact_question_coordinator))

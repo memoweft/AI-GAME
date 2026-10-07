@@ -246,19 +246,10 @@ def create_execution_router(
     return router
 
 
-def create_execution_v2_router(
-    service: V2ExecutionContractService, *, token: str | None,
-    capability_context: dict[str, Any] | None = None,
-) -> APIRouter:
-    """Build, but do not compose, the long-lived v2 router.
-
-    ``capability_context`` is authenticated host context, never request data.
-    Its stable principal/controller IDs are deliberately separate from DSH
-    session/turn/tool provenance.  Final application composition is owned by the integration
-    package.  Keeping construction here lets focused tests compose this router
-    with fake canonical Task/Profile/Experience ports.
-    """
-    router = APIRouter(prefix="/api/execution/v2", tags=["execution-v2"])
+def create_v2_authorizer(
+    *, token: str | None, capability_context: dict[str, Any] | None = None,
+):
+    """Shared authenticated host identity for task and direct-device routes."""
     expected_context: dict[str, Any] | None = None
     if capability_context is not None:
         expected_context = CapabilityAuthContext.model_validate(capability_context).model_dump(mode="json")
@@ -312,6 +303,24 @@ def create_execution_v2_router(
                 "EXECUTION_CLIENT_UNAUTHORIZED",
                 "The local execution client is not authorized.", 403,
             ) from None
+
+    return authorize
+
+
+def create_execution_v2_router(
+    service: V2ExecutionContractService, *, token: str | None,
+    capability_context: dict[str, Any] | None = None,
+) -> APIRouter:
+    """Build, but do not compose, the long-lived v2 router.
+
+    ``capability_context`` is authenticated host context, never request data.
+    Its stable principal/controller IDs are deliberately separate from DSH
+    session/turn/tool provenance.  Final application composition is owned by the integration
+    package.  Keeping construction here lets focused tests compose this router
+    with fake canonical Task/Profile/Experience ports.
+    """
+    router = APIRouter(prefix="/api/execution/v2", tags=["execution-v2"])
+    authorize = create_v2_authorizer(token=token, capability_context=capability_context)
 
     def query_origin(
         dsh_session_id: str = Query(min_length=1, max_length=256),

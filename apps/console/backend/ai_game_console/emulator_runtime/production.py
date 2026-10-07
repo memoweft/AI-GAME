@@ -858,6 +858,7 @@ def compose_production_emulator_runtime(
     experience_service: Any | None = None,
     managed_path_guard: Any | None = None,
     managed_path_prefix: str = "emulator-runtime",
+    device_lease: Any | None = None,
 ) -> ProductionEmulatorComposition:
     """Construct production ports without discovering or touching a device."""
 
@@ -930,6 +931,7 @@ def compose_production_emulator_runtime(
             experience_service=experience_service,
             runtime_metadata=runtime_metadata,
             managed_file=managed_file if managed_path_guard is not None else None,
+            device_lease=device_lease,
         )
         if role_model is not None and mobile_evidence is not None
         else None

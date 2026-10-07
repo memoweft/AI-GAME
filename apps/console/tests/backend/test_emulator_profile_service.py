@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 
 from ai_game_console.discovery import AdbDevice
 from ai_game_console.domain import TargetStatus
@@ -92,6 +93,158 @@ def test_profile_serial_rotation_increments_generation_but_boot_or_fingerprint_d
     store.close()
 
 
+def test_repeated_discovery_and_save_reuses_one_profile_identity() -> None:
+    probes = _Probes()
+    store, service = _service(probes)
+    candidate = _device(model="sdk_gphone64_x86_64")
+
+    first = service.save_selected(
+        **OWNER_A, candidate=candidate, display_name="first", is_default=True
+    )
+    assert service.discover_candidates(**OWNER_A, devices=[candidate]) == ()
+    repeated = service.save_selected(
+        **OWNER_A, candidate=candidate, display_name="duplicate", is_default=True
+    )
+
+    assert repeated.profile_id == first.profile_id
+    assert repeated.display_name == "first"
+    assert len(store.list_profiles(
+        owner_principal_id=OWNER_A["principal_id"],
+        owner_controller_id=OWNER_A["controller_id"],
+    )) == 1
+    store.close()
+
+
+def test_same_transport_and_fingerprint_reuses_profile_after_boot_change() -> None:
+    probes = _Probes()
+    store, service = _service(probes)
+    candidate = _device(model="sdk_gphone64_x86_64")
+    original = service.save_selected(
+        **OWNER_A, candidate=candidate, display_name="original", is_default=True
+    )
+    probes.value = EmulatorProbe(
+        original.transport_serial,
+        EmulatorProfileState.READY,
+        "boot-replaced",
+        FINGERPRINT,
+        ("screen",),
+    )
+
+    assert service.discover_candidates(**OWNER_A, devices=[candidate]) == ()
+    restarted = service.save_selected(
+        **OWNER_A, candidate=candidate, display_name="replacement", is_default=True
+    )
+    assert restarted.profile_id == original.profile_id
+    assert restarted.boot_id == "boot-replaced"
+    store.close()
+
+
+def test_duplicate_legacy_profiles_coalesce_without_breaking_old_ids() -> None:
+    probes = _Probes()
+    store, service = _service(probes)
+    original = service.save_selected(
+        **OWNER_A,
+        candidate=_device(model="sdk_gphone64_x86_64"),
+        display_name="V2241A",
+        is_default=True,
+    )
+    duplicate = replace(
+        original,
+        profile_id="profile_legacy_duplicate",
+        canonical_device_id="emulator:profile_legacy_duplicate",
+        display_name="V2241A copy",
+        is_default=False,
+    )
+    store.save_profile(duplicate)
+
+    calls_before_projection = probes.calls
+    projected = service.projections(**OWNER_A)
+    assert probes.calls == calls_before_projection + 1
+    assert len(projected) == 1
+    assert projected[0]["profile_id"] == original.profile_id
+    assert service.require_profile(
+        **OWNER_A, profile_id=original.profile_id
+    ).profile_id == original.profile_id
+    assert service.require_profile(
+        **OWNER_A, profile_id=duplicate.profile_id
+    ).profile_id == duplicate.profile_id
+    store.close()
+
+
+def test_three_duplicates_remain_coalesced_across_boot_change_and_discovery() -> None:
+    probes = _Probes()
+    store, service = _service(probes)
+    original = service.save_selected(
+        **OWNER_A,
+        candidate=_device(model="V2241A"),
+        display_name="V2241A",
+        is_default=True,
+    )
+    duplicates = []
+    for suffix in ("two", "three"):
+        duplicate = replace(
+            original,
+            profile_id=f"profile_legacy_{suffix}",
+            canonical_device_id=f"emulator:profile_legacy_{suffix}",
+            display_name=f"V2241A {suffix}",
+            is_default=False,
+        )
+        store.save_profile(duplicate)
+        duplicates.append(duplicate)
+
+    probes.value = EmulatorProbe(
+        original.transport_serial,
+        EmulatorProfileState.READY,
+        "boot-after-restart",
+        FINGERPRINT,
+        ("screen",),
+    )
+    first_projection = service.projections(**OWNER_A)
+    assert len(first_projection) == 1
+    assert first_projection[0]["profile_id"] == original.profile_id
+    assert service.discover_candidates(
+        **OWNER_A, devices=[_device(model="V2241A")]
+    ) == ()
+    second_projection = service.projections(**OWNER_A)
+    assert len(second_projection) == 1
+    assert second_projection[0]["profile_id"] == original.profile_id
+    assert second_projection[0]["state"] == "ready"
+    assert service.require_profile(
+        **OWNER_A, profile_id=duplicates[1].profile_id
+    ).profile_id == duplicates[1].profile_id
+    store.close()
+
+
+def test_profile_projection_reports_fresh_connection_state() -> None:
+    probes = _Probes()
+    store, service = _service(probes)
+    profile = service.save_selected(
+        **OWNER_A, candidate=_device(), display_name="V2241A", is_default=True
+    )
+    probes.value = EmulatorProbe(
+        profile.transport_serial,
+        EmulatorProfileState.OFFLINE,
+        None,
+        None,
+        error_code="emulator_offline",
+    )
+    disconnected = service.projections(**OWNER_A)
+    assert disconnected[0]["state"] == "offline"
+    assert disconnected[0]["is_default"] is True
+
+    probes.value = EmulatorProbe(
+        profile.transport_serial,
+        EmulatorProfileState.READY,
+        "boot-a",
+        FINGERPRINT,
+        ("screen",),
+    )
+    connected = service.projections(**OWNER_A)
+    assert connected[0]["state"] == "ready"
+    assert connected[0]["is_default"] is True
+    store.close()
+
+
 def test_default_is_unique_and_offline_profile_is_explainable() -> None:
     probes = _Probes()
     store, service = _service(probes)
@@ -169,6 +322,7 @@ def test_profile_is_owned_by_principal_controller_pair_and_wrong_owner_never_pro
     # pair receives the same saved/default profile.
     assert service.default_profile(**OWNER_A).profile_id == profile.profile_id
     assert service.projections(**OWNER_A)[0]["profile_id"] == profile.profile_id
+    calls_after_projection = probes.calls
     for foreign_owner in (OWNER_A_OTHER_CONTROLLER, OWNER_B):
         assert service.projections(**foreign_owner) == ()
         try:
@@ -184,7 +338,8 @@ def test_profile_is_owned_by_principal_controller_pair_and_wrong_owner_never_pro
                 assert error.code == "emulator_profile_not_found"
             else:  # pragma: no cover - test guard
                 raise AssertionError("foreign owner mutated another owner's profile")
-    assert probes.calls == calls_after_save
+    assert calls_after_projection == calls_after_save + 1
+    assert probes.calls == calls_after_projection
 
     other = service.save_selected(
         **OWNER_A_OTHER_CONTROLLER,

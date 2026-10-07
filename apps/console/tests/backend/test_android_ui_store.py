@@ -147,6 +147,42 @@ def _verified_already(
     )
 
 
+def test_partly_satisfied_verification_retains_grounding_without_claiming_success(tmp_path) -> None:
+    grounding = _TrustedGrounding()
+    store = SQLiteAndroidUiStepStore(tmp_path / "partial.db", grounding=grounding)
+    observation, marker, node_id = _target_observation()
+    criteria_values = (Criterion("c1", "visible target", (marker,)), Criterion("c2", "another target", (evidence_marker("page_title", "another target"),)))
+    criteria = CriteriaRevision(1, criteria_values, criteria_digest(criteria_values))
+    _reserve_terminal(store, criteria, observation)
+    grounding.trust(observation, 0)
+    class PartialRole:
+        def verify_goal(self, *args, **kwargs):
+            return (_SatisfiedRole(marker, observation.freshness_token, node_id)._verdict, CriterionVerdict("c2", "unknown"))
+    record = EvidenceBoundSemanticVerifier(PartialRole(), grounding=grounding).verify(
+        snapshot=_snapshot(), runner_kind="android_ui_agent", runner_version=1,
+        goal="two target conditions", criteria=criteria, before=observation, after=observation,
+        latest_step_index=0, already_satisfied=True,
+    )
+    assert record.overall == "unknown"
+    store.record_verification(record)
+    assert store.safe_goal_verifications("task-1")[0]["overall"] == "unknown"
+    assert store.trusted_terminal_for(_snapshot(), criteria, runner_kind="android_ui_agent", runner_version=1, model_version="unknown", prompt_version="android-ui-semantic-v1") is None
+
+
+def test_retry_without_decision_refreshes_before_but_bound_decision_stays_immutable(tmp_path) -> None:
+    store = SQLiteAndroidUiStepStore(tmp_path / "steps.db")
+    first = _observation()
+    fresh = replace(first, freshness_token="fresh-2", screenshot_digest="d" * 64)
+    reservation = store.reserve_step(task_id="task-1", revision=1, before=first, snapshot=_snapshot())
+    retried = store.reserve_step(task_id="task-1", revision=1, before=fresh, snapshot=_snapshot())
+    assert retried.step_index == reservation.step_index
+    assert store.before_matches(retried, fresh)
+    store.record_decision(retried, RoleDecision("action", AndroidUiAction("back")))
+    store.reserve_step(task_id="task-1", revision=1, before=first, snapshot=_snapshot())
+    assert store.before_matches(retried, fresh)
+    assert not store.before_matches(retried, first)
+
+
 def test_freeze_and_intent_are_immutable_and_input_text_is_redacted(tmp_path: object) -> None:
     store = SQLiteAndroidUiStepStore(tmp_path / "steps.sqlite")  # type: ignore[operator]
     from ai_game_console.android_ui_runtime.domain import criteria_digest

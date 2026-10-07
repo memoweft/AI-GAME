@@ -156,6 +156,7 @@ def test_emulator_discovery_restores_one_confirmed_running_mumu_transport(tmp_pa
                 stdout=json.dumps({
                     "0": {
                         "index": "0",
+                        "adb_host_ip": "127.0.0.1",
                         "adb_port": 16384,
                         "is_android_started": True,
                         "is_process_started": True,
@@ -190,11 +191,9 @@ def test_emulator_discovery_does_not_connect_without_exact_running_mumu_identity
     unsafe_entries = (
         {"0": {"index": "0", "adb_host_ip": "192.168.1.2", "adb_port": 16384,
                "is_android_started": True, "is_process_started": True, "player_state": "start_finished"}},
-        {"0": {"index": "0", "adb_port": 16384,
+        {"0": {"index": "0", "adb_host_ip": "127.0.0.1", "adb_port": 16384,
                "is_android_started": False, "is_process_started": True, "player_state": "start_finished"}},
         {"0": {"index": "0", "adb_port": 16384,
-               "is_android_started": True, "is_process_started": True, "player_state": "start_finished"},
-         "1": {"index": "1", "adb_port": 16416,
                "is_android_started": True, "is_process_started": True, "player_state": "start_finished"}},
     )
 
@@ -229,6 +228,22 @@ def test_emulator_discovery_does_not_reconnect_when_an_emulator_is_already_ready
     def runner(command):
         command = tuple(command)
         commands.append(command)
+        if command == (str(cli), "info", "--vmindex", "all"):
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps({
+                    "7": {
+                        "index": 7,
+                        "adb_host_ip": "127.0.0.1",
+                        "adb_port": 16384,
+                        "is_android_started": True,
+                        "is_process_started": True,
+                        "player_state": "start_finished",
+                    }
+                }),
+                stderr="",
+            )
         return subprocess.CompletedProcess(
             command,
             0,
@@ -240,4 +255,120 @@ def test_emulator_discovery_does_not_reconnect_when_an_emulator_is_already_ready
     result = AdbTargetDiscovery(adb_path=adb, runner=runner).discover_emulators()
 
     assert len(emulator_adb_devices(result.devices)) == 1
-    assert commands == [(str(adb.resolve()), "devices", "-l")]
+    assert commands == [
+        (str(adb.resolve()), "devices", "-l"),
+        (str(cli), "info", "--vmindex", "all"),
+    ]
+
+
+def test_emulator_discovery_uses_manager_to_restore_all_valid_running_transports(
+    tmp_path: Path,
+) -> None:
+    mumu_root = tmp_path / "MuMuPlayer"
+    adb = mumu_root / "nx_device" / "15.0" / "shell" / "adb.exe"
+    manager = mumu_root / "nx_main" / "MuMuManager.exe"
+    legacy_cli = mumu_root / "nx_main" / "mumu-cli.exe"
+    adb.parent.mkdir(parents=True)
+    manager.parent.mkdir(parents=True)
+    adb.touch()
+    manager.touch()
+    legacy_cli.touch()
+    commands: list[tuple[str, ...]] = []
+    inventories = iter((
+        "List of devices attached\n",
+        "List of devices attached\n"
+        "127.0.0.2:24567 device product:MuMu model:Second device:V2241A\n"
+        "127.0.0.1:23456 device product:MuMu model:First device:V2241A\n",
+    ))
+
+    def runner(command):
+        command = tuple(command)
+        commands.append(command)
+        if command == (str(adb.resolve()), "devices", "-l"):
+            return subprocess.CompletedProcess(command, 0, stdout=next(inventories), stderr="")
+        if command == (str(manager), "info", "--vmindex", "all"):
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps({
+                "3": {
+                    "index": 3, "adb_host_ip": "127.0.0.2", "adb_port": 24567,
+                    "is_android_started": True, "is_process_started": True,
+                    "player_state": "start_finished",
+                },
+                "9": {
+                    "adb_host_ip": "127.0.0.1", "adb_port": "23456",
+                    "is_android_started": True, "is_process_started": True,
+                    "player_state": "start_finished",
+                },
+                "12": {
+                    "index": 12, "adb_host_ip": "127.0.0.1", "adb_port": 34567,
+                    "is_android_started": False, "is_process_started": True,
+                    "player_state": "start_finished",
+                },
+                "15": {
+                    "index": 15, "adb_host_ip": "192.168.1.20", "adb_port": 45678,
+                    "is_android_started": True, "is_process_started": True,
+                    "player_state": "start_finished",
+                },
+            }), stderr="")
+        if command[1:2] == ("connect",):
+            return subprocess.CompletedProcess(command, 0, stdout="connected", stderr="")
+        raise AssertionError(command)
+
+    result = AdbTargetDiscovery(adb_path=adb, runner=runner).discover_emulators()
+
+    assert commands == [
+        (str(adb.resolve()), "devices", "-l"),
+        (str(manager), "info", "--vmindex", "all"),
+        (str(adb.resolve()), "connect", "127.0.0.2:24567"),
+        (str(adb.resolve()), "connect", "127.0.0.1:23456"),
+        (str(adb.resolve()), "devices", "-l"),
+    ]
+    assert [item.serial for item in emulator_adb_devices(result.devices)] == [
+        "127.0.0.2:24567", "127.0.0.1:23456",
+    ]
+
+
+def test_emulator_discovery_finds_manager_beside_nx_main_adb(tmp_path: Path) -> None:
+    nx_main = tmp_path / "MuMuPlayer" / "nx_main"
+    adb = nx_main / "adb.exe"
+    manager = nx_main / "MuMuManager.exe"
+    nx_main.mkdir(parents=True)
+    adb.touch()
+    manager.touch()
+    commands: list[tuple[str, ...]] = []
+    inventories = iter((
+        "List of devices attached\n",
+        "List of devices attached\n"
+        "127.0.0.1:27891 device product:MuMu model:V2241A device:V2241A\n",
+    ))
+
+    def runner(command):
+        command = tuple(command)
+        commands.append(command)
+        if command == (str(adb.resolve()), "devices", "-l"):
+            return subprocess.CompletedProcess(command, 0, stdout=next(inventories), stderr="")
+        if command == (str(manager), "info", "--vmindex", "all"):
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps({
+                "4": {
+                    "index": 4,
+                    "adb_host_ip": "127.0.0.1",
+                    "adb_port": 27891,
+                    "is_android_started": True,
+                    "is_process_started": True,
+                    "player_state": "start_finished",
+                }
+            }), stderr="")
+        if command == (str(adb.resolve()), "connect", "127.0.0.1:27891"):
+            return subprocess.CompletedProcess(command, 0, stdout="connected", stderr="")
+        raise AssertionError(command)
+
+    result = AdbTargetDiscovery(adb_path=adb, runner=runner).discover_emulators()
+
+    assert commands == [
+        (str(adb.resolve()), "devices", "-l"),
+        (str(manager), "info", "--vmindex", "all"),
+        (str(adb.resolve()), "connect", "127.0.0.1:27891"),
+        (str(adb.resolve()), "devices", "-l"),
+    ]
+    assert [item.serial for item in emulator_adb_devices(result.devices)] == [
+        "127.0.0.1:27891"
+    ]

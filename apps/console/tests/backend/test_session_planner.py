@@ -5,6 +5,8 @@ from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import pytest
+
 from ai_game_console.agent_runtime.coverage import validate_complete_coverage
 from ai_game_console.agent_runtime.domain import (
     DirectiveKind,
@@ -19,7 +21,7 @@ from ai_game_console.agent_runtime.domain import (
     utc_now,
 )
 from ai_game_console.agent_runtime.planner import DeterministicSessionPlanner, FallbackSessionPlanner
-from ai_game_console.agent_runtime.service import AgentSessionService
+from ai_game_console.agent_runtime.service import AgentSessionService, CanonicalTaskService
 from ai_game_console.agent_runtime.store import SQLiteAgentRuntimeStore
 from ai_game_console.goal_runtime.qwen import StructuredSessionPlanner, _session_plan_from_decoded
 
@@ -352,6 +354,96 @@ def test_v1_migration_keeps_later_directive_pending_for_startup_planning(tmp_pat
     assert snapshot["goal_graph"]["revision"] == 2
     assert {item["original_fragment"] for item in snapshot["goal_nodes"]} == {"做 A", "再做 B"}
     assert len(snapshot["goal_coverage"]) == 2
+
+
+@pytest.mark.parametrize("task_status", ["scheduled", "running", "paused"])
+def test_startup_planning_never_claims_runner_owned_canonical_phone_task(
+    tmp_path: Path, task_status: str,
+) -> None:
+    class ExplodingPlanner:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def plan(self, **_: object):
+            self.calls += 1
+            raise AssertionError("paused Task must not call the planner")
+
+    store = SQLiteAgentRuntimeStore(tmp_path / "agent-runtime.db")
+    canonical = CanonicalTaskService(
+        store, principal_id="owner", controller_id="controller"
+    )
+    created = canonical.create_task(
+        "inspect one Android screen",
+        "phone-create",
+        origin={"runner_kind": "android_ui_agent", "runner_version": "1"},
+    )
+    task_id = created["task_id"]
+    if task_status == "running":
+        canonical.transition_task(
+            task_id,
+            status="running",
+            reason_code="runner_started",
+            summary="The assigned runner owns this Task.",
+            recoverable=True,
+            idempotency_key="phone-running",
+            expected_current_status="scheduled",
+        )
+    elif task_status == "paused":
+        canonical.control_task(
+            task_id,
+            action="pause",
+            idempotency_key="phone-pause",
+            expected_revision=created["current_revision"],
+            requested_by={"source": "test"},
+        )
+    planner = ExplodingPlanner()
+    service = AgentSessionService(
+        store,
+        PreparedGoalService(),
+        planner=planner,
+        recover_on_start=False,
+    )
+
+    session = store.get_session(task_id)
+    assert session.status.value == "PLANNING"
+    assert session.control_mode.value == "AGENT_ACTIVE"
+    assert store.get_task(task_id).status.value == task_status
+    assert store.graph_revision(task_id) is None
+    assert service.recover_planning() == 0
+    assert planner.calls == 0
+    assert store.graph_revision(task_id) is None
+
+
+def test_startup_planning_still_recovers_an_ordinary_unplanned_session(
+    tmp_path: Path,
+) -> None:
+    class RecordingPlanner:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.inner = DeterministicSessionPlanner()
+
+        def plan(self, **kwargs):
+            self.calls += 1
+            return self.inner.plan(**kwargs)
+
+    store = SQLiteAgentRuntimeStore(tmp_path / "ordinary-agent-runtime.db")
+    session, created = store.create_unplanned_session(
+        instruction="整理普通会话目标",
+        client_request_id="ordinary-session-create",
+    )
+    assert created is True
+    assert store.get_task(session.id).origin == {}
+    planner = RecordingPlanner()
+    service = AgentSessionService(
+        store,
+        PreparedGoalService(),
+        planner=planner,
+        recover_on_start=False,
+    )
+
+    assert service.recover_planning() == 1
+    assert planner.calls == 1
+    assert store.graph_revision(session.id) is not None
 
 
 def test_concurrent_directives_converge_on_one_latest_authority_snapshot(tmp_path: Path) -> None:

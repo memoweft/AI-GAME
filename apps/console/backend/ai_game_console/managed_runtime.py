@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from collections.abc import Callable
 from typing import BinaryIO, TextIO
+from urllib.parse import urlparse
 
 import uvicorn
 
@@ -28,11 +29,27 @@ from .config import Settings
 MANAGED_PROTOCOL_VERSION = 1
 MAX_STARTUP_FRAME_BYTES = 16 * 1024
 _NONCE = re.compile(r"^[A-Za-z0-9._-]{16,256}$")
+_ADB_SERIAL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
 _REPARSE_POINT = 0x0400
 
 
 class ManagedProtocolError(ValueError):
     """A deliberately non-echoing startup-frame error."""
+
+
+@dataclass(frozen=True, slots=True)
+class ManagedModelConfiguration:
+    endpoint: str
+    name: str
+    api_key: str | None = field(default=None, repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class ManagedExecutionConfiguration:
+    enabled: bool
+    adb_path: Path | None = None
+    adb_serial: str | None = None
+    model: ManagedModelConfiguration | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +62,7 @@ class ManagedStartupFrame:
     runtime_mode: str
     capability: str = field(repr=False)
     shutdown_token: str = field(repr=False)
+    execution: ManagedExecutionConfiguration | None = field(default=None, repr=False)
 
 
 class ManagedPathGuard:
@@ -213,7 +231,12 @@ def read_startup_frame(stream: BinaryIO) -> ManagedStartupFrame:
         "protocol_version", "nonce", "host", "port", "writable_root", "data_dir",
         "runtime_mode", "capability", "shutdown_token",
     }
-    if set(payload) != required or payload.get("protocol_version") != MANAGED_PROTOCOL_VERSION:
+    allowed = required | {"execution"}
+    if (
+        not required.issubset(payload)
+        or not set(payload).issubset(allowed)
+        or payload.get("protocol_version") != MANAGED_PROTOCOL_VERSION
+    ):
         raise ManagedProtocolError("managed startup frame schema is unsupported")
     nonce = payload["nonce"]
     host = payload["host"]
@@ -234,9 +257,11 @@ def read_startup_frame(stream: BinaryIO) -> ManagedStartupFrame:
     data_dir = _managed_path(payload["data_dir"], immutable_roots)
     if data_dir == writable_root or not data_dir.is_relative_to(writable_root):
         raise ManagedProtocolError("managed data directory must be inside writable root")
+    execution = _managed_execution_configuration(payload.get("execution"))
     return ManagedStartupFrame(
         nonce=nonce, host=host, port=port, writable_root=writable_root, data_dir=data_dir,
         runtime_mode=runtime_mode, capability=capability, shutdown_token=shutdown_token,
+        execution=execution,
     )
 
 
@@ -270,11 +295,20 @@ def build_managed_settings(frame: ManagedStartupFrame) -> Settings:
         immutable_roots=immutable_roots_for_runtime(),
     )
     guard.prepare()
+    execution = frame.execution
+    enabled = execution is not None and execution.enabled
+    model = execution.model if enabled else None
     return Settings(
         project_root=root,
         data_dir=frame.data_dir,
         database_path=frame.data_dir / "console.db",
         frontend_dist=frontend,
+        gui_executor_enabled=enabled,
+        adb_path=str(execution.adb_path) if enabled and execution.adb_path else None,
+        adb_serial=execution.adb_serial if enabled else None,
+        mobile_role_endpoint=model.endpoint if model else None,
+        mobile_role_model=model.name if model else None,
+        mobile_role_api_key=model.api_key if model else None,
         console_shutdown_token=frame.shutdown_token,
         harness_api_token=frame.capability,
         runtime_mode="kernel_active",
@@ -448,6 +482,113 @@ def _secret_shape(value: object) -> bool:
     return isinstance(value, str) and 32 <= len(value) <= 512 and "\x00" not in value
 
 
+def _managed_execution_configuration(value: object) -> ManagedExecutionConfiguration | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or not isinstance(value.get("enabled"), bool):
+        raise ManagedProtocolError("managed execution configuration is invalid")
+    if value["enabled"] is False:
+        if set(value) != {"enabled"}:
+            raise ManagedProtocolError("managed execution configuration is invalid")
+        return ManagedExecutionConfiguration(enabled=False)
+
+    required = {"enabled", "adb_path", "model"}
+    allowed = required | {"adb_serial"}
+    if not required.issubset(value) or not set(value).issubset(allowed):
+        raise ManagedProtocolError("managed execution configuration is invalid")
+    adb_path = _managed_adb_path(value["adb_path"])
+    adb_serial = _managed_adb_serial(value.get("adb_serial"))
+    model = _managed_model_configuration(value["model"])
+    return ManagedExecutionConfiguration(
+        enabled=True,
+        adb_path=adb_path,
+        adb_serial=adb_serial,
+        model=model,
+    )
+
+
+def _managed_adb_path(value: object) -> Path:
+    if not isinstance(value, str) or not value or "\x00" in value:
+        raise ManagedProtocolError("managed ADB configuration is invalid")
+    candidate = Path(value)
+    if (
+        not candidate.is_absolute()
+        or ".." in candidate.parts
+        or candidate.name.casefold() != "adb.exe"
+    ):
+        raise ManagedProtocolError("managed ADB configuration is invalid")
+    try:
+        resolved = candidate.resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise ManagedProtocolError("managed ADB configuration is invalid") from error
+    if not resolved.is_file():
+        raise ManagedProtocolError("managed ADB configuration is invalid")
+    _reject_reparse_ancestors(resolved)
+    return resolved
+
+
+def _managed_adb_serial(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not _ADB_SERIAL.fullmatch(value):
+        raise ManagedProtocolError("managed ADB configuration is invalid")
+    if value.startswith("-"):
+        raise ManagedProtocolError("managed ADB configuration is invalid")
+    match = re.fullmatch(r"[^:]+:([0-9]+)", value)
+    if match is not None and int(match.group(1)) > 65535:
+        raise ManagedProtocolError("managed ADB configuration is invalid")
+    return value
+
+
+def _managed_model_configuration(value: object) -> ManagedModelConfiguration:
+    if not isinstance(value, dict):
+        raise ManagedProtocolError("managed model configuration is invalid")
+    required = {"endpoint", "name"}
+    allowed = required | {"api_key"}
+    if not required.issubset(value) or not set(value).issubset(allowed):
+        raise ManagedProtocolError("managed model configuration is invalid")
+    endpoint = value["endpoint"]
+    name = value["name"]
+    api_key = value.get("api_key")
+    if not isinstance(endpoint, str) or not endpoint or len(endpoint) > 2048 or "\x00" in endpoint:
+        raise ManagedProtocolError("managed model configuration is invalid")
+    try:
+        parsed = urlparse(endpoint.strip())
+        port = parsed.port
+    except ValueError as error:
+        raise ManagedProtocolError("managed model configuration is invalid") from error
+    if (
+        parsed.scheme not in {"http", "https"}
+        or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+        or parsed.query
+        or parsed.params
+        or port is None
+    ):
+        raise ManagedProtocolError("managed model configuration is invalid")
+    if (
+        not isinstance(name, str)
+        or not name.strip()
+        or len(name.strip()) > 256
+        or any(ord(character) < 32 for character in name)
+    ):
+        raise ManagedProtocolError("managed model configuration is invalid")
+    if api_key is not None and (
+        not isinstance(api_key, str)
+        or not api_key
+        or len(api_key) > 512
+        or "\x00" in api_key
+    ):
+        raise ManagedProtocolError("managed model configuration is invalid")
+    return ManagedModelConfiguration(
+        endpoint=endpoint.strip(),
+        name=name.strip(),
+        api_key=api_key,
+    )
+
+
 def _managed_path(value: object, immutable_roots: tuple[Path, ...]) -> Path:
     if not isinstance(value, str) or not value or "\x00" in value:
         raise ManagedProtocolError("managed path is invalid")
@@ -483,7 +624,8 @@ def main() -> int:
 
 __all__ = [
     "MANAGED_PROTOCOL_VERSION", "MAX_STARTUP_FRAME_BYTES", "ManagedDataRootLock",
-    "ManagedProtocolError", "ManagedStartupFrame", "build_managed_settings", "main",
+    "ManagedExecutionConfiguration", "ManagedModelConfiguration", "ManagedProtocolError",
+    "ManagedStartupFrame", "build_managed_settings", "main",
     "ManagedPathGuard", "immutable_roots_for_runtime", "read_startup_frame",
     "resource_root_for_runtime", "run_managed",
 ]

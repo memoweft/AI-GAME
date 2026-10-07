@@ -71,14 +71,48 @@ class EmulatorProfileService:
         controller_id: str,
         devices: Iterable[AdbDevice],
     ) -> tuple[AdbDevice, ...]:
-        """Filter out physical and unclassifiable ADB targets before selection."""
+        """Return only unsaved emulator transports that can become Profiles."""
 
         _owner_pair(principal_id, controller_id)
-        return tuple(
-            device
-            for device in devices
-            if device.status.value == "ready" and is_emulator_adb_device(device)
+        profiles = self._store.list_profiles(
+            owner_principal_id=principal_id,
+            owner_controller_id=controller_id,
         )
+        candidates: list[AdbDevice] = []
+        for device in devices:
+            if device.status.value != "ready" or not is_emulator_adb_device(device):
+                continue
+            if not profiles:
+                candidates.append(device)
+                continue
+            probe = self._probe(device.serial)
+            existing = (
+                _representative_profile(
+                    profile
+                    for profile in profiles
+                    if _same_emulator_identity(profile, probe)
+                )
+                if probe.state is EmulatorProfileState.READY
+                else None
+            )
+            if existing is None:
+                candidates.append(device)
+                continue
+            now = self._clock()
+            self._save_profile(
+                replace(
+                    existing,
+                    transport_serial=probe.transport_serial,
+                    state=EmulatorProfileState.READY,
+                    boot_id=probe.boot_id,
+                    fingerprint=probe.fingerprint,
+                    capabilities=probe.capabilities,
+                    last_error_code=None,
+                    last_verified_at=now,
+                    updated_at=now,
+                )
+            )
+        return tuple(candidates)
 
     def validate_owner(self, *, principal_id: str, controller_id: str) -> None:
         """Validate the frozen capability owner pair without probing a target."""
@@ -106,6 +140,29 @@ class EmulatorProfileService:
         if probe.state is not EmulatorProfileState.READY:
             raise EmulatorProfileServiceError(_safe_probe_error(probe))
         now = self._clock()
+        existing = _representative_profile(
+            profile
+            for profile in self._store.list_profiles(
+                owner_principal_id=principal_id,
+                owner_controller_id=controller_id,
+            )
+            if _same_emulator_identity(profile, probe)
+        )
+        if existing is not None:
+            return self._save_profile(
+                replace(
+                    existing,
+                    enabled=True,
+                    is_default=existing.is_default or is_default,
+                    state=EmulatorProfileState.READY,
+                    boot_id=probe.boot_id,
+                    fingerprint=probe.fingerprint,
+                    capabilities=probe.capabilities,
+                    last_error_code=None,
+                    last_verified_at=now,
+                    updated_at=now,
+                )
+            )
         resolved_id = profile_id or f"profile_{uuid4().hex}"
         profile = EmulatorProfile(
             profile_id=resolved_id,
@@ -264,9 +321,18 @@ class EmulatorProfileService:
         _owner_pair(principal_id, controller_id)
         return tuple(
             profile.public_projection()
-            for profile in self._store.list_profiles(
-                owner_principal_id=principal_id,
-                owner_controller_id=controller_id,
+            for profile in _coalesced_profiles(
+                self.verify(
+                    principal_id=principal_id,
+                    controller_id=controller_id,
+                    profile_id=profile.profile_id,
+                )
+                for profile in _coalesced_profiles(
+                    self._store.list_profiles(
+                        owner_principal_id=principal_id,
+                        owner_controller_id=controller_id,
+                    )
+                )
             )
         )
 
@@ -283,6 +349,60 @@ def _safe_probe_error(probe: EmulatorProbe) -> str:
 
 def _safe_probe_error_code(value: str | None) -> str:
     return value if value in SAFE_PROBE_ERROR_CODES else "emulator_probe_failed"
+
+
+def _same_emulator_identity(
+    profile: EmulatorProfile, probe: EmulatorProbe
+) -> bool:
+    return (
+        profile.transport_serial == probe.transport_serial
+        and profile.fingerprint is not None
+        and profile.fingerprint == probe.fingerprint
+    )
+
+
+def _profile_identity(profile: EmulatorProfile) -> tuple[object, ...]:
+    if profile.fingerprint is None:
+        return ("profile", profile.profile_id)
+    return ("verified", profile.transport_serial, profile.fingerprint)
+
+
+def _representative_profile(
+    profiles: Iterable[EmulatorProfile],
+) -> EmulatorProfile | None:
+    ordered = sorted(
+        profiles,
+        key=lambda profile: (
+            not profile.is_default,
+            not profile.enabled,
+            profile.created_at,
+            profile.profile_id,
+        ),
+    )
+    return ordered[0] if ordered else None
+
+
+def _coalesced_profiles(
+    profiles: Iterable[EmulatorProfile],
+) -> tuple[EmulatorProfile, ...]:
+    grouped: dict[tuple[object, ...], list[EmulatorProfile]] = {}
+    for profile in profiles:
+        grouped.setdefault(_profile_identity(profile), []).append(profile)
+    representatives = (
+        representative
+        for group in grouped.values()
+        if (representative := _representative_profile(group)) is not None
+    )
+    return tuple(
+        sorted(
+            representatives,
+            key=lambda profile: (
+                not profile.is_default,
+                profile.display_name,
+                profile.profile_id,
+            ),
+        )
+    )
 
 
 def _owner_pair(principal_id: str, controller_id: str) -> None:

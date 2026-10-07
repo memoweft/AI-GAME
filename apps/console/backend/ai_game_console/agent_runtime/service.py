@@ -501,7 +501,22 @@ class AgentSessionService:
 
         recovered = 0
         for session in self.store.sessions_for_recovery():
-            if session.terminal or not self._needs_planning(session.id):
+            if session.terminal:
+                continue
+            # Execution v2 shares the AgentSession row as its canonical Task,
+            # but an explicitly assigned Android runner owns that Task's plan
+            # and recovery through the resident scheduler/event pump.  Its
+            # legacy Session projection can remain PLANNING / AGENT_ACTIVE in
+            # every Task control state; a missing GoalGraph must never invoke a
+            # second planner during launcher recovery.
+            task = self.store.get_task(session.id)
+            if task.origin.get("runner_kind") == "android_ui_agent":
+                continue
+            # Preserve the general pause fence for canonical Tasks that do not
+            # yet carry an explicit runner ownership marker.
+            if task.status is TaskStatus.PAUSED:
+                continue
+            if not self._needs_planning(session.id):
                 continue
             try:
                 self._plan_and_commit(session.id)

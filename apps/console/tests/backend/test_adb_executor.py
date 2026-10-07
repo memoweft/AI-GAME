@@ -341,18 +341,22 @@ def test_executor_rejects_mismatched_target_and_redacts_invalid_text(tmp_path: P
         assert invalid.json()["error"]["code"] == "invalid_executor_action"
 
 
+@pytest.mark.parametrize("layout,cli_name,entered_text", [
+    ("nx_device/15.0/shell", "mumu-cli.exe", "仗剑传说"),
+    ("nx_main", "MuMuManager.exe", "通知设置"),
+    ("nx_main", "MuMuManager.exe", "こんにちは 世界"),
+])
 def test_unicode_text_uses_mumu_cli_single_raw_text_argument_and_redacts_action_repr(
-    tmp_path: Path,
+    tmp_path: Path, layout: str, cli_name: str, entered_text: str,
 ) -> None:
     mumu_root = tmp_path / "MuMuPlayer"
-    adb = mumu_root / "nx_device" / "15.0" / "shell" / "adb.exe"
+    adb = mumu_root / layout / "adb.exe"
     adb.parent.mkdir(parents=True)
     adb.touch()
-    mumu_cli = mumu_root / "nx_main" / "mumu-cli.exe"
-    mumu_cli.parent.mkdir()
+    mumu_cli = mumu_root / "nx_main" / cli_name
+    mumu_cli.parent.mkdir(exist_ok=True)
     mumu_cli.touch()
     commands: list[tuple[str, ...]] = []
-    entered_text = "仗剑传说"
 
     def runner(command, timeout):
         commands.append(tuple(command))

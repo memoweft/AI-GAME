@@ -597,6 +597,18 @@ class SQLiteAndroidUiStepStore:
                 raise ValueError("unfinished step belongs to a stale revision")
             if binding is not None and row["binding_json"] != binding:
                 raise ValueError("unfinished step belongs to another canonical binding")
+            if (
+                row["decision_json"] is None and row["action_intent_id"] is None
+                and row["claim_json"] is None and row["after_json"] is None
+            ):
+                # A failed model response has not bound any decision/effect.
+                # Its next attempt plans from this fresh observation, so the
+                # durable before must match it. Once a decision exists this
+                # snapshot stays immutable and the normal recovery path owns it.
+                connection.execute(
+                    "UPDATE android_ui_steps SET before_json=? WHERE task_id=? AND step_index=?",
+                    (_observation_json(before), task_id, row["step_index"]),
+                )
             return _reservation_from_row(row)
 
     def record_decision(self, reservation: StepReservation, decision: RoleDecision, *, retrieval_attribution: tuple[Mapping[str, Any], ...] = ()) -> StepReservation:
@@ -899,7 +911,7 @@ class SQLiteAndroidUiStepStore:
                     self._grounding,
                     _step_grounding_query(step),
                 )
-                if record.overall == "satisfied"
+                if any(verdict.state == "satisfied" for verdict in record.verdicts)
                 else None
             )
             prior_effect = _latest_prior_effect(connection, step)
@@ -930,6 +942,33 @@ class SQLiteAndroidUiStepStore:
             connection.execute("BEGIN IMMEDIATE")
             _require_step(connection, reservation)
             connection.execute("UPDATE android_ui_steps SET completed=1 WHERE task_id=? AND step_index=?", (reservation.task_id, reservation.step_index))
+
+    def complete_rejected(self, reservation: StepReservation, *, reason_code: str) -> None:
+        """Close a confirmed rejected command; no after/success proof is created."""
+        if not re.fullmatch(r"[a-z][a-z0-9_]{0,159}", reason_code):
+            raise ValueError("invalid transport rejection code")
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = _require_step(connection, reservation)
+            if row["action_intent_id"] is None or row["claim_json"] is None or row["after_json"] is not None:
+                raise ValueError("rejected command must have a claim and no after evidence")
+            claim = json.loads(row["claim_json"])
+            payload = json.dumps({"command_id": claim["claim_id"], "outcome": "rejected", "reason_code": reason_code}, sort_keys=True)
+            if row["primitive_json"] not in (None, payload):
+                raise ValueError("command outcome is immutable")
+            connection.execute("UPDATE android_ui_steps SET primitive_json=?,completed=1 WHERE task_id=? AND step_index=?", (payload, reservation.task_id, reservation.step_index))
+
+    def recent_action_feedback(self, task_id: str, revision: int) -> tuple[Mapping[str, Any], ...]:
+        """Bounded same-task feedback; input text stays redacted in the ledger."""
+        with self._connect() as connection:
+            rows = connection.execute("SELECT step_index,intent_json,primitive_json,before_json,after_json FROM android_ui_steps WHERE task_id=? AND revision=? AND completed=1 AND intent_json IS NOT NULL ORDER BY step_index DESC LIMIT 4", (task_id, revision)).fetchall()
+        feedback = []
+        for row in reversed(rows):
+            primitive = json.loads(row["primitive_json"] or "{}")
+            before = json.loads(row["before_json"] or "{}")
+            after = json.loads(row["after_json"] or "{}")
+            feedback.append({"step": row["step_index"], "action": json.loads(row["intent_json"]), "outcome": primitive.get("outcome", "unknown"), "reason_code": primitive.get("reason_code"), "ui_tree_changed": before.get("ui_tree_digest") != after.get("ui_tree_digest") if after else None})
+        return tuple(feedback)
 
     def complete_wait(self, reservation: StepReservation) -> None:
         """Complete one durable short wait without creating an effect intent."""
@@ -1817,7 +1856,7 @@ def _validate_verification_against_ledger(
         )
     ):
         raise ValueError("verification verdicts do not cover frozen criteria")
-    if record.overall == "satisfied" and (
+    if any(verdict.state == "satisfied" for verdict in record.verdicts) and (
         grounding is None
         or record.grounding_digest != grounding.grounding_digest
     ):
@@ -1854,12 +1893,11 @@ def _latest_prior_effect(
 ) -> sqlite3.Row | None:
     return connection.execute(
         """SELECT * FROM android_ui_steps
-        WHERE task_id=? AND revision=? AND step_index<?
+        WHERE task_id=? AND step_index<?
         AND action_intent_id IS NOT NULL
         ORDER BY step_index DESC LIMIT 1""",
         (
-            step_row["task_id"], step_row["revision"],
-            step_row["step_index"],
+            step_row["task_id"], step_row["step_index"],
         ),
     ).fetchone()
 
@@ -1874,10 +1912,18 @@ def _prior_effect_causes_observation(
         claim = json.loads(str(prior["claim_json"]))
         after = json.loads(str(prior["after_json"]))
         primitive = json.loads(str(prior["primitive_json"]))
+        prior_binding = json.loads(str(prior["binding_json"]))
+        current_binding = json.loads(str(current["binding_json"]))
+        prior_revision = prior_binding.pop("revision")
+        current_revision = current_binding.pop("revision")
         command_id = observation.causality_command_id
         return (
             int(prior["completed"]) == 1
-            and prior["binding_json"] == current["binding_json"]
+            # Updating a goal does not undo a settled physical action. Re-read
+            # current UI under the new criteria, preserving its exact causal
+            # predecessor across revisions only within the same device/owner.
+            and prior_revision <= current_revision
+            and prior_binding == current_binding
             and isinstance(claim, dict)
             and isinstance(after, dict)
             and isinstance(primitive, dict)
@@ -1886,7 +1932,7 @@ def _prior_effect_causes_observation(
             and primitive.get("command_id") == command_id
             and primitive.get("outcome") in {"progress", "no_progress"}
         )
-    except (TypeError, ValueError, json.JSONDecodeError):
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
         return False
 
 

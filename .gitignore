@@ -44,3 +44,11 @@ Thumbs.db
 Desktop.ini
 *.log
 *.pid
+
+# Explicit local-only files
+/.local/
+/.private/
+/.artifacts/
+/workspace.local.json
+/.pytest_cache/
+/.managed-runtime-*/

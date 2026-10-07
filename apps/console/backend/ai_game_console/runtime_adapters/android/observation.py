@@ -59,10 +59,28 @@ class AndroidObservationProvider:
         self._clock = clock or _utc_now
         self._transport_device_id_resolver = transport_device_id_resolver
 
-    def capture(self, device_id: str) -> RawObservation:
+    def capture(self, device_id: str, *, include_screenshot: bool = True) -> RawObservation:
         serial = self._transport_serial(device_id)
         started_at = self._clock()
         self._require_connected(serial)
+
+        if not include_screenshot:
+            device_state = self._read_device_state(serial, fallback_screen_size=None)
+            ui_tree = self._read_ui_tree(serial)
+            completed_at = self._clock()
+            return RawObservation(
+                device_id=device_id,
+                capture_started_at=started_at,
+                capture_completed_at=completed_at,
+                screenshot=RawScreenshot(
+                    status=ChannelAvailability.UNAVAILABLE, content=None,
+                    width=None, height=None, captured_at=completed_at,
+                    error_code="screenshot_not_requested",
+                ),
+                ui_tree=ui_tree,
+                device_state=device_state,
+                consistency=ObservationConsistency(status=ConsistencyStatus.CONSISTENT, reason=None),
+            )
 
         screenshot_result = self._run(
             (self._adb(), "-s", serial, "exec-out", "screencap", "-p"),

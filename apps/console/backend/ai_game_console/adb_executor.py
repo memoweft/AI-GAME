@@ -241,11 +241,14 @@ class AdbGuiExecutor:
     def _mumu_cli_path(self) -> Path | None:
         if self.adb_path is None:
             return None
-        try:
-            candidate = self.adb_path.resolve().parents[3] / "nx_main" / "mumu-cli.exe"
-        except IndexError:
-            return None
-        return candidate if candidate.is_file() else None
+        adb = self.adb_path.resolve()
+        roots = dict.fromkeys([adb.parent, *(parent / "nx_main" for parent in adb.parents[:4])])
+        return next((
+            root / name
+            for root in roots
+            for name in ("MuMuManager.exe", "mumu-cli.exe")
+            if (root / name).is_file()
+        ), None)
 
     def capture_screenshot(self) -> AndroidScreenshot:
         """Capture one fresh PNG frame without invoking a host shell."""

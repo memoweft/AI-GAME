@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import pytest
+from dataclasses import replace
+import ast
 
 from ai_game_console.android_ui_runtime.domain import (
     AndroidUiAction, CriteriaRevision, Criterion, ObservationEnvelope, UiNode,
@@ -26,6 +28,7 @@ class _Caller:
 
     def call_tool(self, **kwargs: object) -> dict[str, object]:
         self.observations = kwargs["observations"]  # type: ignore[assignment]
+        self.prompt = kwargs["prompt"]
         return self.reply
 
 
@@ -40,6 +43,35 @@ def test_tool_role_uses_opaque_artifact_and_emits_one_bounded_action() -> None:
     decision = role.decide(_context(), {"plan": "open notification page"})
     assert decision.action is not None and decision.action.kind == "tap"
     assert caller.observations == ({"opaque_screenshot": "shot-1", "opaque_tree": "tree-1"},)
+
+
+def test_planning_and_action_receive_recent_failure_feedback() -> None:
+    feedback = ({"step": 3, "action": {"action": "tap", "x": .5, "y": .2}, "outcome": "no_progress", "ui_tree_changed": False},)
+    context = replace(_context(), recent_actions=feedback)
+    caller = _Caller({"plan": "use a different control"})
+    role = BoundedToolRoleAdapter(caller, _Artifacts())
+    plan = role.plan(context)
+    assert ast.literal_eval(caller.prompt)["recent_actions"] == list(feedback)
+    caller.reply = {"kind": "action", "action": "back", "arguments": {}, "reason": "leave unchanged search screen"}
+    role.decide(context, plan)
+    assert ast.literal_eval(caller.prompt)["recent_actions"] == list(feedback)
+
+
+def test_action_tool_advertises_swipe_names_and_normalized_coordinate_bounds() -> None:
+    class ContractCaller(_Caller):
+        def call_tool(self, **kwargs):
+            arguments = kwargs["parameters"]["properties"]["arguments"]
+            assert arguments["additionalProperties"] is False
+            for name in ("x", "y", "end_x", "end_y"):
+                assert arguments["properties"][name]["minimum"] == 0
+                assert arguments["properties"][name]["maximum"] == 1
+            return super().call_tool(**kwargs)
+    caller = ContractCaller({"kind": "action", "action": "swipe", "arguments": {"x": .5, "y": .8, "end_x": .5, "end_y": .2}, "reason": "scroll the current list"})
+    role = BoundedToolRoleAdapter(caller, _Artifacts())
+    assert role.decide(_context(), {"plan": "scroll"}).action.kind == "swipe"
+    caller.reply["arguments"]["x"] = 360
+    with pytest.raises(ValueError, match="normalized coordinate"):
+        role.decide(_context(), {"plan": "scroll"})
 
 
 def test_tool_role_drops_hallucinated_hint_when_retrieval_is_empty() -> None:

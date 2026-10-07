@@ -299,6 +299,9 @@ class AndroidUiAgentV1Handler:
             )
 
         if reservation.action_intent_id is not None:
+            rejected = self._close_rejected(first, reservation)
+            if rejected is not None:
+                return rejected
             if reservation.action is None:
                 return OneStepResult("unresolved_effect", step_index)
             intent = self._intent_from_reservation(reservation)
@@ -413,6 +416,9 @@ class AndroidUiAgentV1Handler:
                 return OneStepResult("unresolved_effect", step_index)
             reservation = self.store.record_claim(reservation, claim_id=receipt.command_id, action_intent_id=intent.action_intent_id)
 
+        rejected = self._close_rejected(first, reservation)
+        if rejected is not None:
+            return rejected
         current = self.canonical.inspect(task_id)
         if not self._canonical_is_exact(first, current):
             return OneStepResult("control_after_dispatch", step_index, dispatch_command_id=receipt.command_id)
@@ -585,12 +591,23 @@ class AndroidUiAgentV1Handler:
         context = PlanningContext(
             task_id, goal, snapshot.revision, criteria, before,
             tuple(item.planner_projection() for item in experience_hints),
+            self.store.recent_action_feedback(task_id, snapshot.revision),
         )
         plan = self.planner.plan(context)
         if not self._canonical_is_exact(snapshot, self.canonical.inspect(snapshot.task_id)):
             return None
         decision = self.actor.decide(context, plan)
         return decision if self._canonical_is_exact(snapshot, self.canonical.inspect(snapshot.task_id)) else None
+
+    def _close_rejected(self, snapshot: CanonicalSnapshot, reservation: Any) -> OneStepResult | None:
+        lookup = getattr(self.dispatch, "rejection_reason", None)
+        if not callable(lookup) or reservation.action_intent_id is None or reservation.claim_id is None:
+            return None
+        reason = lookup(snapshot, reservation.action_intent_id)
+        if reason is None:
+            return None
+        self.store.complete_rejected(reservation, reason_code=reason)
+        return OneStepResult("replan", reservation.step_index, dispatch_command_id=reservation.claim_id, primitive_outcome="rejected")
 
     def _retrieve_experience(
         self, snapshot: CanonicalSnapshot, criteria: CriteriaRevision,

@@ -87,10 +87,10 @@ def _criteria() -> CriteriaRevision:
 
 
 class _TrustedGrounding:
-    def __init__(self, observation: ObservationEnvelope, step_index: int = 0) -> None:
+    def __init__(self, observation: ObservationEnvelope, step_index: int = 0, snapshot: CanonicalSnapshot | None = None) -> None:
         self._seal = object()
         query = observation_grounding_query(
-            snapshot=_snapshot(), observation=observation,
+            snapshot=snapshot or _snapshot(), observation=observation,
             runner_kind="android_ui_agent", runner_version=1, step_index=step_index,
         )
         nodes = tuple(GroundedUiNode(
@@ -260,6 +260,33 @@ def test_terminal_candidate_after_effect_requires_exact_causal_predecessor(
 
     assert result.outcome == "terminal_requires_after_evidence"
     assert dispatch.calls == 1
+
+
+@pytest.mark.parametrize("changed_boot", [False, True])
+def test_revised_goal_can_verify_current_page_without_replaying_prior_action(tmp_path, changed_boot):
+    store = SQLiteAndroidUiStepStore(tmp_path / "step.sqlite")
+    dispatch = _Dispatch()
+    first = AndroidUiAgentV1Handler(
+        _Canonical(_snapshot()), _Observations(_obs("before"), _obs("after", command_id="command-1")),
+        _Planner(), _Actor(RoleDecision("action", AndroidUiAction("back"))), _Primitive(),
+        EvidenceBoundSemanticVerifier(_SemanticRole("unknown", "after", "home")), store, dispatch,
+    )
+    assert first.one_step(task_id="task-1", goal="enter notification", criteria=_criteria()).outcome == "continue"
+    snapshot = replace(_snapshot(), revision=2, boot_id="boot-2" if changed_boot else "boot-1")
+    current = replace(_obs("current", target=True, command_id="command-1"), boot_id=snapshot.boot_id)
+    grounding = _TrustedGrounding(current, step_index=1, snapshot=snapshot)
+    store = SQLiteAndroidUiStepStore(tmp_path / "step.sqlite", grounding=grounding)
+    revised = AndroidUiAgentV1Handler(
+        _Canonical(snapshot), _Observations(current), _Planner(), _Actor(RoleDecision("terminal_candidate")),
+        _Primitive(), EvidenceBoundSemanticVerifier(_SemanticRole("satisfied", "current", "notification-page"), grounding=grounding),
+        store, dispatch,
+    )
+    result = revised.one_step(task_id="task-1", goal="enter notification", criteria=replace(_criteria(), revision=2))
+    assert result.outcome == ("terminal_requires_after_evidence" if changed_boot else "semantic_satisfied")
+    assert result.semantic_satisfied is (not changed_boot)
+    assert dispatch.calls == 1
+    replay = store.trusted_terminal_for(snapshot, replace(_criteria(), revision=2), runner_kind="android_ui_agent", runner_version=1, model_version="unknown", prompt_version="android-ui-semantic-v1")
+    assert (replay is not None) is (not changed_boot)
 
 
 def test_causal_terminal_decision_is_rehydrated_without_replaying_action(

@@ -52,6 +52,7 @@ from ai_game_console.emulator_runtime.general_production import (
     _device_state_digest,
     _durable_command_for_observation,
     _goal_clauses,
+    _is_application_entry_process,
     _observable_navigation_goal_clauses,
     _ordered_waypoint_clauses,
     _parse_ui_tree,
@@ -993,6 +994,70 @@ def test_production_criteria_freezes_generic_ordered_waypoint_before_terminal(
     )
     loaded = store.load_criteria(TASK, 1)
     assert loaded == criteria and store.coverage_is_frozen(TASK, criteria)
+
+
+@pytest.mark.parametrize(
+    ("goal", "source_quote", "semantic_value"),
+    (
+        (
+            '打开当前默认 Android 模拟器的系统设置，找到并进入"电池"（Battery）页面；'
+            "到达电池页面后停止，不修改任何设置",
+            '进入"电池"（Battery）页面',
+            "电池",
+        ),
+        (
+            "Open System Settings on the current default Android emulator, then "
+            "find and enter the Battery page; stop there without changing any setting",
+            "enter the Battery page",
+            "Battery",
+        ),
+    ),
+)
+def test_application_entry_is_process_and_only_final_page_is_terminal(
+    tmp_path: Path, goal: str, source_quote: str, semantic_value: str,
+) -> None:
+    clauses = _observable_navigation_goal_clauses(goal)
+    assert [clause.text for clause in clauses] == [source_quote]
+    assert _is_application_entry_process(_goal_clauses(goal)[0].text) is True
+    caller = _CriteriaCaller({
+        "criteria": [{
+            "description": "The final requested page is visible.",
+            "source_quote": source_quote,
+            "marker_kind": "page_title",
+            "semantic_value": semantic_value,
+        }],
+        "waypoints": [],
+    })
+    criteria = ProductionCriteriaProvider(
+        SQLiteAndroidUiStepStore(
+            tmp_path / f"application-entry-{hashlib.sha256(goal.encode()).hexdigest()}.db"
+        ),
+        caller,
+    ).criteria_for(task_id=TASK, goal=goal, revision=1)
+
+    assert criteria.waypoints == ()
+    assert len(criteria.criteria) == 1
+    assert criteria.criteria[0].required_evidence_markers == (
+        evidence_marker("page_title", semantic_value),
+    )
+    assert goal in caller.requests[0]["prompt"]
+
+
+@pytest.mark.parametrize(
+    "goal",
+    (
+        "打开系统设置，同时进入页面乙",
+        "Open Settings or enter the Notifications page",
+    ),
+)
+def test_application_entry_filter_does_not_rewrite_parallel_or_alternative_goals(
+    goal: str,
+) -> None:
+    clauses = _observable_navigation_goal_clauses(goal)
+    if " or " in goal.casefold():
+        assert [clause.text for clause in clauses] == [goal]
+    else:
+        assert len(clauses) == 2
 
 
 @pytest.mark.parametrize(

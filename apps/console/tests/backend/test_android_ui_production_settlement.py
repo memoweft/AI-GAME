@@ -144,6 +144,7 @@ class _Kernel:
     def __init__(self, snapshot: CanonicalSnapshot, *, accepted: bool) -> None:
         self.snapshot = snapshot
         self.accepted = accepted
+        self.error = None if accepted else SimpleNamespace(code="executor_unicode_text_cli_unavailable", retryable=False)
         self.actions: dict[str, SimpleNamespace] = {}
         self.executions: dict[str, SimpleNamespace] = {}
         self.verifications: list[dict[str, object]] = []
@@ -194,6 +195,7 @@ class _Kernel:
         execution = SimpleNamespace(
             action_id=action_id,
             accepted=self.accepted,
+            error=self.error,
             finished_at="2030-01-01T00:00:01+00:00",
         )
         self.executions[action_id] = execution
@@ -495,7 +497,7 @@ def test_transport_rejected_is_not_observed_and_has_no_causal_after(
         criteria=_criteria(),
     )
 
-    assert result.outcome == "after_evidence_unavailable"
+    assert result.outcome == "replan"
     assert result.semantic_satisfied is False
     assert result.dispatch_command_id == fixture.command_id
     assert _effect(fixture.agent_path, fixture.command_id) == (
@@ -508,6 +510,9 @@ def test_transport_rejected_is_not_observed_and_has_no_causal_after(
     ) is None
     assert fixture.semantic.calls == 0
     assert fixture.kernel.verifications == []
+    feedback = fixture.handler.store.recent_action_feedback(fixture.snapshot.task_id, 1)
+    assert feedback[-1]["outcome"] == "rejected"
+    assert feedback[-1]["reason_code"] == "executor_unicode_text_cli_unavailable"
 
     forged_after = _observation(
         fixture.snapshot,
@@ -527,6 +532,43 @@ def test_transport_rejected_is_not_observed_and_has_no_causal_after(
         "SETTLED",
         "not_observed",
     )
+
+
+def test_rejected_redacted_input_recovers_without_replaying_or_faking_after(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path, accepted=False)
+    text = "通知 設定"
+    class TextActor:
+        def decide(self, context, plan):
+            return RoleDecision("action", AndroidUiAction("input_text", {"text": text}))
+    fixture.handler.actor = TextActor()
+    original_complete = fixture.handler.store.complete_rejected
+    def crash(*args, **kwargs):
+        raise RuntimeError("simulated crash after durable rejection")
+    fixture.handler.store.complete_rejected = crash
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        fixture.handler.one_step(task_id=fixture.snapshot.task_id, goal="enter notification settings", criteria=_criteria())
+    fixture.handler.store.complete_rejected = original_complete
+    fixture.handler.store = SQLiteAndroidUiStepStore(tmp_path / "android-ui-steps.db")
+    fixture.handler.observations = _Observations(fixture.snapshot, fixture.causality)
+    result = fixture.handler.one_step(task_id=fixture.snapshot.task_id, goal="enter notification settings", criteria=_criteria())
+    assert result.outcome == "replan" and not result.semantic_satisfied
+    assert len(fixture.kernel.actions) == 1
+    assert fixture.semantic.calls == 0 and fixture.kernel.verifications == []
+    feedback = fixture.handler.store.recent_action_feedback(fixture.snapshot.task_id, 1)
+    assert feedback[-1]["action"]["action"] == "input_text"
+    assert text not in str(feedback)
+    next_step = fixture.handler.store.reserve_step(task_id=fixture.snapshot.task_id, revision=1, before=_observation(fixture.snapshot, "new"), snapshot=fixture.snapshot)
+    assert next_step.step_index == 1
+
+
+def test_uncertain_transport_is_not_closed_as_rejected(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path, accepted=False)
+    fixture.kernel.error = SimpleNamespace(code="executor_unicode_text_uncertain", retryable=True)
+    result = fixture.handler.one_step(task_id=fixture.snapshot.task_id, goal="enter notification settings", criteria=_criteria())
+    assert result.outcome == "after_evidence_unavailable"
+    assert fixture.claims.get(fixture.command_id).state == "OUTCOME_UNKNOWN"
+    assert fixture.dispatch.rejection_reason(fixture.snapshot, fixture.intent.action_intent_id) is None
+    assert fixture.handler.store.recent_action_feedback(fixture.snapshot.task_id, 1) == ()
 
 
 def test_caller_forged_after_reference_cannot_release_canonical_effect(

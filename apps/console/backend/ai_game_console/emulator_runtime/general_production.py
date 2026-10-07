@@ -63,6 +63,7 @@ from ..android_ui_runtime.sanitizer import sanitize_summary, sanitize_task_goal
 from ..android_ui_runtime.semantic_verification import EvidenceBoundSemanticVerifier
 from ..android_ui_runtime.store import CheckpointBaselineQuery, SQLiteAndroidUiStepStore
 from ..execution import AndroidScreenshot
+from ..device_lease import DeviceExecutionLease
 from ..experience_runtime import (
     AuthenticatedAndroidScope,
     ExperienceService,
@@ -1430,6 +1431,10 @@ class ProductionKernelPhysicalDispatcher(GenericPhysicalDispatcher):
             raise ProductionAndroidUiError("android_ui_physical_action_crosswire")
         _validate_kernel_payload(action.params, payload, command_type)
         execution = self.kernel.execute_action(task_id=action.task_id, action_id=command_id)
+        if not execution.accepted and execution.error is not None and execution.error.retryable:
+            # A timeout may already have produced an effect. Keep K1's unknown
+            # outcome fence rather than settling it as a definite rejection.
+            raise ProductionAndroidUiError("android_ui_transport_outcome_unknown")
         # A rejected transport result proves that no command-caused after
         # observation exists.  Recording causality here would let the next
         # unrelated capture masquerade as evidence for a command the
@@ -1508,6 +1513,29 @@ class ProductionAndroidDispatchPort:
     claims: SQLiteGenericCommandStore
     physical: ProductionKernelPhysicalDispatcher
     evidence_lookup: ProductionGenericEvidenceLookup
+
+    def rejection_reason(self, snapshot: CanonicalSnapshot, action_intent_id: str) -> str | None:
+        """Read a definitive rejection without recovering private input text."""
+        command_id = _command_id_for_intent(snapshot, action_intent_id)
+        claim = self.claims.get(command_id)
+        if (
+            claim is None or claim.state != "SETTLED" or claim.outcome != "rejected"
+            or claim.task_id != snapshot.task_id or claim.action_id != command_id
+            or claim.owner_principal_id != snapshot.owner.principal_id
+            or claim.controller_id != snapshot.owner.controller_id
+            or claim.profile_id != snapshot.profile_id
+            or claim.profile_generation != snapshot.profile_generation
+            or claim.device_boot_id != snapshot.boot_id
+            or claim.canonical_device_id != snapshot.canonical_device_id
+        ):
+            return None
+        if claim.dispatch_started_at is None:
+            return "preflight_rejected"
+        execution = self.kernel.load_action_execution(command_id)
+        if execution.accepted or execution.error is None or execution.error.retryable:
+            return None
+        code = execution.error.code
+        return code if re.fullmatch(r"[a-z][a-z0-9_]{0,159}", code) else "transport_rejected"
 
     def dispatch(self, snapshot: CanonicalSnapshot, intent: AndroidUiActionIntent) -> DispatchReceipt:
         if self.canonical.inspect(snapshot.task_id) != snapshot:
@@ -1676,6 +1704,8 @@ class ProductionAndroidUiRunner:
     handler: AndroidUiAgentV1Handler
     criteria: ProductionCriteriaProvider
     observations: ProductionAndroidObservationProvider
+    device_lease: DeviceExecutionLease | None = None
+    profiles: Any | None = None
 
     def criteria_for(self, *, task_id: str, goal: str, revision: int) -> CriteriaRevision:
         return self.criteria.criteria_for(
@@ -1683,6 +1713,20 @@ class ProductionAndroidUiRunner:
         )
 
     def one_step(self, *, task_id: str, goal: str, criteria: CriteriaRevision):
+        # Hold the serial across observation, planning and input. Locking only
+        # the input would let a host script invalidate the planner's frame.
+        if self.device_lease is not None:
+            snapshot = self.handler.canonical.inspect(task_id)
+            profile = self.profiles.require_profile(
+                principal_id=snapshot.owner.principal_id,
+                controller_id=snapshot.owner.controller_id,
+                profile_id=snapshot.profile_id,
+            )
+            with self.device_lease.require(profile.transport_serial):
+                return self._one_step(task_id=task_id, goal=goal, criteria=criteria)
+        return self._one_step(task_id=task_id, goal=goal, criteria=criteria)
+
+    def _one_step(self, *, task_id: str, goal: str, criteria: CriteriaRevision):
         if not self.criteria.coverage_matches_goal(
             task_id=task_id, goal=goal, criteria=criteria,
         ):
@@ -1778,6 +1822,7 @@ def compose_production_android_ui_runner(
     experience_service: ExperienceService | None = None,
     runtime_metadata: Any | None = None,
     managed_file: Callable[[str], Path] | None = None,
+    device_lease: DeviceExecutionLease | None = None,
 ) -> ProductionAndroidUiComposition:
     """Build the general runner without touching a model, profile, or device."""
 
@@ -1856,6 +1901,8 @@ def compose_production_android_ui_runner(
             handler,
             ProductionCriteriaProvider(step_store, caller),
             observations,
+            device_lease=device_lease,
+            profiles=profiles,
         ),
         step_store=step_store,
         command_store=command_store,
@@ -1999,7 +2046,7 @@ def _observable_navigation_goal_clauses(goal: str) -> tuple[_GoalClause, ...]:
     execution but are not page titles, containers, or state labels.
     """
 
-    return tuple(
+    clauses = tuple(
         clause for clause in _goal_clauses(goal)
         if (
             _has_navigation_prefix(clause.text)
@@ -2007,6 +2054,70 @@ def _observable_navigation_goal_clauses(goal: str) -> tuple[_GoalClause, ...]:
             and _semantic_target_core(clause.text) is not None
         )
     )
+    normalized = unicodedata.normalize("NFKC", goal).casefold()
+    if (
+        len(clauses) < 2
+        or re.search(r"(?:或者|或是|\bor\b|同时|并行|\bparallel\b)", normalized)
+    ):
+        return clauses
+    return tuple(
+        clause
+        for index, clause in enumerate(clauses)
+        if not (
+            _is_application_entry_process(clause.text)
+            and index < len(clauses) - 1
+        )
+    )
+
+
+def _is_application_entry_process(value: str) -> bool:
+    """Recognize an app-entry step without inventing a visible home title.
+
+    The step remains in the canonical goal for planning and constraints.  It is
+    removed only from terminal UI evidence when a later observable destination
+    exists.  The grammar is deliberately narrow: a generic Settings application
+    entry qualifies, while named pages, parallel goals, and alternatives do not.
+    """
+
+    if not isinstance(value, str):
+        return False
+    current = unicodedata.normalize("NFKC", value).casefold().strip(
+        _SEMANTIC_EDGE_PUNCTUATION
+    )
+    current = _ROUTE_EXECUTION_PREFIX_ZH.sub("", current).strip(
+        _SEMANTIC_EDGE_PUNCTUATION
+    )
+    compact = re.sub(r"\s+", "", current)
+    for prefix in ("请打开", "打开", "请启动", "启动"):
+        if not compact.startswith(prefix):
+            continue
+        target = compact[len(prefix):].strip(_SEMANTIC_EDGE_PUNCTUATION)
+        if target in {"设置", "系统设置", "设置应用", "系统设置应用"}:
+            return True
+        if any(locator in target for locator in ("模拟器", "手机", "设备")):
+            return target.endswith(("系统设置", "设置应用", "系统设置应用"))
+        return False
+
+    for prefix in ("please launch", "please open", "launch", "open"):
+        if not _starts_english_phrase(current, prefix):
+            continue
+        target = re.sub(r"\s+", " ", current[len(prefix):]).strip(
+            _SEMANTIC_EDGE_PUNCTUATION
+        )
+        target = re.sub(r"^(?:the\s+)?(?:current\s+)?(?:default\s+)?", "", target)
+        if target in {"settings", "system settings", "settings app", "system settings app"}:
+            return True
+        if re.fullmatch(
+            r"(?:system\s+)?settings(?:\s+app)?\s+on\s+(?:the\s+)?"
+            r"(?:current\s+)?(?:default\s+)?(?:android\s+)?"
+            r"(?:emulator|phone|device)",
+            target,
+        ):
+            return True
+        if re.search(r"\b(?:android\s+)?(?:emulator|phone|device)\b", target):
+            return target.endswith((" settings", " settings app"))
+        return False
+    return False
 
 
 def _ordered_waypoint_clauses(
@@ -2194,6 +2305,10 @@ def _semantic_target_core(value: str) -> str | None:
     for prefix in _GENERIC_DEVICE_TARGET_PREFIXES_ZH:
         if current.startswith(prefix):
             current = current[len(prefix):].strip(_SEMANTIC_EDGE_PUNCTUATION)
+            break
+    for article in ("the ", "a ", "an "):
+        if current.startswith(article):
+            current = current[len(article):].strip(_SEMANTIC_EDGE_PUNCTUATION)
             break
 
     # DSH may retain a parenthesized System Settings navigation route after
@@ -2461,13 +2576,17 @@ def _validate_kernel_payload(
 
 
 def _command_id(snapshot: CanonicalSnapshot, intent: AndroidUiActionIntent) -> str:
+    return _command_id_for_intent(snapshot, intent.action_intent_id)
+
+
+def _command_id_for_intent(snapshot: CanonicalSnapshot, action_intent_id: str) -> str:
     payload = json.dumps(
         [
             snapshot.task_id,
             snapshot.runner_binding_id,
             RUNNER_KIND,
             RUNNER_VERSION,
-            intent.action_intent_id,
+            action_intent_id,
         ],
         ensure_ascii=True,
         separators=(",", ":"),

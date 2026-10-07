@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import os
+import ipaddress
 import json
+import os
 import shutil
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
@@ -206,46 +207,68 @@ class AdbTargetDiscovery:
         )
 
     def discover_emulators(self) -> AdbDiscoveryResult:
-        """Discover emulators, restoring one confirmed local MuMu transport.
+        """Discover emulators, restoring confirmed local MuMu transports.
 
         ``discover()`` deliberately remains a read-only inventory operation.
         The product's explicit emulator-discovery path may additionally restore
-        the host-side ADB transport after a Windows reboot, but only when the
-        MuMu CLI next to the configured ADB binary reports exactly one fully
-        started local VM.  The second inventory plus the shared high-confidence
-        classifier remains the authority for whether a profile candidate exists.
+        the host-side ADB transports after a Windows reboot, but only for fully
+        started VMs whose MuMu CLI records contain valid loopback ADB endpoints.
+        The second inventory plus the shared high-confidence classifier remains
+        the authority for whether profile candidates exist.
         """
 
         initial = self.discover()
-        if initial.status != "ready" or emulator_adb_devices(initial.devices):
+        if initial.status != "ready":
             return initial
-        endpoint = self._single_running_mumu_endpoint()
+        endpoints = self._running_mumu_endpoints()
         adb_path = self.resolve_adb_path()
-        if endpoint is None or adb_path is None:
+        if not endpoints or adb_path is None:
             return initial
-        command = (str(adb_path), "connect", endpoint)
-        try:
-            completed = (
-                self._runner(command)
-                if self._runner is not None
-                else self._run_read_only_command(command)
-            )
-        except (OSError, subprocess.SubprocessError):
-            return initial
-        if completed.returncode != 0:
+        ready_serials = {
+            device.serial
+            for device in initial.devices
+            if device.status is TargetStatus.READY
+        }
+        attempted = False
+        connected = False
+        for endpoint in endpoints:
+            if endpoint in ready_serials:
+                continue
+            attempted = True
+            command = (str(adb_path), "connect", endpoint)
+            try:
+                completed = (
+                    self._runner(command)
+                    if self._runner is not None
+                    else self._run_read_only_command(command)
+                )
+            except (OSError, subprocess.SubprocessError):
+                continue
+            connected = connected or completed.returncode == 0
+        if not attempted or not connected:
             return initial
         return self.discover()
 
-    def _single_running_mumu_endpoint(self) -> str | None:
+    def _running_mumu_endpoints(self) -> tuple[str, ...]:
         adb_path = self.resolve_adb_path()
         if adb_path is None:
-            return None
-        try:
-            cli = adb_path.parents[3] / "nx_main" / "mumu-cli.exe"
-        except IndexError:
-            return None
-        if not cli.is_file():
-            return None
+            return ()
+        cli_roots = [adb_path.parent]
+        cli_roots.extend(parent / "nx_main" for parent in adb_path.parents[:4])
+        cli_roots = list(dict.fromkeys(cli_roots))
+        cli = next(
+            (
+                candidate
+                for cli_root in cli_roots
+                for candidate in (
+                    cli_root / "MuMuManager.exe", cli_root / "mumu-cli.exe"
+                )
+                if candidate.is_file()
+            ),
+            None,
+        )
+        if cli is None:
+            return ()
         command = (str(cli), "info", "--vmindex", "all")
         try:
             completed = (
@@ -254,28 +277,45 @@ class AdbTargetDiscovery:
                 else self._run_read_only_command(command)
             )
         except (OSError, subprocess.SubprocessError):
-            return None
+            return ()
         if completed.returncode != 0:
-            return None
+            return ()
         try:
             payload = json.loads(completed.stdout or "null")
         except (TypeError, json.JSONDecodeError):
+            return ()
+        entries = (
+            tuple(payload.values())
+            if isinstance(payload, dict)
+            else tuple(payload)
+            if isinstance(payload, list)
+            else ()
+        )
+        endpoints: list[str] = []
+        for entry in entries:
+            endpoint = self._running_mumu_endpoint(entry)
+            if endpoint is not None and endpoint not in endpoints:
+                endpoints.append(endpoint)
+        return tuple(endpoints)
+
+    @staticmethod
+    def _running_mumu_endpoint(entry: object) -> str | None:
+        if not isinstance(entry, dict):
             return None
-        entries = tuple(payload.values()) if isinstance(payload, dict) else ()
-        if len(entries) != 1 or not isinstance(entries[0], dict):
-            return None
-        entry = entries[0]
         host = entry.get("adb_host_ip")
         port = entry.get("adb_port")
-        index = entry.get("index")
-        if host not in (None, "", "127.0.0.1"):
+        if not isinstance(host, str):
+            return None
+        try:
+            address = ipaddress.ip_address(host.strip())
+        except ValueError:
+            return None
+        if not address.is_loopback:
             return None
         if isinstance(port, bool) or not isinstance(port, (str, int)):
             return None
         port_text = str(port)
         if not port_text.isdecimal() or not 1 <= int(port_text) <= 65535:
-            return None
-        if isinstance(index, bool) or not isinstance(index, (str, int)):
             return None
         if (
             entry.get("is_android_started") is not True
@@ -283,7 +323,8 @@ class AdbTargetDiscovery:
             or entry.get("player_state") != "start_finished"
         ):
             return None
-        return f"127.0.0.1:{port_text}"
+        normalized_host = f"[{address}]" if address.version == 6 else str(address)
+        return f"{normalized_host}:{port_text}"
 
     def _run_read_only_command(
         self, command: Sequence[str]
